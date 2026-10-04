@@ -231,6 +231,14 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[
         total = int(cfg.get("wake.max_context_chars", 60000))
         if context_chars > total:
             summary["context_over_budget"] = context_chars
+            if cfg.get("wake.over_budget", "defer") != "proceed":
+                # Not even one conversation fits: no model run over budget unless the user opted
+                # in. Claims are undone (not attempts); health reports and alerts it.
+                for batch_id in claimed:
+                    batching.unclaim(conn, batch_id, run_id)
+                summary["deferred_over_budget"] = total
+                runs.finish(conn, run_id, status="idle", summary=summary)
+                return '{"wakeAgent": false}', False
         now = clock.iso()
         with tx(conn):
             claim_followups(conn, run_id, followups)

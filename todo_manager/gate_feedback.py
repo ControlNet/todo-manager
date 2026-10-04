@@ -18,7 +18,7 @@ import sqlite3
 from datetime import timedelta
 from typing import Any, Callable
 
-from . import clock, delegation, effects, feedback, health, i18n, outbox, runs
+from . import clock, delegation, effects, feedback, feedback_flow, health, i18n, outbox, runs
 from .config import Config
 from .db import tx
 from .notion import schema
@@ -139,6 +139,19 @@ def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanba
     return summary, problems
 
 
+def fit_context(conn: sqlite3.Connection, cfg: Config, run_id: str,
+                items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """The oldest items whose rendered context fits ``feedback.max_context_chars`` (the rest
+    stays pending for the next run), with that size. When not even the first fits, it is
+    returned alone with its (over budget) size for the caller to defer or, if opted in, run."""
+    budget = int(cfg.get("feedback.max_context_chars", 60000))
+    for n in range(len(items), 0, -1):
+        size = len(feedback_flow.render_context(conn, cfg, run_id, items[:n]))
+        if size <= budget or n == 1:
+            return items[:n], size
+    return [], 0
+
+
 def run_gate(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanban: Any | None,
              notifier: Any | None) -> tuple[str, bool]:
     run_id = runs.start(conn, "feedback")
@@ -150,6 +163,15 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanba
         if not items:
             runs.finish(conn, run_id, status="idle", summary=summary)
             return '{"wakeAgent": false}', False
+        items, context_chars = fit_context(conn, cfg, run_id, items)
+        summary["context_chars"] = context_chars
+        budget = int(cfg.get("feedback.max_context_chars", 60000))
+        if context_chars > budget:
+            summary["context_over_budget"] = context_chars
+            if cfg.get("feedback.over_budget", "defer") != "proceed":
+                summary["deferred_over_budget"] = budget   # nothing claimed; health reports and alerts it
+                runs.finish(conn, run_id, status="idle", summary=summary)
+                return '{"wakeAgent": false}', False
         ids = [f["id"] for f in items]
         feedback.claim(conn, run_id, ids)
         kinds: dict[str, int] = {}

@@ -122,8 +122,11 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
         last = conn.execute("SELECT * FROM runs WHERE entry=? ORDER BY started_at DESC LIMIT 1", (entry,)).fetchone()
         woke = conn.execute("SELECT * FROM runs WHERE entry=? AND wake=1 ORDER BY started_at DESC LIMIT 1",
                             (entry,)).fetchone()
+        deferred = loads(last["summary"], {}) if last else {}
         out["runs"][entry] = {
-            "last": dict(id=last["id"], at=last["started_at"], status=last["status"], error=last["error"]) if last else None,
+            "last": dict(id=last["id"], at=last["started_at"], status=last["status"], error=last["error"],
+                         deferred_over_budget=[deferred["context_over_budget"], deferred["deferred_over_budget"]]
+                         if deferred.get("deferred_over_budget") else None) if last else None,
             "last_wake": dict(id=woke["id"], at=woke["started_at"], completed=bool(woke["agent_completed_at"]),
                               over_budget=loads(woke["summary"], {}).get("context_over_budget"))
             if woke else None}
@@ -200,6 +203,12 @@ def problem_items(rep: dict[str, Any], cfg: Config) -> list[tuple[str, str]]:
             add(f"gate_idle:{entry}", f"{entry} gate has not run for {round(age)} min")
         if last["status"] == "error":
             add(f"gate_error:{entry}", f"{entry} gate error: {last['error']}")
+        if last.get("deferred_over_budget"):
+            size, budget = last["deferred_over_budget"]
+            setting = "wake.max_context_chars" if entry == "intake" else "feedback.max_context_chars"
+            add(f"over_budget:{entry}", f"{entry} run deferred: its context is over budget ({size} > {budget} chars"
+                f" even for one item): fewer open tasks/rules, a larger {setting}, or"
+                f" {setting.split('.')[0]}.over_budget = \"proceed\"")
         woke = info["last_wake"]
         if woke and woke.get("over_budget"):
             add(f"over_budget:{entry}", f"{entry} run {woke['id']} context is over budget ({woke['over_budget']} chars):"

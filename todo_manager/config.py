@@ -122,6 +122,11 @@ DEFAULTS: dict[str, Any] = {
         "max_items_per_run": 20,
         "stale_claim_minutes": 60,
         "max_attempts": 3,
+        # The rendered feedback context of one run (fixed part plus the claimed items); the
+        # oldest items that fit are claimed, the rest waits. Over budget even for one item:
+        # "defer" (no model run; health alerts) or "proceed" (run over budget, reported).
+        "max_context_chars": 60000,
+        "over_budget": "defer",
     },
     "wake": {
         # Upper bounds for one intake model run; the rest waits for the next run. The whole
@@ -131,6 +136,7 @@ DEFAULTS: dict[str, Any] = {
         # max_questions_per_run of them, everything else low-value or unclear is ignored.
         "max_items_per_run": 60,
         "max_context_chars": 60000,
+        "over_budget": "defer",        # or "proceed": wake even when one conversation does not fit
         "max_evidence_chars": 40000,
         "max_questions_per_run": 3,
     },

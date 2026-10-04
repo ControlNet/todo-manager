@@ -154,6 +154,7 @@ class BudgetTests(Base):
 
     def test_an_oversize_fixed_context_is_reported_not_silent(self):
         self.cfg.data["wake"]["max_context_chars"] = 3000   # smaller than the decisions format alone
+        self.cfg.data["wake"]["over_budget"] = "proceed"     # opted in; the default defers (test_context_budget)
         self.gmail.push(mail("m1", "t1", "Can you send the report?"))
         self.gate()
         clock.advance(minutes=16)
