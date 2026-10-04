@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import clock, config, db, delegation, feedback, feedback_flow, health, i18n, rules, store
+from . import config, db, delegation, feedback, feedback_flow, health, i18n, rules, store
 from .db import dumps, loads
 
 EXIT_INVALID = 2

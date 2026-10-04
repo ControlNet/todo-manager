@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field, replace
-from datetime import timedelta
 from typing import Any, Iterable
 
 from .. import clock, ids
@@ -150,29 +149,21 @@ def persist_fetch(conn: sqlite3.Connection, source: str, result: FetchResult) ->
     return stats
 
 
-GITHUB_COPY_WINDOW = timedelta(minutes=3)
-
-
-def _github_actor(author: str | None, meta: dict[str, Any]) -> str:
-    """GitHub login behind an item: the API author, or a notification mail's X-GitHub-Sender."""
-    if meta.get("github_sender"):
-        return str(meta["github_sender"]).lower()
-    author = author or ""
-    return "" if "@" in author or "<" in author else author.lower()
-
-
 def _copy_of_github_event(conn: sqlite3.Connection, item: Item) -> bool:
-    """The same GitHub event read through the API and as notification mail (same matter, same
-    GitHub user, within a few minutes): the later copy is kept for audit but not batched."""
-    actor = _github_actor(item.author, item.meta)
-    at = clock.parse(item.occurred_at)
-    if not item.conversation_key.startswith("github:") or not actor or at is None:
+    """The same GitHub event (``github_event``: opened, comment/review/review_comment/event id)
+    of the same matter already read as news through the other channel (API or notification
+    mail): the later copy is kept for audit but not batched. The matter key only groups; an
+    item whose event is unknown is never treated as a copy."""
+    event = item.meta.get("github_event")
+    if not item.conversation_key.startswith("github:") or not event:
         return False
-    rows = conn.execute(
-        "SELECT author, meta FROM source_items WHERE conversation_key=? AND source != ? AND state != 'superseded'"
-        " AND occurred_at BETWEEN ? AND ?", (item.conversation_key, item.source, clock.iso(at - GITHUB_COPY_WINDOW),
-                                            clock.iso(at + GITHUB_COPY_WINDOW))).fetchall()
-    return any(_github_actor(r["author"], loads(r["meta"], {})) == actor for r in rows)
+    rows = conn.execute("SELECT meta FROM source_items WHERE conversation_key=? AND source != ?"
+                        " AND state != 'superseded'", (item.conversation_key, item.source)).fetchall()
+    for r in rows:
+        meta = loads(r["meta"], {})
+        if meta.get("github_event") == event and meta.get("route") == "batch":
+            return True
+    return False
 
 
 def _open_task_matter(conn: sqlite3.Connection, item: Item) -> bool:

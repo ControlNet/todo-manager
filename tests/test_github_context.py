@@ -7,13 +7,17 @@ notifications, single issue/PR objects). It is not the real service.
 """
 
 import re
+from dataclasses import replace
 from datetime import timedelta
 
 from todo_manager import clock, gate_intake, intake
 from todo_manager.db import rules_version
 from todo_manager.sources.base import FetchResult, Item, persist_fetch
 from todo_manager.sources.github import GitHubNotificationSource, GitHubRepoSource
+from todo_manager.sources import registry
+from todo_manager.sources.gmail import GmailSource
 from tests.helpers import WorkspaceCase
+from tests.test_sources import gmail_message
 from tests.test_intake import run_id_of
 
 REPO = "octo/repo"
@@ -245,12 +249,14 @@ class MailApiDuplicateTests(WorkspaceCase):
 
     def api_comment(self, ext, author, at):
         return Item(source="github", account=REPO, external_id=ext, kind="comment", conversation_key=self.KEY,
-                    thread_key=self.KEY, occurred_at=at, author=author, body="Could you rebase?")
+                    thread_key=self.KEY, occurred_at=at, author=author, body="Could you rebase?",
+                    meta={"github_event": ext})
 
-    def mail(self, ext, sender, at):
+    def mail(self, ext, sender, at, event=None):
         return Item(source="gmail", account="primary", external_id=ext, conversation_key=self.KEY,
                     thread_key=self.KEY, occurred_at=at, author="Alice Chen <notifications@github.com>",
-                    body="Could you rebase?\n\nReply to this email directly", meta={"github_sender": sender})
+                    body="Could you rebase?\n\nReply to this email directly",
+                    meta={"github_sender": sender, "github_event": event})
 
     def state(self, ext):
         return self.conn.execute("SELECT state FROM source_items WHERE external_id=?", (ext,)).fetchone()[0]
@@ -259,17 +265,80 @@ class MailApiDuplicateTests(WorkspaceCase):
         at = clock.iso()
         persist_fetch(self.conn, "github", FetchResult(scope="repo:octo/repo", items=[self.api_comment("comment:5", "alice", at)], cursor="c"))
         later = clock.iso(clock.now() + timedelta(seconds=40))
-        persist_fetch(self.conn, "gmail", FetchResult(scope="mailbox:primary", items=[self.mail("m1", "alice", later)], cursor="c"))
+        persist_fetch(self.conn, "gmail", FetchResult(scope="mailbox:primary", items=[self.mail("m1", "alice", later, "comment:5")], cursor="c"))
         self.assertEqual((self.state("comment:5"), self.state("m1")), ("batched", "superseded"))
         # Mail first, API later: the API item is the duplicate.
-        persist_fetch(self.conn, "gmail", FetchResult(scope="mailbox:primary", items=[self.mail("m2", "bob", at)], cursor="c"))
+        persist_fetch(self.conn, "gmail", FetchResult(scope="mailbox:primary", items=[self.mail("m2", "bob", at, "comment:6")], cursor="c"))
         persist_fetch(self.conn, "github", FetchResult(scope="repo:octo/repo", items=[self.api_comment("comment:6", "bob", later)], cursor="c"))
         self.assertEqual((self.state("m2"), self.state("comment:6")), ("batched", "superseded"))
 
-    def test_different_people_or_times_are_not_duplicates(self):
+    def test_different_events_are_not_duplicates(self):
         at = clock.iso()
         persist_fetch(self.conn, "github", FetchResult(scope="repo:octo/repo", items=[self.api_comment("comment:5", "alice", at)], cursor="c"))
         persist_fetch(self.conn, "gmail", FetchResult(scope="mailbox:primary", items=[
-            self.mail("m1", "carol", at),
-            self.mail("m2", "alice", clock.iso(clock.now() + timedelta(minutes=30)))], cursor="c"))
-        self.assertEqual((self.state("m1"), self.state("m2")), ("batched", "batched"))
+            self.mail("m1", "carol", at, "comment:8"),
+            self.mail("m2", "alice", clock.iso(clock.now() + timedelta(seconds=30)), "comment:9")], cursor="c"))
+        self.assertEqual((self.state("m1"), self.state("m2")), ("batched", "batched"),
+                         "the same person commenting twice within minutes is two events")
+
+    def test_a_mail_whose_event_is_unknown_is_kept(self):
+        at = clock.iso()
+        persist_fetch(self.conn, "github", FetchResult(scope="repo:octo/repo", items=[self.api_comment("comment:5", "alice", at)], cursor="c"))
+        persist_fetch(self.conn, "gmail", FetchResult(scope="mailbox:primary", items=[self.mail("m1", "alice", at)], cursor="c"))
+        self.assertEqual(self.state("m1"), "batched", "sameness not confirmed: the evidence is kept")
+
+    def test_a_context_copy_does_not_swallow_the_mail(self):
+        at = clock.iso()
+        context = replace(self.api_comment("comment:5", "alice", at), route="context")
+        persist_fetch(self.conn, "github", FetchResult(scope="notifications", items=[context], cursor="c"))
+        persist_fetch(self.conn, "gmail", FetchResult(scope="mailbox:primary", items=[self.mail("m1", "alice", at, "comment:5")], cursor="c"))
+        self.assertEqual(self.state("m1"), "batched")
+
+
+class TrackedRepoMailTests(WorkspaceCase):
+    """B10 reproduction: mail about a repo that is also read through the API was dropped at
+    normalisation ("the API carries it"), so an event the API run missed (failed read, an event
+    kind it does not list) was lost. Now the mail is kept unless the same event is known."""
+
+    def gmail(self):
+        """The mailbox adapter as production wiring builds it while octo/repo is read through the API."""
+        self.cfg.data["email"].update({"enabled": True, "accounts": [
+            {"name": "primary", "address": "me@example.edu", "token_command": ["true"]}]})
+        self.cfg.data["github"].update({"enabled": True, "repos": [REPO], "notifications": False})
+        [source] = [a for a in registry.conversation_sources(self.cfg) if isinstance(a, GmailSource)]
+        return source
+
+    def mail(self, msgid, body="Looks good, one nit.", sender="carol"):
+        return gmail_message("m1", "t1", sender="Carol <notifications@github.com>", body=body, extra=[
+            {"name": "Message-ID", "value": msgid}, {"name": "X-GitHub-Sender", "value": sender}])
+
+    def test_tracked_repo_mail_is_kept_when_the_api_did_not_deliver_the_event(self):
+        item = self.gmail().normalize(self.mail("<octo/repo/pull/7/review/555@github.com>"))
+        persist_fetch(self.conn, "gmail", FetchResult(scope="mailbox:primary", items=[item], cursor="c"))
+        state = self.conn.execute("SELECT state FROM source_items WHERE external_id='m1'").fetchone()[0]
+        self.assertEqual(state, "batched")
+
+    def test_event_identity_from_message_id_and_link(self):
+        cases = {
+            "<octo/repo/issues/7@github.com>": ("", "opened"),
+            "<octo/repo/pull/7/c123@github.com>": ("", "comment:123"),
+            "<octo/repo/issues/7/123@github.com>": ("", "comment:123"),
+            "<octo/repo/pull/7/review/555@github.com>": ("", "review:555"),
+            "<octo/repo/issues/7/issue_event/42@github.com>": ("", "event:42"),
+            "<octo/repo/pull/7/push/9@github.com>": ("", None),
+            "<octo/repo/pull/7/x@github.com>": (
+                "nit\n—\nReply to this email directly, view it on GitHub:\n"
+                "https://github.com/octo/repo/pull/7#discussion_r777", "review_comment:777"),
+        }
+        for msgid, (body, event) in cases.items():
+            item = self.gmail().normalize(self.mail(msgid, body=body or "text"))
+            self.assertEqual(item.meta.get("github_event"), event, msgid)
+
+    def test_api_items_carry_the_same_identity(self):
+        api = FakeGitHubApi()
+        api.issue(7, title="Leak", body="body", created=ago(minutes=5))
+        api.comment(7, 123, "carol", "please rebase", ago(minutes=2))
+        api.event(7, 42, "closed", "carol", ago(minutes=1))
+        items = GitHubRepoSource(api, REPO, ["me-gh"], []).fetch(ago(hours=1)).items
+        events = {i.meta.get("github_event") for i in items if i.route == "batch"}
+        self.assertTrue({"opened", "comment:123", "event:42"} <= events, events)

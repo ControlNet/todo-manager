@@ -48,6 +48,19 @@ REACTIVATE_DAYS = 14       # a matter idle this long gets its context again
 SEEN_MAX = 1000            # matters remembered per source cursor
 
 
+def event_identity(external_id: str, kind: str) -> str | None:
+    """The GitHub event an item announces (shared with notification mail, see gmail.github_event).
+    Edits are not events a mail announces."""
+    if kind == "edit":
+        return None
+    prefix, _, number = external_id.partition(":")
+    if kind == "opened":
+        return "opened"
+    if prefix in ("comment", "review", "review_comment", "event"):
+        return f"{prefix}:{number}"
+    return None
+
+
 def gh_token() -> str:
     try:
         out = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=20, check=False)
@@ -190,7 +203,8 @@ class GitHubRepoSource:
         return Item(source="github", account=self.repo.lower(), external_id=external_id, version=version, kind=kind,
                     conversation_key=key, thread_key=key, occurred_at=_gh_time(at), author=login,
                     author_is_me=login.lower() in self.me, title=title, url=url, body=body or "",
-                    route="context" if is_bot else "batch", meta={"number": number, **(meta or {})})
+                    route="context" if is_bot else "batch",
+                    meta={"number": number, **(meta or {}), "github_event": event_identity(external_id, kind)})
 
     def fetch(self, cursor: str | None, last_success_at: str | None = None) -> FetchResult:
         started = clock.now()
@@ -339,6 +353,9 @@ class GitHubNotificationSource:
                            " no access; its content is unknown]" for u in unavailable)
             if unavailable:
                 meta["unavailable"] = unavailable
+            if latest_url and latest is not thread and latest:
+                kind_of = "review_comment" if "/pulls/comments/" in latest_url else "comment"
+                meta["github_event"] = f"{kind_of}:{latest.get('id')}"
             items.append(Item(source="github", account=repo, external_id=f"notification:{note['id']}",
                               version=note.get("updated_at", ""), kind="notification", conversation_key=key,
                               thread_key=key, occurred_at=_gh_time(note.get("updated_at", clock.iso())),
@@ -371,7 +388,7 @@ class GitHubNotificationSource:
             return Item(source="github", account=repo, external_id=external_id, version=version, kind=kind_,
                         conversation_key=key, thread_key=key, occurred_at=_gh_time(at), author=login or None,
                         author_is_me=login.lower() in self.me, title=title, url=url, body=body or "", route=route,
-                        meta=meta)
+                        meta={**meta, "github_event": event_identity(external_id, kind_)})
 
         total = int(thread.get("comments") or 0)
         exclude = {latest_id} if latest_id else set()

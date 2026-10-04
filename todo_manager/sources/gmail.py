@@ -9,7 +9,11 @@
   window since the last success minus an overlap, capturing the profile historyId first.
 * Large backlogs are worked through a persisted thread queue; nothing is silently capped.
 * GitHub notification mails are keyed to the same matter as the GitHub API source
-  (``github:owner/repo#n``) and superseded when that repo is tracked through the API.
+  (``github:owner/repo#n``, matter grouping) and carry the GitHub event they announce
+  (``github_event``: opened, comment:<id>, review:<id>, review_comment:<id>, event:<id>) when
+  the Message-ID or the "view it on GitHub" link names it. A mail is a duplicate only of the
+  same event read through the API (decided when stored); without a known event it is kept.
+  The formats follow GitHub's conventions and have not been checked against this mailbox.
 
 Access tokens come from an existing local helper command (``token_command``), e.g. the
 Hermes ``himalaya-google-token`` script; no new credentials are created or stored.
@@ -34,7 +38,28 @@ from ..net import HttpError, HttpTimeout, request_json
 from .base import FetchResult, Item, SourceError
 
 API = "https://gmail.googleapis.com/gmail/v1/users/me"
-GITHUB_MSGID = re.compile(r"<([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(?:issues|pull)/(\d+)", re.I)
+GITHUB_MSGID = re.compile(r"<([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(?:issues|pull)/(\d+)(?:/([^@>]*))?@", re.I)
+MSGID_EVENTS = ((re.compile(r"c?(\d+)"), "comment"), (re.compile(r"review/(\d+)"), "review"),
+                (re.compile(r"issue_event/(\d+)"), "event"))
+LINK_EVENTS = {"issuecomment-": "comment", "pullrequestreview-": "review", "discussion_r": "review_comment",
+               "event-": "event"}
+
+
+def github_event(msgid_suffix: str | None, body: str, repo: str, number: str) -> str | None:
+    """The GitHub event a notification mail announces, or None when it cannot be told."""
+    link = re.compile(rf"https://github\.com/{re.escape(repo)}/(?:issues|pull)/{number}"
+                      rf"#({'|'.join(map(re.escape, LINK_EVENTS))})(\d+)", re.I)
+    found = link.findall(body or "")
+    if found:
+        anchor, event_id = found[-1]          # the "view it on GitHub" link comes last
+        return f"{LINK_EVENTS[anchor.lower()]}:{event_id}"
+    if not msgid_suffix:
+        return "opened"
+    for pattern, kind in MSGID_EVENTS:
+        match = pattern.fullmatch(msgid_suffix)
+        if match:
+            return f"{kind}:{match.group(1)}"
+    return None
 # The whole body is stored (the model context clips it at render time); this cap only guards
 # against pathological messages and is recorded on the item when it applies.
 MAX_BODY_CHARS = 2_000_000
@@ -142,7 +167,7 @@ class GmailSource:
     def __init__(self, *, account: str, address: str, token: Callable[[], str], my_addresses: list[str],
                  query: str = "-in:spam -in:trash -in:chats", page_size: int = 100,
                  overlap_minutes: int = 120, initial_lookback_days: int = 14, max_threads_per_run: int = 150,
-                 github_api_repos: set[str] | None = None, http: Callable[..., Any] = request_json):
+                 http: Callable[..., Any] = request_json):
         self.account = account
         self.address = address
         self.token = token
@@ -152,7 +177,6 @@ class GmailSource:
         self.overlap = overlap_minutes
         self.lookback_days = initial_lookback_days
         self.max_threads = max_threads_per_run
-        self.github_api_repos = {r.lower() for r in (github_api_repos or set())}
         self.http = http
 
     @property
@@ -306,13 +330,12 @@ class GmailSource:
         conversation = f"gmail:{self.account}:{thread_id}"
         thread_key = conversation
         route = "batch"
-        github_ref = None
+        github_ref = event = None
         match = GITHUB_MSGID.search(headers.get("message-id", "")) if "github.com" in sender else None
         if match:
             github_ref = f"{match.group(1)}/{match.group(2)}#{match.group(3)}".lower()
             thread_key = conversation = f"github:{github_ref}"
-            if f"{match.group(1)}/{match.group(2)}".lower() in self.github_api_repos:
-                route = "superseded"  # the GitHub API source carries this event
+            event = github_event(match.group(4), body, f"{match.group(1)}/{match.group(2)}", match.group(3))
         bulk = bool(labels & BULK_LABELS) or "list-unsubscribe" in headers or \
             headers.get("precedence", "").lower() in ("bulk", "list", "junk")
         return Item(
@@ -325,6 +348,7 @@ class GmailSource:
             meta={"to": recipients[:20], "labels": sorted(labels), "attachments": attachments,
                   "bulk_hint": bulk and not author_is_me, "github_ref": github_ref,
                   "github_sender": headers.get("x-github-sender") if github_ref else None,
+                  "github_event": event,
                   "gmail_thread": thread_id, "rfc_message_id": headers.get("message-id"),
                   "in_reply_to": headers.get("in-reply-to"), **notes},
         )

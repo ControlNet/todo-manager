@@ -15,15 +15,13 @@ def conversation_sources(cfg: Config) -> list[Any]:
     email = cfg.section("email")
     if email.get("enabled"):
         from .gmail import GmailSource, TokenProvider
-        github_api = set(cfg.get("github.repos", [])) if cfg.get("github.enabled") else set()
         for account in email.get("accounts", []):
             adapters.append(GmailSource(
                 account=account["name"], address=account["address"],
                 token=TokenProvider(account["token_command"]), my_addresses=ident.get("emails", []),
                 query=email.get("query", ""), page_size=int(email.get("page_size", 100)),
                 overlap_minutes=int(email.get("overlap_minutes", 120)),
-                initial_lookback_days=int(email.get("initial_lookback_days", 14)),
-                github_api_repos=github_api))
+                initial_lookback_days=int(email.get("initial_lookback_days", 14))))
     gh = cfg.section("github")
     if gh.get("enabled"):
         client = GitHubClient()
