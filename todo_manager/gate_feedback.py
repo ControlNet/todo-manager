@@ -18,7 +18,7 @@ import sqlite3
 from datetime import timedelta
 from typing import Any, Callable
 
-from . import clock, delegation, effects, feedback, outbox, runs
+from . import clock, delegation, effects, feedback, health, outbox, runs
 from .config import Config
 from .db import tx
 from .notion import schema
@@ -81,38 +81,46 @@ def freshness_sections(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
     return {"extra": [("状态", status), *lines, ("最近确认", f"{local:%Y-%m-%d %H}:00")]}
 
 
-def run_gate(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanban: Any | None,
-             notifier: Any | None) -> tuple[str, bool]:
-    """``notion``: a NotionSync (or None when not configured); ``kanban``: a Kanban client."""
-    run_id = runs.start(conn, "feedback")
+def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanban: Any | None,
+             notifier: Any | None) -> tuple[dict[str, Any], list[str]]:
+    """Steps 1-4 (no model). ``notion``: a NotionSync or None; ``kanban``: a Kanban client or None."""
     summary: dict[str, Any] = {}
     problems: list[str] = []
+    _step(summary, problems, "claims", lambda: fail_exhausted_claims(conn, cfg))
+    if notion is not None:
+        _step(summary, problems, "pull_projects", lambda: notion.pull("project"))
+        _step(summary, problems, "pull_tasks", lambda: notion.pull("task"))
+        _step(summary, problems, "comments", lambda: notion.poll_comments(
+            int(cfg.get("notion.cold_comment_pages_per_run", 30))))
+    if kanban is not None:
+        _step(summary, problems, "kanban_messages", lambda: delegation.send_messages(conn, cfg, kanban))
+        _step(summary, problems, "kanban_submit", lambda: delegation.submit_pending(conn, cfg, kanban))
+        _step(summary, problems, "kanban_cards", lambda: delegation.sync_cards(conn, cfg, kanban))
+    _step(summary, problems, "alerts", lambda: health.raise_alerts(conn, cfg))
+    handlers: dict[tuple[str, str], Any] = {}
+    if notion is not None:
+        _step(summary, problems, "dirty", notion.enqueue_dirty)
+        handlers.update(notion.handlers())
+    if notifier is not None:
+        handlers[("matrix", "notify")] = notifier
+    _step(summary, problems, "outbox", lambda: outbox.process(conn, handlers))
+    if notion is not None:
+        _step(summary, problems, "home", lambda: notion.sync_home(freshness_sections(conn, cfg)))
+        if notion.problems:
+            summary["notion_problems"] = notion.problems[:20]
+    if problems:
+        summary["problems"] = problems
+    return summary, problems
+
+
+def run_gate(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanban: Any | None,
+             notifier: Any | None) -> tuple[str, bool]:
+    run_id = runs.start(conn, "feedback")
+    summary: dict[str, Any] = {}
     try:
-        _step(summary, problems, "claims", lambda: fail_exhausted_claims(conn, cfg))
-        if notion is not None:
-            _step(summary, problems, "pull_projects", lambda: notion.pull("project"))
-            _step(summary, problems, "pull_tasks", lambda: notion.pull("task"))
-            _step(summary, problems, "comments", lambda: notion.poll_comments(
-                int(cfg.get("notion.cold_comment_pages_per_run", 30))))
-        if kanban is not None:
-            _step(summary, problems, "kanban_messages", lambda: delegation.send_messages(conn, cfg, kanban))
-            _step(summary, problems, "kanban_submit", lambda: delegation.submit_pending(conn, cfg, kanban))
-            _step(summary, problems, "kanban_cards", lambda: delegation.sync_cards(conn, cfg, kanban))
-        handlers: dict[tuple[str, str], Any] = {}
-        if notion is not None:
-            _step(summary, problems, "dirty", notion.enqueue_dirty)
-            handlers.update(notion.handlers())
-        if notifier is not None:
-            handlers[("matrix", "notify")] = notifier
-        _step(summary, problems, "outbox", lambda: outbox.process(conn, handlers))
-        if notion is not None:
-            _step(summary, problems, "home", lambda: notion.sync_home(freshness_sections(conn, cfg)))
-            if notion.problems:
-                summary["notion_problems"] = notion.problems[:20]
+        summary, _ = sync_all(conn, cfg, notion=notion, kanban=kanban, notifier=notifier)
         items = feedback.pending(conn, stale_minutes=int(cfg.get("feedback.stale_claim_minutes", 60)))
         items = items[: int(cfg.get("feedback.max_items_per_run", 20))]
-        if problems:
-            summary["problems"] = problems
         if not items:
             runs.finish(conn, run_id, status="idle", summary=summary)
             return '{"wakeAgent": false}', False

@@ -28,7 +28,7 @@ import sqlite3
 from datetime import timedelta
 from typing import Any
 
-from . import clock, delegation, effects, feedback, rules, store
+from . import clock, delegation, effects, feedback, prompts, rules, store
 from .config import Config
 from .db import dumps, loads, rules_version, tx
 
@@ -152,10 +152,8 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, items: li
             out.append("Scope: global (home page). Long-term preferences become rules only when stated as such.")
         out.extend(_thread(conn, fb))
     out.append("\n## Output")
-    out.append(f"Write JSON {{\"run_id\": \"{run_id}\", \"rules_version\": {rv}, \"items\": [{{\"feedback\": <id>,"
-               " \"outcome\": applied|clarify|ignored, \"ops\": [...], \"reply\": <short Chinese reply or null>,"
-               " \"reason\": <why>}]}} covering EVERY feedback id above (see skill todo-manager, Feedback"
-               f" decisions), then run: todo-manager feedback apply {run_id} --file <path>")
+    out.append(f"run_id={run_id} rules_version={rv}")
+    out.append(prompts.load("feedback_decisions.md"))
     return "\n".join(out)
 
 

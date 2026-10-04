@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "todo-manager"
+version = "0.1.0"
+description = "Personal todo manager: Notion as the view, SQLite as the source of truth, Hermes as the executor"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+todo-manager = "todo_manager.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["todo_manager*"]
+
+[tool.setuptools.package-data]
+todo_manager = ["prompts/*.md", "hermes_assets/skill/*.md", "hermes_assets/cron/*.md"]

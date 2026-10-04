@@ -18,7 +18,7 @@ import re
 import sqlite3
 from typing import Any
 
-from . import clock, rules, store
+from . import clock, prompts, rules, store
 from .config import Config
 from .db import dumps, loads, rules_version, tx
 from .sources.base import conversation_history, item_body
@@ -207,8 +207,8 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, manifest:
             out.append(f"- {c['external_id'][:8]} {c.get('author') or ''}: {c.get('title') or ''}")
 
     out.append("\n## Output")
-    out.append(f"Write the decisions JSON (see skill 'todo-manager', section Intake decisions) with run_id={run_id}"
-               f" and rules_version={rv}, then run: todo-manager intake apply {run_id} --file <path>")
+    out.append(f"run_id={run_id} rules_version={rv}")
+    out.append(prompts.load("intake_decisions.md"))
     return "\n".join(out)
 
 
