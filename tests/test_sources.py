@@ -395,11 +395,74 @@ class DiscoveringStub(StubAdapter):
         super().__init__(*args, **kwargs)
         self.registry = registry
 
+    @staticmethod
+    def conversation_prefix(scope):
+        return f"slack:{scope.partition(':')[2]}"
+
     def expand(self, cursor):
         return [self.registry[scope] for scope in json.loads(cursor or "[]")]
 
 
+class ThrottledStub(StubAdapter):
+    """TEST DOUBLE: Slack answers 429 once a run has made ``budget`` calls (shared counter)."""
+
+    def __init__(self, name, scope, counter):
+        super().__init__(name, scope)
+        self.counter = counter
+
+    def fetch(self, cursor, last_success_at=None):
+        self.counter["calls"] += 1
+        if self.counter["calls"] > self.counter["budget"]:
+            raise SourceError("HTTP 429", retry_after=30)
+        return super().fetch(cursor, last_success_at)
+
+
 class FetchAllTests(WorkspaceCase):
+    def test_a_rate_limited_tail_is_read_first_next_time(self):
+        counter = {"calls": 0, "budget": 3}       # the directory call plus two conversations per run
+        convs = {f"conversation:C{i}": ThrottledStub("slack", f"conversation:C{i}", counter) for i in range(1, 6)}
+        directory = DiscoveringStub("slack", "directory", children=sorted(convs), registry=convs)
+        directory.fetch = lambda cursor, last=None, d=directory: (counter.__setitem__("calls", counter["calls"] + 1),
+                                                                 StubAdapter.fetch(d, cursor, last))[1]
+        for _ in range(3):
+            counter["calls"] = 0
+            gate_intake.fetch_all(self.conn, [directory])
+            clock.advance(minutes=5)
+        self.assertTrue(all(c.calls >= 1 for c in convs.values()),
+                        {k: c.calls for k, c in convs.items()})
+
+    def test_an_explicit_conversation_is_read_even_when_discovery_drops_it(self):
+        c1, d1 = StubAdapter("slack", "conversation:C1"), StubAdapter("slack", "conversation:D1")
+        registry = {"conversation:C1": c1, "conversation:D1": d1}
+        directory = DiscoveringStub("slack", "directory", children=["conversation:C1", "conversation:D1"],
+                                    registry=registry)
+        gate_intake.fetch_all(self.conn, [c1, directory])
+        self.add_items(Item(source="slack", account="T1", external_id="C1:1", conversation_key="slack:C1",
+                            occurred_at=clock.iso(), author="U2", body="explicitly configured"))
+        directory.children = ["conversation:D1"]          # e.g. the channel matches slack.exclude
+        clock.advance(minutes=5)
+        gate_intake.fetch_all(self.conn, [c1, directory])
+        self.assertNotIn("retired", get_cursor(self.conn, "slack", "conversation:C1")["meta"])
+        self.assertEqual(self.conn.execute("SELECT state FROM batches WHERE conversation_key='slack:C1'").fetchone()[0],
+                         "accumulating", "explicit configuration wins over the blacklist")
+
+    def test_pending_data_of_a_blacklisted_conversation_is_withdrawn_visibly(self):
+        c2, d1 = StubAdapter("slack", "conversation:C2"), StubAdapter("slack", "conversation:D1")
+        registry = {"conversation:C2": c2, "conversation:D1": d1}
+        directory = DiscoveringStub("slack", "directory", children=["conversation:C2", "conversation:D1"],
+                                    registry=registry)
+        gate_intake.fetch_all(self.conn, [directory])
+        self.add_items(Item(source="slack", account="T1", external_id="C2:1", conversation_key="slack:C2:1.0",
+                            occurred_at=clock.iso(), author="bot", body="paper alert"),
+                       Item(source="slack", account="T1", external_id="D1:1", conversation_key="slack:D1",
+                            occurred_at=clock.iso(), author="U2", body="can you review?"))
+        directory.children = ["conversation:D1"]
+        clock.advance(minutes=5)
+        report = gate_intake.fetch_all(self.conn, [directory])
+        self.assertEqual(report["slack:conversation:C2"], {"retired": True, "withdrawn_items": 1})
+        states = dict(self.conn.execute("SELECT external_id, state FROM source_items").fetchall())
+        self.assertEqual(states, {"C2:1": "superseded", "D1:1": "batched"})
+
     def test_discovered_scopes_are_read_once_and_survive_a_failed_listing(self):
         c1, d1 = StubAdapter("slack", "conversation:C1"), StubAdapter("slack", "conversation:D1")
         registry = {"conversation:C1": c1, "conversation:D1": d1}

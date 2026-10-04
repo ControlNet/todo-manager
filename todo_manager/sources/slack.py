@@ -127,6 +127,11 @@ class SlackDirectory(SlackApi):
         return FetchResult(scope=self.scope, items=[], cursor=json.dumps({"conversations": found}),
                            meta={"conversations": len(found)})
 
+    @staticmethod
+    def conversation_prefix(scope: str) -> str:
+        """Conversation keys of a discovered scope (``slack:<id>`` and its threads)."""
+        return f"slack:{scope.partition(':')[2]}"
+
     def expand(self, cursor: str | None) -> list["SlackSource"]:
         state = json.loads(cursor) if cursor else {}
         return [self.make(c["id"], peer=c.get("peer"), title=c.get("title")) for c in state.get("conversations", [])]

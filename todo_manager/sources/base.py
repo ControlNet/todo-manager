@@ -90,13 +90,33 @@ def record_fetch_error(conn: sqlite3.Connection, source: str, scope: str, error:
             (source, scope, now, error[:1000]))
 
 
-def retire_scopes(conn: sqlite3.Connection, source: str, scopes: set[str]) -> None:
+def retire_scopes(conn: sqlite3.Connection, source: str, scopes: set[str],
+                  prefix_of: Any = None) -> dict[str, int]:
     """Scopes that left a discovered list (e.g. a blacklisted channel): keep the cursor, stop
-    reporting it as stale. Reading the scope again clears the mark (``persist_fetch`` replaces meta)."""
+    reporting it as stale. Reading the scope again clears the mark (``persist_fetch`` replaces meta).
+    With ``prefix_of(scope)`` (its conversation key prefix), batches not yet given to a run are
+    withdrawn: the batch fails with the reason, its items become ``superseded`` (kept, not
+    analysed). Returns withdrawn item counts per scope."""
+    withdrawn: dict[str, int] = {}
     with tx(conn):
         for scope in sorted(scopes):
             conn.execute("UPDATE cursors SET meta=json_set(COALESCE(meta, '{}'), '$.retired', json('true'))"
                          " WHERE source=? AND scope=?", (source, scope))
+            prefix = prefix_of(scope) if prefix_of else None
+            if not prefix:
+                continue
+            batch_ids = [r["id"] for r in conn.execute(
+                "SELECT id FROM batches WHERE source=? AND state IN ('accumulating','mature')"
+                " AND (conversation_key=? OR conversation_key LIKE ? ESCAPE '\\')",
+                (source, prefix, prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + ":%"))]
+            count = 0
+            for batch_id in batch_ids:
+                count += conn.execute("UPDATE source_items SET state='superseded' WHERE batch_id=? AND state='batched'",
+                                      (batch_id,)).rowcount
+                conn.execute("UPDATE batches SET state='failed', last_error=? WHERE id=?",
+                             (f"withdrawn: {scope} left the discovered list (blacklisted or left)", batch_id))
+            withdrawn[scope] = count
+    return withdrawn
 
 
 def persist_fetch(conn: sqlite3.Connection, source: str, result: FetchResult) -> dict[str, int]:

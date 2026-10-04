@@ -31,8 +31,11 @@ def fetch_all(conn: sqlite3.Connection, adapters: list[Any], budget: float = FET
 
     * ``due(cursor_row)`` returning False: not read in this run (the adapter's own cadence);
     * ``expand(cursor)``: more scopes to read (e.g. discovered Slack DMs), from this run's
-      cursor, or the previous one when this run's fetch failed. Scopes that left the list are
-      retired (no longer reported as stale).
+      cursor, or the previous one when this run's fetch failed. They are read least recently
+      read first, so scopes left over by a rate limit or the time budget go first next run.
+      Scopes that left the list (and were not read through explicit configuration in this run)
+      are retired: no longer reported as stale, and with ``conversation_prefix(scope)`` their
+      not yet claimed batches are withdrawn (kept as superseded, counted in the report).
 
     After a rate-limit error the remaining scopes of that source wait for the next run."""
     started = time.monotonic()
@@ -75,11 +78,19 @@ def fetch_all(conn: sqlite3.Connection, adapters: list[Any], budget: float = FET
         expand = getattr(adapter, "expand", None)
         if expand is not None:
             current = expand(cursor)
-            queue.extend(current)
+            queue.extend(sorted(current, key=lambda a: _last_read(conn, a)))
             if cursor != previous:
                 dropped = {a.scope for a in expand(previous)} - {a.scope for a in current}
-                retire_scopes(conn, adapter.name, dropped)
+                dropped -= {k.partition(":")[2] for k in report if k.startswith(adapter.name + ":")}
+                prefix = getattr(adapter, "conversation_prefix", None)
+                for scope, withdrawn in retire_scopes(conn, adapter.name, dropped, prefix).items():
+                    report[f"{adapter.name}:{scope}"] = {"retired": True, "withdrawn_items": withdrawn}
     return report
+
+
+def _last_read(conn: sqlite3.Connection, adapter: Any) -> str:
+    row = get_cursor(conn, adapter.name, adapter.scope)
+    return (row or {}).get("last_success_at") or ""
 
 
 def _digest_time(cfg: Config) -> tuple[int, int]:
