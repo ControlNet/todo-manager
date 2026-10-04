@@ -66,7 +66,7 @@ class Kanban(Protocol):
 
     def find(self, idem_key: str, marker: str) -> list[dict[str, Any]]: ...
     def create(self, *, title: str, body: str, idem_key: str, assignee: str | None, tenant: str,
-               workspace: str | None = None) -> str: ...
+               workspace: str | None = None, max_retries: int | None = None) -> str: ...
     def snapshot(self, card_id: str, after_event: int = 0, after_comment: int = 0) -> dict[str, Any]: ...
     def comment(self, card_id: str, body: str, author: str = "todo-manager") -> int: ...
     def block(self, card_id: str, reason: str, kind: str | None = None) -> bool: ...
@@ -132,10 +132,11 @@ class BridgeKanban:
         return self.call("find", mutating=False, idem_key=idem_key, marker=marker)
 
     def create(self, *, title: str, body: str, idem_key: str, assignee: str | None, tenant: str,
-               workspace: str | None = None) -> str:
+               workspace: str | None = None, max_retries: int | None = None) -> str:
         kind, _, path = (workspace or "").partition(":")
         return self.call("create", title=title, body=body, idem_key=idem_key, assignee=assignee, tenant=tenant,
-                         created_by="todo-manager", workspace_kind=kind or None, workspace_path=path or None)
+                         created_by="todo-manager", workspace_kind=kind or None, workspace_path=path or None,
+                         max_retries=max_retries)
 
     def snapshot(self, card_id: str, after_event: int = 0, after_comment: int = 0) -> dict[str, Any]:
         return self.call("snapshot", mutating=False, task_id=card_id, after_event=after_event,
@@ -211,7 +212,7 @@ class FakeKanban:
                 for c in self.cards.values() if c["idem_key"] == idem_key or marker in c["body"]]
 
     def create(self, *, title: str, body: str, idem_key: str, assignee: str | None, tenant: str,
-               workspace: str | None = None) -> str:
+               workspace: str | None = None, max_retries: int | None = None) -> str:
         self._maybe_fail("create")
         for card in self.cards.values():
             if card["idem_key"] == idem_key and card["status"] != "archived":
@@ -219,7 +220,8 @@ class FakeKanban:
         self._n += 1
         cid = f"t_{self._n:04d}"
         self.cards[cid] = {"id": cid, "title": title, "body": body, "idem_key": idem_key, "status": "ready",
-                           "assignee": assignee, "tenant": tenant, "block_kind": None, "block_recurrences": 0}
+                           "assignee": assignee, "tenant": tenant, "block_kind": None, "block_recurrences": 0,
+                           "max_retries": max_retries, "consecutive_failures": 0}
         self._event(cid, "created")
         if "create" in self.lose_response:
             self.lose_response.discard("create")
@@ -268,13 +270,18 @@ class FakeKanban:
         self._event(card_id, "review_requested", {"summary": summary}, run_id=run["id"])
 
     def worker_crash(self, card_id: str) -> None:
-        """The worker process died: the dispatcher returns the card to ready for a retry."""
+        """The worker process died: the dispatcher returns the card to ready for a retry, unless
+        the failure breaker trips (per-card ``max_retries``, else Hermes' default of 2)."""
         card = self.cards[card_id]
         assert card["status"] == "running"
         run = self.runs[card_id][-1]
         run.update(status="crashed")
         card["status"] = "ready"
         self._event(card_id, "crashed", {"error": "worker exited"}, run_id=run["id"])
+        card["consecutive_failures"] += 1
+        if card["consecutive_failures"] >= (card["max_retries"] or 2):
+            card["status"] = "blocked"
+            self._event(card_id, "gave_up", {"failures": card["consecutive_failures"], "error": "worker exited"})
 
     def dispatch_tick(self) -> list[str]:
         """Which cards a dispatcher would start: only ready ones (blocked/review/triage wait)."""
@@ -305,6 +312,7 @@ class FakeKanban:
         if card["status"] != "blocked":
             return False
         card["status"] = "ready"
+        card["consecutive_failures"] = 0   # a deliberate unblock is a fresh retry budget
         self._event(card_id, "unblocked")
         return True
 

@@ -61,6 +61,23 @@ verified and how.
 
 - Source content is treated as evidence and the prompts say so, and every Hermes prompt
   surface passes the Hermes prompt scanner in tests, but prompt-injection resistance ultimately
-  relies on the model. External actions are additionally gated by per-delegation allowed
-  actions and version-bound approvals.
+  relies on the model.
+- **Allowed actions and approvals are instructions, not a tool-call interceptor.** todo-manager
+  does not sit between a worker and its tools: a worker can call whatever tools its Hermes
+  profile has (terminal, mail, `gh`, …). What the code guarantees:
+  - an approval is recorded only from you, for one action and one delivery id/version; it is
+    voided by a newer delivery or a changed requirement before it is sent, re-checked at send
+    time, sent at most once (`[tm:<id>]` marker) and consumed once (a replay cannot reopen a
+    newer version);
+  - cards are created with Hermes' per-card breaker `max_retries = 1` (`kanban.max_retries`):
+    a crashed, timed-out or stale run parks the card instead of a respawn, and a run that held
+    an approval and ended without a result is marked `unknown`, paused and reported to you;
+  - the approval record is an audit trail of what you allowed, not proof of what a worker did.
+  What relies on the worker model following the card protocol: staying within the allowed
+  actions, acting only on an `APPROVED` comment for the delivered version, not repeating an
+  action whose outcome it cannot confirm, and reporting `external_actions_done` truthfully.
+  Hermes requeues a run killed by a provider rate limit without counting it as a failure; that
+  next run is covered only by the protocol rule. Hard enforcement would mean a Hermes profile
+  for the board's assignee without write tools for mail/GitHub/publishing — a Hermes
+  configuration you decide on.
 - Tokens are read from environment variables; the workspace must not be committed or shared.

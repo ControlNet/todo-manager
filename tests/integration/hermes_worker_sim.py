@@ -36,6 +36,11 @@ def main():
         elif op == "dispatch_dry":
             res = kbd.dispatch_once(conn, dry_run=True, board=req["board"])
             result = {"spawned": [s[0] for s in res.spawned], "review_gate": kbd.review_dispatch_enabled()}
+        elif op == "fail":
+            # The dispatcher's failure funnel for a run that ended without a verdict
+            # (crash / timeout / stale claim all count the same way); True = breaker tripped.
+            result = kbd._record_task_failure(conn, tid, "sim: worker exited", outcome="crashed",
+                                              release_claim=True, end_run=True)
         elif op == "recompute":
             result = kb.recompute_ready(conn)
         else:

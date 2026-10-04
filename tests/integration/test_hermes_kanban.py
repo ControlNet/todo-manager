@@ -71,6 +71,19 @@ class HermesKanbanIntegration(WorkspaceCase):
         finally:
             shutil.rmtree(defaults, ignore_errors=True)
 
+    def test_a_failed_run_parks_the_card_instead_of_a_respawn(self):
+        did = delegation.create(self.conn, self.cfg, task_id=self.task, title="发送回复", goal="Send after approval")
+        self.tick()
+        card = delegation.get(self.conn, did)["card_id"]
+        self.assertEqual(self.kb.snapshot(card)["task"]["max_retries"], 1)
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.assertTrue(self.sim("fail", task_id=card), "the per-card breaker trips on the first failure")
+        self.assertEqual(self.sim("status", task_id=card)["status"], "blocked")
+        self.sim("recompute")
+        self.assertNotIn(card, self.sim("dispatch_dry")["spawned"])
+        self.tick()
+        self.assertEqual(delegation.get(self.conn, did)["status"], "blocked", "waits for the user's retry/cancel")
+
     def test_full_draft_cycle_against_real_kanban(self):
         did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草回复", goal="Draft only",
                                 feedback_id="fbk_it_1")

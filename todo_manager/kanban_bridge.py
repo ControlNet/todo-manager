@@ -58,7 +58,8 @@ def _out(payload: dict) -> None:
 def _task_dict(task) -> dict:
     keys = ("id", "title", "status", "assignee", "tenant", "created_by", "created_at", "started_at", "completed_at",
             "workspace_kind", "workspace_path", "idempotency_key", "current_run_id", "block_kind",
-            "block_recurrences", "consecutive_failures", "last_failure_error", "result", "worker_pid")
+            "block_recurrences", "consecutive_failures", "max_retries", "last_failure_error", "result",
+            "worker_pid")
     return {k: getattr(task, k, None) for k in keys}
 
 
@@ -117,7 +118,8 @@ def main() -> None:
                 created_by=req.get("created_by", "todo-manager"), tenant=req.get("tenant"),
                 idempotency_key=req["idem_key"], workspace_kind=req.get("workspace_kind"),
                 workspace_path=req.get("workspace_path"), skills=req.get("skills"),
-                max_runtime_seconds=req.get("max_runtime_seconds"), board=board)
+                max_runtime_seconds=req.get("max_runtime_seconds"), max_retries=req.get("max_retries"),
+                board=board)
             return _out({"ok": True, "result": tid})
         if op == "snapshot":
             task = kb.get_task(conn, req["task_id"])

@@ -101,6 +101,9 @@ Every comment carries `[tm:<message id>]`, so a retry after a lost response does
 twice. External actions (email, public comments, push, PRs, closing issues, publishing) are
 allowed only when listed in the delegation's allowed actions or approved by you for the exact
 delivered version; approvals and delegations requested by anyone other than you are refused.
+These rules reach the worker as card text; the worker's tools are not intercepted (see
+limitations). Cards are created with `max_retries = 1`, so a failed run (crash, timeout, stale
+claim) parks the card for you instead of a respawn that could repeat an approved action.
 
 ## Results
 

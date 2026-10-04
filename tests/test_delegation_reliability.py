@@ -334,6 +334,19 @@ class ApprovalTests(Base):
         self.assertIn(self.kb.cards[card]["status"], ("blocked", "triage"), "no automatic retry of the external action")
         self.assertTrue(any("send_email" in t for t in self.outbox_texts()))
 
+    def test_a_crash_after_approval_is_not_respawned_before_the_gate_runs(self):
+        """Gap D: Hermes would respawn a crashed card within seconds; our pause comes later. Cards
+        are created with a per-card breaker of one failure, so the first crash parks the card."""
+        did, card, v1, aid = self.approved_v1()
+        self.tick()
+        self.assertEqual(self.kb.cards[card]["max_retries"], 1)
+        self.kb.worker_start(card)
+        self.kb.worker_crash(card)                     # the email may or may not have gone out
+        self.assertNotIn(card, self.kb.dispatch_tick(), "not retried by the dispatcher")
+        self.tick()
+        self.assertEqual(self.conn.execute("SELECT outcome FROM approvals WHERE id=?", (aid,)).fetchone()[0], "unknown")
+        self.assertNotIn(card, self.kb.dispatch_tick())
+
 
 class DeliveryRunTests(Base):
     """R15: each review event is read from its own run."""

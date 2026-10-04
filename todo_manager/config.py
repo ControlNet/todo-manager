@@ -107,6 +107,10 @@ DEFAULTS: dict[str, Any] = {
         "hermes_bin": "hermes",
         "assignee": "",  # Hermes profile that executes delegations ("" = board default)
         "max_running": 1,
+        # Hermes per-card failure breaker: 1 = a crashed/timed-out/stale run parks the card for you
+        # instead of an automatic respawn (which could repeat an approved external action whose
+        # outcome is unknown). Rate-limit requeues are not counted by Hermes.
+        "max_retries": 1,
     },
     "notify": {
         "matrix": False,  # short link reminders only for important deliveries/blocks/failures

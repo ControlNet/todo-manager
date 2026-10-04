@@ -66,7 +66,7 @@ WORKER_PROTOCOL = """\
 - Need information or a decision from the user? Call kanban_block(kind="needs_input", reason="<one concrete question in {language}>"). Do not guess.
 - Deliverable ready? Call kanban_request_review(summary="<2-3 sentence summary in {language}>", metadata={{"deliverable_markdown": "<the full deliverable in Markdown>", "external_actions_done": [...], "notes": "..."}}, artifacts=[<absolute paths of files to keep>]). Do NOT call kanban_complete: the user reviews in Notion.
 - Comments by `todo-manager` are the user's supplements, answers, revision requests or approvals: follow them. A comment starting with {pause} means stop immediately and take no further action.
-- An external action whose outcome you cannot confirm (timeout, crash, unclear reply) must NOT be repeated: report it with kanban_block(kind="needs_input") and let the user check.
+- An external action whose outcome you cannot confirm (timeout, crash, unclear reply) must NOT be repeated: report it with kanban_block(kind="needs_input") and let the user check. The same applies when an earlier run of this card ended without a result after an APPROVED comment: assume the approved action may have happened and ask instead of doing it again.
 - Scratch workspaces are deleted when the card ends: keep needed files in artifacts.
 """
 
@@ -356,7 +356,8 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[st
             try:
                 card_id = kb.create(title=f"{d['title']} [{d['id']}]", body=body, idem_key=d["idem_key"],
                                     assignee=d.get("assignee"), tenant="todo-manager",
-                                    workspace=cfg.get("kanban.workspace") or None)
+                                    workspace=cfg.get("kanban.workspace") or None,
+                                    max_retries=int(cfg.get("kanban.max_retries", 1)) or None)
             except KanbanError as exc:
                 with tx(conn):
                     _set(conn, d["id"], status="reconcile" if exc.uncertain else "pending_submit",
