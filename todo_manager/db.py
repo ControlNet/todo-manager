@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -446,6 +446,11 @@ CREATE UNIQUE INDEX deliveries_source_event ON deliveries(delegation_id, card_id
   WHERE source_event_id IS NOT NULL;
 ALTER TABLE approvals ADD COLUMN outcome TEXT;
 CREATE INDEX delegation_messages_approval ON delegation_messages(approval_id);
+""",
+    # 3: Notion property writes whose outcome is not confirmed yet (expected values), so a
+    # later pull recognises our own write instead of importing it as a human edit.
+    3: """
+ALTER TABLE notion_pages ADD COLUMN pending_write TEXT;
 """,
 }
 

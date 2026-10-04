@@ -73,6 +73,16 @@ class DelegationError(ValueError):
     pass
 
 
+def action_names(allowed: list[str] | None) -> set[str]:
+    """Action names of an allowed-actions list; ``send_email:bob@x.org`` is ``send_email``.
+    The one parser for validation, external-action checks and approvals."""
+    return {str(a).split(":", 1)[0].strip() for a in allowed or [] if str(a).strip()}
+
+
+def external_actions(allowed: list[str] | None) -> set[str]:
+    return action_names(allowed) & EXTERNAL_ACTIONS
+
+
 def get(conn: sqlite3.Connection, delegation_id: str) -> dict[str, Any] | None:
     row = row_dict(conn.execute("SELECT * FROM delegations WHERE id=?", (delegation_id,)).fetchone())
     if row:
@@ -119,7 +129,7 @@ def create(conn: sqlite3.Connection, cfg: Config, *, task_id: str, title: str, g
     if not goal.strip():
         raise DelegationError("goal is required")
     allowed = allowed_actions or ["read", "analyze", "draft"]
-    unknown = {a.split(":", 1)[0] for a in allowed} - KNOWN_ACTIONS
+    unknown = action_names(allowed) - KNOWN_ACTIONS
     if unknown:
         raise DelegationError(f"unknown actions {sorted(unknown)}; known: {sorted(KNOWN_ACTIONS)}")
     if feedback_id:

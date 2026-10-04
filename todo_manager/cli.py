@@ -174,7 +174,7 @@ def cmd_feedback(args: argparse.Namespace) -> int:
         scope_type, _, scope_id = (args.scope or "global").partition(":")
         sid = args.source_id or f"{args.origin}:{clock.iso()}"
         fid, created = feedback.record(conn, origin=args.origin, source_id=sid, text=args.text, scope_type=scope_type,
-                                       scope_id=scope_id or None, kind="direct", author="user")
+                                       scope_id=scope_id or None, kind="direct", author="user", author_is_user=True)
         _print({"feedback": fid, "created": created, "note": "gate B will interpret it within ~5 minutes"})
         return 0
     rows = conn.execute("SELECT * FROM feedback WHERE status=? ORDER BY received_at DESC LIMIT ?",

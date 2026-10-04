@@ -90,6 +90,9 @@ def problems(rep: dict[str, Any], cfg: Config) -> list[str]:
         for s in scopes:
             found.append(f"source {source}:{s['scope']} stale ({s['minutes_since_success']} min, "
                          f"{s['failures']} failures) {s['error']}".strip())
+    if rep.get("notion_ready") and not cfg.get("identity.notion_user_ids"):
+        found.append("identity.notion_user_ids is empty: Notion comments and edits are treated as evidence only,"
+                     " never as the user's instructions")
     if rep["outbox_dead"]:
         found.append(f"{len(rep['outbox_dead'])} outbox effects gave up")
     if rep["feedback"].get("failed"):

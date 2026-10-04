@@ -1,11 +1,13 @@
 """Two-way Notion sync: import human edits, push local state, collect comments.
 
 Import (gate B, every run)
-  * Tasks/Projects data sources are queried by ``last_edited_time`` (minute precision,
-    so with an overlap window). Each page's editable properties are compared with the
-    values last seen/written (``notion_pages.last_seen_props``); every difference is a
-    human edit, applied with ``actor=human`` and recorded as feedback. Our own writes
-    never show up as edits because ``last_seen_props`` is updated when we write.
+  * Tasks/Projects data sources are queried by ``last_edited_time`` with an overlap window
+    (the timestamp may be coarse, so it is never used to tell edits apart). Each page's
+    editable properties are compared with the values last seen/written
+    (``notion_pages.last_seen_props``). A difference that equals a write of ours whose
+    response was lost (``pending_write``) is our own echo; any other difference is an edit
+    by the page's last editor: applied as a human edit when that editor is a configured
+    user (``identity.notion_user_ids``), otherwise recorded as evidence only.
   * Pages created by the user become tasks/projects (``origin=notion``).
   * Edits with workflow meaning are not guessed: "next by = Agent" without an active
     delegation becomes a pending feedback item for the model; closing a task stops its
@@ -22,7 +24,10 @@ Push (outbox handlers)
 Comments
   * Active pages (open delegation, recent edits/comments) every run; other open tasks
     round-robin at a lower frequency; recently closed tasks and projects even less.
-  * Comments by our own bot are never feedback. Edits create a new feedback version.
+  * Comments by our own bot are never feedback. An edit creates a new feedback version
+    (the version includes the content, so edits within the same timestamp are not lost).
+  * Authorship: missing identity configuration never defaults to "the user"; content by
+    anyone else is evidence for the model, never an instruction.
 """
 
 from __future__ import annotations
@@ -106,6 +111,7 @@ class NotionSync:
             return None
         item = dict(row)
         item["last_seen_props"] = loads(row["last_seen_props"], {})
+        item["pending_write"] = loads(row["pending_write"], {}) or {}
         return item
 
     def entity_row(self, entity_type: str, entity_id: str) -> dict[str, Any] | None:
@@ -133,6 +139,17 @@ class NotionSync:
             sql += ", last_edited_time=?, last_edited_by=?"
             params += [page.get("last_edited_time"), (page.get("last_edited_by") or {}).get("id")]
         self.conn.execute(sql + " WHERE page_id=?", (*params, page_id))
+
+    def _set_pending(self, page_id: str, props: dict[str, Any] | None, version: int | None = None) -> None:
+        value = dumps({"props": props, "at": clock.iso(), "version": version}) if props else None
+        self.conn.execute("UPDATE notion_pages SET pending_write=? WHERE page_id=?", (value, page_id))
+
+    def user_ids(self) -> set[str]:
+        return set(self.cfg.get("identity.notion_user_ids") or [])
+
+    def is_user(self, who: str | None) -> bool:
+        """Only a configured Notion user id is the user; an empty configuration means nobody is."""
+        return bool(who) and who in self.user_ids()
 
     def pmap(self, kind: str) -> schema.PropertyMap:
         return self.state.task_props if kind == "task" else self.state.project_props
@@ -270,7 +287,7 @@ class NotionSync:
             return self._import_new(kind, page, values)
         if page.get("in_trash"):
             if kind == "task" and not row["trashed"]:
-                self.page_trashed(row)
+                self.page_trashed(row, page)
             return "edited"
         if row["trashed"]:
             self._page_restored(kind, row, page)
@@ -282,22 +299,53 @@ class NotionSync:
             if current.get(f) is None and any(p.field == f for p in schema.PROPS[kind] if p.type == "select") \
                     and _select_raw_present(page, self.pmap(kind), f):
                 changed.pop(f)
+        # Our own write whose response was lost shows up with exactly the value we sent.
+        pending = row["pending_write"].get("props") or {}
+        echo = {f for f in changed if f in pending and pending[f] == changed[f]}
+        for f in echo:
+            changed.pop(f)
+        seen = {**seen, **{f: current.get(f) for f in echo}}
+        still_pending = {f: v for f, v in pending.items() if f not in echo and current.get(f) == seen.get(f)}
         if not changed:
             with tx(self.conn):
                 self._seen(page["id"], {**seen, **{k: v for k, v in current.items() if k not in schema.editable_fields(kind)}},
                            page)
+                self._set_pending(page["id"], still_pending, row["pending_write"].get("version"))
             return "unchanged"
-        if kind == "task":
+        editor = (page.get("last_edited_by") or {}).get("id")
+        if not self.is_user(editor):
+            self._unverified_edit(kind, row, page, changed, seen, current, editor)
+        elif kind == "task":
             self._apply_task_edit(row, page, changed, seen, current)
         else:
             self._apply_project_edit(row, page, changed, seen, current)
-        return "edited"
+        with tx(self.conn):
+            self._set_pending(page["id"], still_pending, row["pending_write"].get("version"))
+        return "edited" if self.is_user(editor) else "evidence"
+
+    def _unverified_edit(self, kind: str, row: dict[str, Any], page: dict[str, Any], changed: dict[str, Any],
+                         seen: dict[str, Any], current: dict[str, Any], editor: str | None) -> None:
+        """Properties changed by someone who is not a verified user (or not attributable): kept
+        as evidence for the model; the local values stay authoritative and are written back."""
+        payload: dict[str, Any] = {"changes": changed, "before": {k: seen.get(k) for k in changed}, "applied": False}
+        if not self.user_ids():
+            payload["identity_unverified"] = True
+        with tx(self.conn):
+            feedback.record(self.conn, origin="notion_property", source_id=page["id"],
+                            source_version=f"{page.get('last_edited_time')}:{_h(dumps(changed))}", text=None,
+                            scope_type=kind, scope_id=row["entity_id"], kind="property_edit", author=editor,
+                            author_is_user=False, payload=payload)
+            self._seen(page["id"], current, page)
+            (effects.task_push if kind == "task" else effects.project_push)(self.conn, row["entity_id"])
 
     def _import_new(self, kind: str, page: dict[str, Any], values: dict[str, Any]) -> str:
         if page.get("in_trash"):
             return "ignored"
         tm_id = values.get("tm_id")
         current = schema.comparable(kind, values)
+        creator = (page.get("created_by") or {}).get("id") or (page.get("last_edited_by") or {}).get("id")
+        by_user = self.is_user(creator)
+        actor = "human" if by_user else "program"   # someone else's page is a task for the user to judge
         if kind == "task":
             if tm_id and store.get_task(self.conn, tm_id):
                 existing = self.entity_row("task", tm_id)
@@ -312,15 +360,14 @@ class NotionSync:
             fields = {k: values.get(k) for k in ("next_step", "waiting_on", "due_date", "follow_up_date",
                                                  "snooze_until") if values.get(k)}
             with tx(self.conn):
-                tid = store.create_task(self.conn, title, origin="notion", actor="human", cause_ref=page["id"],
+                tid = store.create_task(self.conn, title, origin="notion", actor=actor, cause_ref=page["id"],
                                         project_id=project_id, status=values.get("status") or "todo",
                                         next_actor=values.get("next_actor") or "me",
                                         focus=bool(values.get("focus")), notion_page_id=None, **fields)
                 self._link("task", tid, page, {**current, "tm_id": None})
                 feedback.record(self.conn, origin="notion_page", source_id=page["id"], source_version="created",
-                                text=title, scope_type="task", scope_id=tid, kind="new_task",
-                                author=(page.get("last_edited_by") or {}).get("id"),
-                                payload={"page_id": page["id"], "values": current})
+                                text=title, scope_type="task", scope_id=tid, kind="new_task", author=creator,
+                                author_is_user=by_user, payload={"page_id": page["id"], "values": current})
                 effects.task_push(self.conn, tid)
             return "created"
         if tm_id and store.get_project(self.conn, tm_id):
@@ -328,14 +375,14 @@ class NotionSync:
             return "unchanged"
         title = values.get("title") or self.t("sync.untitled_project")
         with tx(self.conn):
-            pid = store.create_project(self.conn, title, origin="notion", actor="human", cause_ref=page["id"],
+            pid = store.create_project(self.conn, title, origin="notion", actor=actor, cause_ref=page["id"],
                                        domain=values.get("domain"), goal=values.get("goal"),
                                        next_step=values.get("next_step"), status=values.get("status") or "active",
                                        repos=_split_repos(values.get("repos")))
             self._link("project", pid, page, {**current, "tm_id": None})
             feedback.record(self.conn, origin="notion_page", source_id=page["id"], source_version="created",
                             text=title, scope_type="project", scope_id=pid, kind="new_project", status="applied",
-                            payload={"page_id": page["id"]})
+                            author=creator, author_is_user=by_user, payload={"page_id": page["id"]})
             effects.project_push(self.conn, pid)
         return "created"
 
@@ -360,11 +407,11 @@ class NotionSync:
             fid, created = feedback.record(
                 self.conn, origin="notion_property", source_id=page["id"],
                 source_version=f"{page.get('last_edited_time')}:{_h(dumps(changed))}", text=None,
-                scope_type="task", scope_id=task_id, kind="property_edit", author=author,
+                scope_type="task", scope_id=task_id, kind="property_edit", author=author, author_is_user=True,
                 payload={"changes": changed, "before": {k: seen.get(k) for k in changed}}, status="applied")
             result = store.update_task(self.conn, task_id, local, actor="human", origin="notion", cause_ref=fid)
             after = store.get_task(self.conn, task_id)
-            followups = self._edit_semantics(before, after, changed, fid)
+            followups = self._edit_semantics(before, after, changed, fid, author)
             feedback.resolve(self.conn, fid, "applied", {"applied": result.applied, "rejected": result.rejected,
                                                          "followups": followups})
             self._seen(page["id"], current, page)
@@ -372,8 +419,9 @@ class NotionSync:
                 effects.task_push(self.conn, task_id)   # normalised pair differs from what the user typed
 
     def _edit_semantics(self, before: dict[str, Any], after: dict[str, Any], changed: dict[str, Any],
-                        fid: str) -> list[str]:
-        """Deterministic consequences of a human property edit; ambiguous ones go to the model."""
+                        fid: str, author: str | None) -> list[str]:
+        """Deterministic consequences of a verified user's property edit; ambiguous ones go to
+        the model as derived feedback that keeps the original author."""
         notes: list[str] = []
         active = delegation.for_task(self.conn, after["id"], active_only=True)
         if "status" in changed and after["status"] in store.CLOSED_STATUSES:
@@ -384,14 +432,14 @@ class NotionSync:
         if "next_actor" in changed and after["next_actor"] == "agent" and before["next_actor"] != "agent" and not active:
             feedback.record(self.conn, origin="notion_property", source_id=after["id"],
                             source_version=f"delegate:{fid}", text=self.t("sync.set_to_agent", field=field),
-                            scope_type="task", scope_id=after["id"], kind="delegate_request",
-                            payload={"from_feedback": fid})
+                            scope_type="task", scope_id=after["id"], kind="delegate_request", author=author,
+                            author_is_user=True, payload={"from_feedback": fid})
             notes.append("delegate_request")
         elif "next_actor" in changed and before["next_actor"] == "agent" and after["next_actor"] != "agent" and active:
             feedback.record(self.conn, origin="notion_property", source_id=after["id"],
                             source_version=f"unassign:{fid}", text=self.t("sync.unassigned", field=field),
-                            scope_type="task", scope_id=after["id"], kind="delegate_unassigned",
-                            payload={"from_feedback": fid, "delegations": [d["id"] for d in active]})
+                            scope_type="task", scope_id=after["id"], kind="delegate_unassigned", author=author,
+                            author_is_user=True, payload={"from_feedback": fid, "delegations": [d["id"] for d in active]})
             notes.append("delegate_unassigned")
         return notes
 
@@ -405,7 +453,7 @@ class NotionSync:
                 self.conn, origin="notion_property", source_id=page["id"],
                 source_version=f"{page.get('last_edited_time')}:{_h(dumps(changed))}", text=None,
                 scope_type="project", scope_id=pid, kind="property_edit",
-                author=(page.get("last_edited_by") or {}).get("id"),
+                author=(page.get("last_edited_by") or {}).get("id"), author_is_user=True,
                 payload={"changes": changed, "before": {k: seen.get(k) for k in changed}}, status="applied")
             repos_add: list[str] = []
             repos_remove: list[str] = []
@@ -419,15 +467,24 @@ class NotionSync:
                                                          "repos_add": repos_add, "repos_remove": repos_remove})
             self._seen(page["id"], current, page)
 
-    def page_trashed(self, row: dict[str, Any]) -> None:
+    def page_trashed(self, row: dict[str, Any], page: dict[str, Any] | None = None) -> None:
         task = store.get_task(self.conn, row["entity_id"])
         reason = self.t(TRASH_REASON)
+        editor = ((page or {}).get("last_edited_by") or {}).get("id")
         with tx(self.conn):
             self.conn.execute("UPDATE notion_pages SET trashed=1 WHERE page_id=?", (row["page_id"],))
+            if task and task["status"] not in store.CLOSED_STATUSES and not self.is_user(editor):
+                # Not the verified user: the task stays open; the model asks the user (via Matrix).
+                feedback.record(self.conn, origin="notion_page", source_id=row["page_id"],
+                                source_version=f"trashed:{(page or {}).get('last_edited_time') or clock.iso()}",
+                                text=reason, scope_type="task", scope_id=task["id"], kind="page_trashed",
+                                author=editor, author_is_user=False, payload={"page_id": row["page_id"]})
+                return
             if task and task["status"] not in store.CLOSED_STATUSES:
                 fid, _ = feedback.record(self.conn, origin="notion_page", source_id=row["page_id"],
                                          source_version=f"trashed:{clock.iso()}", text=reason, scope_type="task",
-                                         scope_id=task["id"], kind="page_trashed", status="applied")
+                                         scope_id=task["id"], kind="page_trashed", status="applied", author=editor,
+                                         author_is_user=True)
                 store.update_task(self.conn, task["id"], {"status": "cancelled"}, actor="human", origin="notion",
                                   cause_ref=fid)
                 store.set_closed_reason(self.conn, task["id"], reason)
@@ -439,12 +496,14 @@ class NotionSync:
             if kind != "task":
                 return
             task = store.get_task(self.conn, row["entity_id"])
-            if task and task["status"] == "cancelled" and task.get("closed_reason") in i18n.variants(TRASH_REASON):
+            editor = (page.get("last_edited_by") or {}).get("id")
+            if task and task["status"] == "cancelled" and task.get("closed_reason") in i18n.variants(TRASH_REASON) \
+                    and self.is_user(editor):
                 previous = row["last_seen_props"].get("status") or "todo"
                 fid, _ = feedback.record(self.conn, origin="notion_page", source_id=row["page_id"],
                                          source_version=f"restored:{page.get('last_edited_time')}",
                                          text=self.t("sync.restored"), scope_type="task", scope_id=task["id"],
-                                         kind="page_restored", status="applied")
+                                         kind="page_restored", status="applied", author=editor, author_is_user=True)
                 store.update_task(self.conn, task["id"], {"status": previous}, actor="human", origin="notion",
                                   cause_ref=fid)
 
@@ -535,7 +594,7 @@ class NotionSync:
             raise outbox.Retryable(str(exc), retry_after=exc.retry_after) from None
         if page.get("in_trash"):
             if kind == "task":
-                self.page_trashed(row)
+                self.page_trashed(row, page)
             return {"skipped": "page trashed"}
         self.import_page(kind, page)          # unseen human edits first
         row = self.entity_row(kind, entity_id)
@@ -547,12 +606,20 @@ class NotionSync:
         result: dict[str, Any] = {"props": sorted(diff)}
         if diff:
             props = schema.render_properties(kind, values, self.pmap(kind), only=diff)
+            with tx(self.conn):
+                # Expected values, kept until the write is confirmed (response or a later read).
+                self._set_pending(row["page_id"], {f: target[f] for f in diff}, entity["version"])
             try:
                 page = self.client.update_page(row["page_id"], props)
             except NotionUncertain as exc:
                 raise outbox.Uncertain(str(exc)) from None   # a retry re-reads and re-diffs: idempotent
+            except NotionError:
+                with tx(self.conn):
+                    self._set_pending(row["page_id"], None)  # definitely not written
+                raise
         with tx(self.conn):
             self._seen(row["page_id"], target, page)
+            self._set_pending(row["page_id"], None)
         if kind == "task":
             result["body"] = self._sync_body(row["page_id"], entity)
         return result
@@ -575,6 +642,7 @@ class NotionSync:
             if row["managed_hash"] and fp != row["managed_hash"]:
                 feedback.record(self.conn, origin="notion_page", source_id=page_id, source_version=f"body:{fp}",
                                 text=region, scope_type="task", scope_id=task["id"], kind="body_edit",
+                                author=row["last_edited_by"], author_is_user=self.is_user(row["last_edited_by"]),
                                 payload={"page_id": page_id, "region": region, "would_render": rendered})
                 return "held: user edited the managed region"
             command = {"type": "update_content",
@@ -718,7 +786,7 @@ class NotionSync:
         if page.get("in_trash"):
             row = self.page_row(page_id)
             if row and not row["trashed"]:
-                self.page_trashed(row)
+                self.page_trashed(row, page)
 
     def _comment(self, c: dict[str, Any], target: dict[str, Any], user_ids: set[str]) -> str:
         author = (c.get("created_by") or {}).get("id")
@@ -749,13 +817,14 @@ class NotionSync:
                                    delivery_kind=dlv["kind"], delivery_seq=dlv["seq"])
         if prev is not None:
             payload["previous_text_hash"] = prev["content_hash"]
-        is_user = (author in user_ids) if user_ids else True
+        is_user = bool(author) and author in user_ids   # no configured identity: nobody is the user
         if not user_ids:
             payload["identity_unverified"] = True
         with tx(self.conn):
             fid, created = feedback.record(
                 self.conn, origin="notion_comment", source_id=c["id"],
-                source_version=c.get("last_edited_time") or digest, text=text, scope_type=scope_type,
+                # The content is part of the version: two edits can share a timestamp.
+                source_version=f"{c.get('last_edited_time') or ''}|{digest}", text=text, scope_type=scope_type,
                 scope_id=target.get("entity_id"), author=author, author_is_user=is_user,
                 kind="comment" if prev is None else "comment_edit", payload=payload,
                 reply_to=c.get("discussion_id"))

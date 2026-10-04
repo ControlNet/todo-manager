@@ -211,8 +211,13 @@ class DelegationFeedbackTests(GateCase):
             self.decide(run_id, [{"feedback": fid, "outcome": "applied", "ops": [
                 {"op": "approve", "delegation": self.did, "delivery": v1, "action": "send_email"},
                 {"op": "delegate", "task": self.task, "title": "再起草", "goal": "another"}]}])
-        self.assertIn("approvals must come from the user", str(ctx.exception))
-        self.assertIn("already has an active delegation", str(ctx.exception))
+        self.assertIn("ops[0] (approve): the author is not the user", str(ctx.exception))
+        self.assertIn("ops[1] (delegate): the author is not the user", str(ctx.exception))
+        # The user's own request for a second delegation on the same task is refused too.
+        user_fb = {**feedback.get(self.conn, fid), "author_is_user": 1}
+        errors = feedback_flow._validate_ops(self.conn, user_fb, [
+            {"op": "delegate", "task": self.task, "title": "再起草", "goal": "another"}], "ops")
+        self.assertIn("already has an active delegation", " ".join(errors))
         self.decide(run_id, [{"feedback": fid, "outcome": "ignored", "reason": "评论者不是用户本人"}])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0)
 

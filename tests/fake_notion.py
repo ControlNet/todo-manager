@@ -82,7 +82,7 @@ class FakeNotion:
         return view
 
     # ------------------------------------------------------------------ test controls
-    def user_edit(self, page_id: str, **props_by_name: Any) -> None:
+    def user_edit(self, page_id: str, *, author: str = USER_ID, **props_by_name: Any) -> None:
         page = self.pages[page_id]
         ds = self.data_sources[page["parent"]["data_source_id"]]
         payload = {}
@@ -100,15 +100,16 @@ class FakeNotion:
                 payload[name] = {"relation": [{"id": v} for v in (value if isinstance(value, list) else [value])]
                                  if value else []}
         self._set_props(page, ds, payload)
-        self._touch(page, USER_ID)
+        self._touch(page, author)
 
-    def user_create_page(self, data_source_id: str, title: str, **props: Any) -> str:
+    def user_create_page(self, data_source_id: str, title: str, *, author: str = USER_ID, markdown: str = "",
+                         **props: Any) -> str:
         ds = self.data_sources[data_source_id]
         title_prop = next(n for n, s in ds["properties"].items() if s["type"] == "title")
         page = self._new_page({"type": "data_source_id", "data_source_id": data_source_id},
-                              {title_prop: {"title": [{"text": {"content": title}}]}}, "", USER_ID)
+                              {title_prop: {"title": [{"text": {"content": title}}]}}, markdown, author)
         if props:
-            self.user_edit(page["id"], **props)
+            self.user_edit(page["id"], author=author, **props)
         return page["id"]
 
     def user_comment(self, page_id: str, text: str, discussion_id: str | None = None, author: str = USER_ID) -> str:
@@ -125,13 +126,13 @@ class FakeNotion:
             if c["discussion_id"] == discussion_id:
                 c["resolved"] = True
 
-    def user_set_markdown(self, page_id: str, markdown: str) -> None:
+    def user_set_markdown(self, page_id: str, markdown: str, author: str = USER_ID) -> None:
         self.markdown[page_id] = markdown
-        self._touch(self.pages[page_id], USER_ID)
+        self._touch(self.pages[page_id], author)
 
-    def user_trash(self, page_id: str, trashed: bool = True) -> None:
+    def user_trash(self, page_id: str, trashed: bool = True, author: str = USER_ID) -> None:
         self.pages[page_id]["in_trash"] = trashed
-        self._touch(self.pages[page_id], USER_ID)
+        self._touch(self.pages[page_id], author)
 
     def prop(self, page_id: str, name: str) -> Any:
         raw = self.pages[page_id]["properties"].get(name)
@@ -155,7 +156,8 @@ class FakeNotion:
     def _new_page(self, parent: dict[str, Any], props: dict[str, Any], markdown: str, who: str) -> dict[str, Any]:
         pid = self._id("page")
         page = {"object": "page", "id": pid, "parent": parent, "properties": {}, "in_trash": False,
-                "url": f"https://app.notion.com/p/{pid.replace('-', '')}", "created_time": clock.iso()}
+                "url": f"https://app.notion.com/p/{pid.replace('-', '')}", "created_time": clock.iso(),
+                "created_by": {"object": "user", "id": who}}
         if parent.get("type") == "data_source_id":
             ds = self.data_sources[parent["data_source_id"]]
             for name, schema in ds["properties"].items():

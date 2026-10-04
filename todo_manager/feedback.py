@@ -28,9 +28,12 @@ class FeedbackError(ValueError):
 
 def record(conn: sqlite3.Connection, *, origin: str, source_id: str, text: str | None, scope_type: str,
            scope_id: str | None = None, source_version: str = "", author: str | None = None,
-           author_is_user: bool = True, kind: str | None = None, payload: dict[str, Any] | None = None,
+           author_is_user: bool = False, kind: str | None = None, payload: dict[str, Any] | None = None,
            status: str = "pending", reply_to: str | None = None, result: Any = None) -> tuple[str, bool]:
-    """Insert a feedback row. Returns (id, created). The same source id + version is stored once."""
+    """Insert a feedback row. Returns (id, created). The same source id + version is stored once.
+
+    ``author_is_user`` defaults to False: only a caller that verified the author (configured
+    identity, or the user's own Matrix/CLI session) may mark feedback as the user's."""
     if origin not in ORIGINS:
         raise FeedbackError(f"invalid origin {origin!r}")
     fid = ids.new_id("feedback")
