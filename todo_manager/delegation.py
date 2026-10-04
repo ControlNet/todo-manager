@@ -588,7 +588,7 @@ def _record_delivery(conn: sqlite3.Connection, d: dict[str, Any], *, kind: str, 
         "INSERT OR IGNORE INTO deliveries(id, delegation_id, card_id, run_id, seq, kind, summary, body, artifacts,"
         " requirement_version, received_at, source_event_id, after_cancel) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (dlv, d["id"], d["card_id"], run_id, seq, kind, summary, body, dumps(paths),
-         d["requirement_version"], clock.iso(), event_id, 1 if after_cancel else 0))
+         received_requirement_version(conn, d), clock.iso(), event_id, 1 if after_cancel else 0))
     if cur.rowcount != 1:
         return None
     if paths and home is not None:
@@ -606,8 +606,31 @@ def deliveries(conn: sqlite3.Connection, delegation_id: str) -> list[dict[str, A
 MESSAGE_KINDS = ("supplement", "answer", "revision", "pause", "resume", "cancel", "accept", "approval")
 
 
+def _bound_delivery(conn: sqlite3.Connection, delegation_id: str, delivery_id: str | None) -> sqlite3.Row | None:
+    if delivery_id is None:
+        return _latest_result(conn, delegation_id)
+    row = conn.execute("SELECT * FROM deliveries WHERE id=? AND delegation_id=? AND kind='result'",
+                       (delivery_id, delegation_id)).fetchone()
+    if row is None:
+        raise DelegationError(f"{delivery_id} is not a delivered version of {delegation_id}")
+    return row
+
+
+def received_requirement_version(conn: sqlite3.Connection, d: dict[str, Any]) -> int:
+    """The requirement version the worker has actually been sent: a supplement/revision/answer
+    still queued is not part of what a delivery recorded now was built on."""
+    unsent = conn.execute("SELECT MIN(requirement_version) FROM delegation_messages WHERE delegation_id=?"
+                          " AND kind IN ('supplement','revision','answer')"
+                          " AND status IN ('pending','waiting_capacity','sending')", (d["id"],)).fetchone()[0]
+    return d["requirement_version"] if unsent is None else min(d["requirement_version"], int(unsent) - 1)
+
+
 def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: str,
-                feedback_id: str | None = None, approval_id: str | None = None, cause: str | None = None) -> str:
+                feedback_id: str | None = None, approval_id: str | None = None, cause: str | None = None,
+                delivery_id: str | None = None) -> str:
+    """Queue a message. Its target is fixed here and kept for every retry: an answer binds to
+    the open question, accept/revision to ``delivery_id`` (the version the user replied to) or
+    else the latest delivered version, resume to the latest pause."""
     if kind not in MESSAGE_KINDS:
         raise DelegationError(f"invalid message kind {kind!r}")
     d = get(conn, delegation_id)
@@ -625,13 +648,23 @@ def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: s
         changes_requirement = kind in ("supplement", "revision", "answer")
         requirement_version = d["requirement_version"] + (1 if changes_requirement else 0)
         answering = kind == "answer" and d["status"] == "blocked"
+        target_event = int(d["block_event_id"]) if answering and d["block_event_id"] is not None else None
+        target_seq = target_message = None
+        if kind in ("revision", "accept"):
+            bound = _bound_delivery(conn, delegation_id, delivery_id)
+            target_seq = bound["seq"] if bound else 0          # 0: no version delivered yet
+            target_event = bound["source_event_id"] if bound else None
+        elif kind == "resume":
+            pause = conn.execute("SELECT id FROM delegation_messages WHERE delegation_id=? AND kind='pause'"
+                                 " AND status NOT IN ('superseded','failed') ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                                 (delegation_id,)).fetchone()
+            target_message = pause["id"] if pause else None
         conn.execute(
             "INSERT INTO delegation_messages(id, delegation_id, kind, feedback_id, body, requirement_version,"
-            " target_block_seq, target_event_id, approval_id, cause, status, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?)",
+            " target_block_seq, target_event_id, target_seq, target_message_id, approval_id, cause, status, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)",
             (mid, delegation_id, kind, feedback_id, body, requirement_version,
-             d["block_seq"] if answering else None,
-             int(d["block_event_id"]) if answering and d["block_event_id"] is not None else None,
+             d["block_seq"] if answering else None, target_event, target_seq, target_message,
              approval_id, cause, clock.iso()))
         if changes_requirement:
             _set(conn, delegation_id, requirement_version=requirement_version)
@@ -799,8 +832,42 @@ def _transition_target(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[st
         if kind == "approval" and msg.get("approval_id"):
             latest = conn.execute("SELECT dl.* FROM deliveries dl JOIN approvals a ON a.delivery_id=dl.id WHERE a.id=?",
                                   (msg["approval_id"],)).fetchone()
+        elif kind == "revision" and msg.get("target_seq"):
+            return "reopen_review", msg.get("target_event_id")   # the version it was written for
         return "reopen_review", latest["source_event_id"] if latest else None
     return None
+
+
+def _newer_than_bound(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str, Any]) -> bool:
+    """An accept/revision written for version N while version N+1 has been recorded since.
+    (A revision queued before any delivery is a requirement change: the version delivered
+    without it is the one it revises.)"""
+    if msg["kind"] not in ("revision", "accept") or not msg.get("target_seq"):
+        return False
+    latest = _latest_result(conn, d["id"])
+    return latest is not None and latest["seq"] != msg["target_seq"]
+
+
+def _pause_anchor(kb: Kanban, d: dict[str, Any], conn: sqlite3.Connection,
+                  msg: dict[str, Any]) -> tuple[str, int | None]:
+    """The block event our pause message caused: ("found", id), ("none", None) when the pause
+    never blocked the card, ("wait", None) while the pause itself has not gone out."""
+    pause = conn.execute("SELECT * FROM delegation_messages WHERE id=?", (msg["target_message_id"],)).fetchone()
+    if pause is None or pause["status"] in ("superseded", "failed"):
+        return "none", None
+    if pause["status"] != "sent":
+        return "wait", None
+    snap = kb.snapshot(d["card_id"], after_event=0)
+    tag = f"[tm:{pause['id']}]"
+    reason = lambda ev: (ev.get("payload") or {}).get("reason") or ""  # noqa: E731
+    for ev in reversed(snap["events"]):
+        if ev["kind"] in ("blocked", "block_loop_detected") and tag in reason(ev):
+            return "found", int(ev["id"])
+    legacy = next((e for e in snap["events"] if d.get("pause_event_id") is not None
+                   and int(e["id"]) == int(d["pause_event_id"])), None)
+    if legacy is not None and "[tm:" not in reason(legacy):
+        return "found", int(legacy["id"])                  # a pause blocked before blocks carried the tag
+    return "none", None
 
 
 def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any], msg: dict[str, Any]) -> str:
@@ -820,6 +887,8 @@ def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any
             return "superseded"
     if kind == "cancel":
         return _send_cancel(conn, cfg, kb, d, msg)
+    if not attempted and _newer_than_bound(conn, d, msg):
+        return _unused(conn, d, msg, "newer_version")
     if kind == "accept":
         return _send_accept(conn, kb, d, msg)
     if kind == "pause":
@@ -828,13 +897,19 @@ def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any
                 conn.execute("UPDATE delegation_messages SET status='sending' WHERE id=?", (mid,))
             _comment_once(kb, d, mid, f"{PAUSE_MARK} PAUSE: stop now and take no further actions. {msg['body']}",
                           attempted)
-            kb.block(d["card_id"], f"{PAUSE_MARK} {msg['body']}"[:500], None)  # False: card left running/ready
+            # The tag lets a resume find this block even before a sync has recorded it.
+            kb.block(d["card_id"], f"{PAUSE_MARK} [tm:{mid}] {msg['body']}"[:500], None)  # False: card left running/ready
         _finish(conn, mid, "sent")
         with tx(conn):
             _set(conn, d["id"], status="paused" if status in EXECUTING else status)
         return "sent"
-
-    target = _transition_target(conn, d, msg)
+    if kind == "resume" and msg.get("target_message_id"):
+        found, anchor = _pause_anchor(kb, d, conn, msg)
+        if found == "wait":
+            return "waiting"
+        target = ("unblock", anchor) if found == "found" else None
+    else:
+        target = _transition_target(conn, d, msg)
     if target is None:
         if kind == "resume":
             _finish(conn, mid, "sent")  # nothing of ours to lift (the pause never blocked the card)
@@ -924,11 +999,14 @@ def _send_accept(conn: sqlite3.Connection, kb: Kanban, d: dict[str, Any], msg: d
     if d["status"] != "review":
         _finish(conn, msg["id"], "failed", f"cannot accept while delegation is {d['status']}")
         return "failed"
-    latest = _latest_result(conn, d["id"])
+    if msg.get("target_seq"):
+        anchor = msg.get("target_event_id")                     # the version the user accepted
+    else:
+        latest = _latest_result(conn, d["id"])                  # message queued before v6
+        anchor = latest["source_event_id"] if latest else None
     with tx(conn):
         conn.execute("UPDATE delegation_messages SET status='sending' WHERE id=?", (msg["id"],))
-    result = kb.transition(d["card_id"], "complete", latest["source_event_id"] if latest else None,
-                           summary=f"accepted by user: {msg['body']}"[:500])
+    result = kb.transition(d["card_id"], "complete", anchor, summary=f"accepted by user: {msg['body']}"[:500])
     if result["outcome"] == "mismatch":
         return _unused(conn, d, msg, "card_moved", status=result["status"])
     with tx(conn):

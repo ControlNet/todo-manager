@@ -14,7 +14,8 @@ Ops (one item may carry several):
   update_project  {project, based_on_version, set:{...}, repos_add?, repos_remove?}
   create_task     {title, responsibility, project?, status?, next_actor?, next_step?, due_date?, ...}
   delegate        {task, title, goal, context?, constraints?, deliverable?, done_criteria?, allowed_actions?}
-  message         {delegation, kind: supplement|answer|revision|pause|resume|cancel|accept, body}
+  message         {delegation, kind: supplement|answer|revision|pause|resume|cancel|accept, body,
+                   delivery? (accept/revision: the version meant; default the one replied to, else latest)}
   approve         {delegation, delivery, action, detail?}
   rule            {title, body, scope_type?, scope_id?, status: active|suggested}
   update_rule     {rule, title?, body?, status?}
@@ -254,6 +255,11 @@ def _validate_ops(conn: sqlite3.Connection, fb: dict[str, Any], ops: list[dict[s
                     errors.append(f"{at}: revision needs a delivery under review")
                 if d["status"] in ("ended", "cancelled") and op["kind"] != "supplement":
                     errors.append(f"{at}: delegation is {d['status']}; create a new linked delegation")
+                if op.get("delivery") and (op["kind"] not in ("accept", "revision") or conn.execute(
+                        "SELECT 1 FROM deliveries WHERE id=? AND delegation_id=? AND kind='result'",
+                        (op["delivery"], d["id"])).fetchone() is None):
+                    errors.append(f"{at}: delivery must name a delivered version of this delegation"
+                                  " (accept/revision only)")
             if not (op.get("body") or "").strip():
                 errors.append(f"{at}: body required")
         elif kind == "approve":
@@ -346,6 +352,19 @@ def _release_body(conn: sqlite3.Connection, task_id: str) -> None:
                  " AND entity_id=?", (task_id,))
 
 
+def _replied_delivery(fb: dict[str, Any], op: dict[str, Any]) -> str | None:
+    """The version an accept/revision is about: named in the op, else the delivered version
+    whose notice the user replied to; None means the latest version when it is queued."""
+    if op.get("kind") not in ("accept", "revision"):
+        return None
+    if op.get("delivery"):
+        return op["delivery"]
+    p = fb.get("payload") or {}
+    if p.get("delegation_id") == op.get("delegation") and p.get("delivery_kind") == "result":
+        return p.get("delivery_id")
+    return None
+
+
 def apply_ops(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any], ops: list[dict[str, Any]]) -> dict[str, Any]:
     origin = {"notion_comment": "notion", "notion_property": "notion", "notion_page": "notion"}.get(fb["origin"], fb["origin"])
     report: dict[str, Any] = {"ops": []}
@@ -380,7 +399,8 @@ def apply_ops(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any], ops: li
                                     allowed_actions=op.get("allowed_actions"), feedback_id=fb["id"], actor="human")
             entry["delegation"] = did
         elif kind == "message":
-            entry["message"] = delegation.add_message(conn, op["delegation"], op["kind"], op["body"], feedback_id=fb["id"])
+            entry["message"] = delegation.add_message(conn, op["delegation"], op["kind"], op["body"], feedback_id=fb["id"],
+                                                      delivery_id=_replied_delivery(fb, op))
         elif kind == "approve":
             entry["approval"] = delegation.record_approval(conn, op["delegation"], op["delivery"], op["action"],
                                                            op.get("detail") or "", fb["id"])

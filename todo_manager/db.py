@@ -489,11 +489,15 @@ INSERT OR IGNORE INTO followup_checks(task_id, due, state, run_id, attempts, cla
     # box, a page's own notes): a later read tells an unchanged re-read from a revert (A->B->A
     # within one timestamp), and a run that claimed an older revision cannot apply it.
     # Additive; the box's last seen fingerprint is seeded from a pending box edit, else from what we wrote.
+    # Also: accept/revision messages bound to the delivery (result seq + its review event) they
+    # were written for, and resume bound to the pause message it lifts.
     6: """
 ALTER TABLE notion_comments ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE notion_pages ADD COLUMN box_revision INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE notion_pages ADD COLUMN box_seen_hash TEXT;
 ALTER TABLE notion_pages ADD COLUMN notes_revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE delegation_messages ADD COLUMN target_seq INTEGER;
+ALTER TABLE delegation_messages ADD COLUMN target_message_id TEXT;
 UPDATE notion_pages SET box_seen_hash = COALESCE((
   SELECT substr(f.source_version, 6) FROM feedback f
   WHERE f.origin = 'notion_page' AND f.kind = 'body_edit' AND f.source_id = notion_pages.page_id

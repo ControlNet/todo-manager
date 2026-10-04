@@ -30,6 +30,8 @@ Ops:
 - `message` {delegation, kind, body}; kind is
   supplement (new information), answer (the agent's OPEN question; the reply thread tells you which question),
   revision (changes to a delivered version), pause, resume, cancel, accept (the user is satisfied with the delivery).
+  For accept/revision add `delivery` (the delivery id the user means) when the text names a version other than the
+  one the comment replies to; a newer version delivered before the message goes out makes it unused (the user is told).
 - `approve` {delegation, delivery, action, detail?}: the user approved an external action for that exact
   delivered version (the latest one). Never infer approval from vague praise.
 - `rule` {title, body, scope_type?, scope_id?, status}: `active` only when the user states a lasting preference
