@@ -22,6 +22,33 @@ import traceback
 
 MARK = "@@TM@@"
 
+# Mirror of todo_manager.kanban.TRANSITIONS / transition_verdict (this file cannot import
+# the package); tests/integration checks both against the installed Hermes code.
+TRANSITIONS = {
+    "unblock": {"anchors": ("blocked", "block_loop_detected", "gave_up"), "from": ("blocked", "triage"),
+                "done_by": ("unblocked", "specified"), "final": ()},
+    "reopen_review": {"anchors": ("review_requested",), "from": ("review",), "done_by": ("review_reopened",),
+                      "final": ()},
+    "complete": {"anchors": ("review_requested",), "from": ("review",), "done_by": ("completed",),
+                 "final": ("done",)},
+    "archive": {"anchors": (), "from": None, "done_by": ("archived",), "final": ("archived",)},
+}
+
+
+def transition_verdict(status, events, action, anchor):
+    spec = TRANSITIONS[action]
+    if status in spec["final"]:
+        return "already"
+    if anchor is not None:
+        if any(e.kind in spec["done_by"] for e in events if e.id > int(anchor)):
+            return "already"
+        latest = max((e.id for e in events if e.kind in spec["anchors"]), default=None)
+        if latest != int(anchor):
+            return "mismatch"
+    if spec["from"] is not None and status not in spec["from"]:
+        return "mismatch"
+    return "apply"
+
 
 def _out(payload: dict) -> None:
     sys.stdout.write(MARK + json.dumps(payload, default=str) + "\n")
@@ -119,6 +146,38 @@ def main() -> None:
             return _out({"ok": True, "result": bool(ok)})
         if op == "archive":
             return _out({"ok": True, "result": bool(kb.archive_task(conn, req["task_id"]))})
+        if op == "transition":
+            # Check and apply in one process, right before the Hermes state function (which
+            # re-checks the status in its own transaction). There is no conditional unblock in
+            # Hermes; a blocked/review card has no worker, so only a human dashboard action can
+            # interleave between the check and the call.
+            tid, action, anchor = req["task_id"], req["action"], req.get("anchor")
+            task = kb.get_task(conn, tid)
+            if task is None:
+                return _out({"ok": False, "error": "card not found", "code": "NO_CARD"})
+            verdict = transition_verdict(task.status, kb.list_events(conn, tid), action, anchor)
+            outcome = verdict
+            if verdict == "apply":
+                if action == "unblock":
+                    ok = (kb.specify_triage_task(conn, tid, author="todo-manager") if task.status == "triage"
+                          else kb.unblock_task(conn, tid))
+                elif action == "reopen_review":
+                    ok = kb.reopen_review_task(conn, tid)
+                elif action == "complete":
+                    ok = kb.complete_task(conn, tid, result=req.get("summary"), summary=req.get("summary"))
+                else:
+                    ok = kb.archive_task(conn, tid)
+                after = kb.get_task(conn, tid)
+                outcome = "done" if ok else (
+                    "already" if transition_verdict(after.status, kb.list_events(conn, tid), action, anchor) == "already"
+                    else "mismatch")
+            task = kb.get_task(conn, tid)
+            termination = None
+            if action == "archive":
+                term = [e for e in kb.list_events(conn, tid) if e.kind == "archive_worker_termination"]
+                termination = term[-1].payload if term else None
+            return _out({"ok": True, "result": {"outcome": outcome, "status": task.status,
+                                                "termination": termination}})
         if op == "counts":
             rows = conn.execute("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status").fetchall()
             return _out({"ok": True, "result": {r["status"]: r["n"] for r in rows}})

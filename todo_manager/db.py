@@ -11,10 +11,11 @@ from __future__ import annotations
 import contextlib
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -430,6 +431,22 @@ CREATE TABLE notion_comments (
 );
 CREATE INDEX notion_comments_discussion ON notion_comments(discussion_id);
 """,
+    # 2: delegation transitions bound to Kanban events, cancel confirmation, approval validity.
+    # Additive only (ADD COLUMN / new indexes): an older code version can still read the
+    # tables; rolling back means restoring the automatic pre-migration backup.
+    2: """
+ALTER TABLE delegation_messages ADD COLUMN target_event_id INTEGER;
+ALTER TABLE delegation_messages ADD COLUMN approval_id TEXT;
+ALTER TABLE delegation_messages ADD COLUMN cause TEXT;
+ALTER TABLE delegations ADD COLUMN pause_event_id INTEGER;
+ALTER TABLE delegations ADD COLUMN cancel_state TEXT;
+ALTER TABLE deliveries ADD COLUMN source_event_id INTEGER;
+ALTER TABLE deliveries ADD COLUMN after_cancel INTEGER NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX deliveries_source_event ON deliveries(delegation_id, card_id, source_event_id)
+  WHERE source_event_id IS NOT NULL;
+ALTER TABLE approvals ADD COLUMN outcome TEXT;
+CREATE INDEX delegation_messages_approval ON delegation_messages(approval_id);
+""",
 }
 
 
@@ -459,6 +476,8 @@ def migrate(conn: sqlite3.Connection) -> None:
     if current > SCHEMA_VERSION:
         raise RuntimeError(
             f"database schema {current} is newer than this code ({SCHEMA_VERSION}); upgrade the code")
+    if 0 < current < SCHEMA_VERSION:
+        backup_before_migration(conn, current)
     for version in range(current + 1, SCHEMA_VERSION + 1):
         with tx(conn):
             for statement in _split_sql(MIGRATIONS[version]):
@@ -468,6 +487,32 @@ def migrate(conn: sqlite3.Connection) -> None:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(version),))
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES('rules_version', '0') ON CONFLICT(key) DO NOTHING")
+
+
+def backup_before_migration(conn: sqlite3.Connection, current: int) -> Path | None:
+    """Copy an existing database before upgrading its schema (the rollback point).
+
+    Written to ``<home>/backups/pre-schema-v<new>-<UTC stamp>.sqlite``; restoring it with
+    the previous code version undoes the migration. In-memory databases are skipped.
+    """
+    row = conn.execute("PRAGMA database_list").fetchone()
+    if row is None or not row["file"]:
+        return None
+    db_file = Path(row["file"])
+    folder = db_file.parent.parent / "backups" if db_file.parent.name == "state" else db_file.parent
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    target = folder / f"pre-schema-v{SCHEMA_VERSION}-from-v{current}-{stamp}.sqlite"
+    n = 1
+    while target.exists():
+        n += 1
+        target = folder / f"pre-schema-v{SCHEMA_VERSION}-from-v{current}-{stamp}-{n}.sqlite"
+    dest = sqlite3.connect(str(target))
+    try:
+        conn.backup(dest)
+    finally:
+        dest.close()
+    return target
 
 
 def _split_sql(script: str) -> list[str]:

@@ -133,3 +133,65 @@ class HermesKanbanIntegration(WorkspaceCase):
         self.assertTrue(self.kb.archive(d["card_id"]))
         matches = self.kb.find(d["idem_key"], f"todo-manager-delegation: {did}")
         self.assertEqual([m["status"] for m in matches], ["archived"])
+
+    # ----- event-bound transitions (R01/R02/R15) against the real state functions -----
+
+    def _event_id(self, card, kind):
+        return max(e["id"] for e in self.kb.snapshot(card)["events"] if e["kind"] == kind)
+
+    def test_retried_unblock_is_already_done_and_leaves_the_next_question(self):
+        did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草", goal="Draft only")
+        self.tick()
+        card = delegation.get(self.conn, did)["card_id"]
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.assertTrue(self.sim("block", task_id=card, reason="Q1?", kind="needs_input"))
+        q1 = self._event_id(card, "blocked")
+        self.assertEqual(self.kb.transition(card, "unblock", q1)["outcome"], "done")
+        # The worker runs again and asks a second question; the retry of the first answer
+        # (its response was "lost") must not release it.
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.assertTrue(self.sim("block", task_id=card, reason="Q2?", kind="capability"))
+        retry = self.kb.transition(card, "unblock", q1)
+        self.assertEqual((retry["outcome"], retry["status"]), ("already", "blocked"))
+        q2 = self._event_id(card, "blocked")
+        self.assertEqual(self.kb.transition(card, "unblock", q2)["outcome"], "done")
+        self.assertEqual(self.sim("status", task_id=card)["status"], "ready")
+
+    def test_old_review_anchor_cannot_reopen_or_complete_a_newer_version(self):
+        did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草", goal="Draft only")
+        self.tick()
+        card = delegation.get(self.conn, did)["card_id"]
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.assertTrue(self.sim("review", task_id=card, summary="v1", metadata={"deliverable_markdown": "v1"}))
+        v1 = self._event_id(card, "review_requested")
+        self.assertEqual(self.kb.transition(card, "reopen_review", v1)["outcome"], "done")
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.assertTrue(self.sim("review", task_id=card, summary="v2", metadata={"deliverable_markdown": "v2"}))
+        self.assertEqual(self.kb.transition(card, "reopen_review", v1)["outcome"], "already")
+        self.assertEqual(self.kb.transition(card, "complete", v1)["outcome"], "mismatch")
+        self.assertEqual(self.sim("status", task_id=card)["status"], "review")
+        # Each review event carries its own run: two results synced at once keep their bodies.
+        self.tick()
+        self.assertEqual([x["body"] for x in delegation.deliveries(self.conn, did) if x["kind"] == "result"],
+                         ["v1", "v2"])
+        v2 = self._event_id(card, "review_requested")
+        self.assertEqual(self.kb.transition(card, "complete", v2)["outcome"], "done")
+        self.assertEqual(self.kb.transition(card, "complete", v2)["outcome"], "already")
+
+    def test_cancel_running_card_reports_worker_termination(self):
+        did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草", goal="Draft only")
+        self.tick()
+        card = delegation.get(self.conn, did)["card_id"]
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.tick()
+        store.update_task(self.conn, self.task, {"status": "cancelled"}, actor="human", origin="cli")
+        self.tick()
+        self.assertEqual(self.sim("status", task_id=card)["status"], "archived")
+        d = delegation.get(self.conn, did)
+        self.assertEqual(d["status"], "cancelled")
+        # The simulated claim has no worker process, so termination cannot be confirmed: the
+        # user is told instead of the cancel being reported as complete.
+        self.assertEqual(d["cancel_state"], "unconfirmed")
+        again = self.kb.transition(card, "archive")
+        self.assertEqual(again["outcome"], "already")
+        self.assertIn("terminated", again["termination"])

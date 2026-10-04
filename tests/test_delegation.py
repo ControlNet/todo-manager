@@ -145,14 +145,17 @@ class DelegationTests(WorkspaceCase):
         self.tick()
         self.assertEqual(self.kb.cards[card]["status"], "triage")
         self.assertEqual(self.d(did)["status"], "blocked")
-        # A late duplicate of the OLD answer cannot unblock the NEW question.
+        # A late duplicate of the OLD answer cannot unblock the NEW question. It is bound to the
+        # first block event, which was already resolved by this very message (its marker is on
+        # the card), so the replay is settled as sent without touching the card.
         stale = self.conn.execute("SELECT * FROM delegation_messages WHERE id=?", (old_answer,)).fetchone()
         self.assertEqual(stale["status"], "sent")
         self.conn.execute("UPDATE delegation_messages SET status='pending' WHERE id=?", (old_answer,))
         self.tick()
         self.assertEqual(self.kb.cards[card]["status"], "triage")
         self.assertEqual(self.conn.execute("SELECT status FROM delegation_messages WHERE id=?",
-                                           (old_answer,)).fetchone()[0], "superseded")
+                                           (old_answer,)).fetchone()[0], "sent")
+        self.assertEqual(sum(1 for c in self.kb.comments if f"[tm:{old_answer}]" in c["body"]), 1)
         delegation.add_message(self.conn, did, "answer", "抄送 Bob", feedback_id="fbk_a2")
         self.tick()
         self.assertEqual(self.kb.cards[card]["status"], "ready")

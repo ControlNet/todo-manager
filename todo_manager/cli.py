@@ -219,12 +219,18 @@ def cmd_task(args: argparse.Namespace) -> int:
     changes = _parse_set(args.set)
     if args.note:
         changes["change_note"] = args.note
+    before = store.get_task(conn, args.id)
     try:
         result = store.update_task(conn, args.id, changes, actor="human", origin="cli")
     except store.StoreError as exc:
         return _fail("INVALID", str(exc))
+    report: dict[str, Any] = {"applied": result.applied, "rejected": result.rejected}
+    closed = result.applied.get("status")
+    if closed in store.CLOSED_STATUSES and before and before["status"] not in store.CLOSED_STATUSES:
+        # Same lifecycle as Notion/feedback/Matrix (enforce_task_lifecycle also catches it next cycle).
+        report["delegations"] = delegation.on_task_closed(conn, args.id, closed, args.note or "closed via CLI", None)
     effects.task_push(conn, args.id)
-    _print({"applied": result.applied, "rejected": result.rejected})
+    _print(report)
     return 0
 
 

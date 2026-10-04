@@ -17,6 +17,43 @@ MARK = "@@TM@@"
 BRIDGE = Path(__file__).with_name("kanban_bridge.py")
 
 
+# Transitions bound to the Kanban event they answer. ``anchors``: event kinds that put the
+# card in the state the transition leaves; ``done_by``: events after the anchor that mean the
+# transition already happened (e.g. our earlier call whose response was lost); ``final``:
+# statuses that already are the target. Mirrored in ``kanban_bridge.py`` (which cannot
+# import this package); the integration tests run both against the installed Hermes code.
+TRANSITIONS: dict[str, dict[str, tuple[str, ...] | None]] = {
+    "unblock": {"anchors": ("blocked", "block_loop_detected", "gave_up"), "from": ("blocked", "triage"),
+                "done_by": ("unblocked", "specified"), "final": ()},
+    "reopen_review": {"anchors": ("review_requested",), "from": ("review",), "done_by": ("review_reopened",),
+                      "final": ()},
+    "complete": {"anchors": ("review_requested",), "from": ("review",), "done_by": ("completed",),
+                 "final": ("done",)},
+    "archive": {"anchors": (), "from": None, "done_by": ("archived",), "final": ("archived",)},
+}
+
+
+def transition_verdict(status: str, events: list[dict[str, Any]], action: str, anchor: int | None) -> str:
+    """``apply`` | ``already`` | ``mismatch`` for ``action`` bound to event ``anchor``.
+
+    ``already``: the transition happened after the anchor (by us or by someone else), or the
+    card is in the target state. ``mismatch``: the anchor is no longer the card's current
+    question/review, or the card is not in a state the transition applies to."""
+    spec = TRANSITIONS[action]
+    if status in (spec["final"] or ()):
+        return "already"
+    if anchor is not None:
+        later = [e for e in events if int(e["id"]) > int(anchor)]
+        if any(e["kind"] in spec["done_by"] for e in later):
+            return "already"
+        latest = max((int(e["id"]) for e in events if e["kind"] in spec["anchors"]), default=None)
+        if latest != int(anchor):
+            return "mismatch"
+    if spec["from"] is not None and status not in spec["from"]:
+        return "mismatch"
+    return "apply"
+
+
 class KanbanError(Exception):
     def __init__(self, message: str, code: str | None = None, uncertain: bool = False):
         super().__init__(message)
@@ -38,6 +75,8 @@ class Kanban(Protocol):
     def reopen_review(self, card_id: str) -> bool: ...
     def complete(self, card_id: str, summary: str) -> bool: ...
     def archive(self, card_id: str) -> bool: ...
+    def transition(self, card_id: str, action: str, anchor: int | None = None,
+                   summary: str | None = None) -> dict[str, Any]: ...
     def counts(self) -> dict[str, int]: ...
 
 
@@ -122,6 +161,12 @@ class BridgeKanban:
     def archive(self, card_id: str) -> bool:
         return self.call("archive", task_id=card_id)
 
+    def transition(self, card_id: str, action: str, anchor: int | None = None,
+                   summary: str | None = None) -> dict[str, Any]:
+        """Check-and-apply in one bridge process: ``{"outcome": "done"|"already"|"mismatch",
+        "status": ..., "termination": <archive_worker_termination payload or None>}``."""
+        return self.call("transition", task_id=card_id, action=action, anchor=anchor, summary=summary)
+
     def counts(self) -> dict[str, int]:
         return self.call("counts", mutating=False)
 
@@ -139,11 +184,16 @@ class FakeKanban:
         self.runs: dict[str, list[dict[str, Any]]] = {}
         self.fail_next: dict[str, Exception] = {}
         self.lose_response: set[str] = set()
+        self.terminate_ok = True  # outcome of terminating a running worker on archive
         self._n = 0
 
-    def _event(self, card_id: str, kind: str, payload: dict | None = None) -> None:
+    def _event(self, card_id: str, kind: str, payload: dict | None = None, run_id: int | None = None) -> None:
         self.events.append({"id": len(self.events) + 1, "task_id": card_id, "kind": kind, "payload": payload or {},
-                            "created_at": 0, "run_id": None})
+                            "created_at": 0, "run_id": run_id})
+
+    def _current_run(self, card_id: str) -> int | None:
+        runs = self.runs.get(card_id) or []
+        return runs[-1]["id"] if runs and runs[-1]["status"] == "running" else None
 
     def _maybe_fail(self, op: str) -> None:
         if op in self.fail_next:
@@ -198,7 +248,7 @@ class FakeKanban:
         card["status"] = "running"
         self.runs.setdefault(card_id, []).append({"id": len(self.runs.get(card_id, [])) + 1, "status": "running",
                                                   "summary": None, "metadata": None})
-        self._event(card_id, "claimed")
+        self._event(card_id, "claimed", run_id=self.runs[card_id][-1]["id"])
 
     def worker_block(self, card_id: str, reason: str, kind: str = "needs_input") -> None:
         self.block(card_id, reason, kind, _from_worker=True)
@@ -209,7 +259,16 @@ class FakeKanban:
         card["status"] = "review"
         run = self.runs[card_id][-1]
         run.update(status="done", summary=summary, metadata=metadata or {})
-        self._event(card_id, "review_requested", {"summary": summary, "run_id": run["id"]})
+        self._event(card_id, "review_requested", {"summary": summary}, run_id=run["id"])
+
+    def worker_crash(self, card_id: str) -> None:
+        """The worker process died: the dispatcher returns the card to ready for a retry."""
+        card = self.cards[card_id]
+        assert card["status"] == "running"
+        run = self.runs[card_id][-1]
+        run.update(status="crashed")
+        card["status"] = "ready"
+        self._event(card_id, "crashed", {"error": "worker exited"}, run_id=run["id"])
 
     def dispatch_tick(self) -> list[str]:
         """Which cards a dispatcher would start: only ready ones (blocked/review/triage wait)."""
@@ -221,14 +280,17 @@ class FakeKanban:
         card = self.cards[card_id]
         if card["status"] not in ("running", "ready"):
             return False
+        run_id = self._current_run(card_id)
+        if run_id is not None:
+            self.runs[card_id][-1]["status"] = "blocked"
         recurrences = card["block_recurrences"] + 1 if card["block_kind"] == kind else 1
         card["block_kind"], card["block_recurrences"] = kind, recurrences
         if recurrences >= 2:
             card["status"] = "triage"
-            self._event(card_id, "block_loop_detected", {"reason": reason, "kind": kind})
+            self._event(card_id, "block_loop_detected", {"reason": reason, "kind": kind}, run_id=run_id)
         else:
             card["status"] = "blocked"
-            self._event(card_id, "blocked", {"reason": reason, "kind": kind})
+            self._event(card_id, "blocked", {"reason": reason, "kind": kind}, run_id=run_id)
         return True
 
     def unblock(self, card_id: str) -> bool:
@@ -269,9 +331,39 @@ class FakeKanban:
         card = self.cards[card_id]
         if card["status"] == "archived":
             return False
+        was_running = card["status"] == "running"
         card["status"] = "archived"
         self._event(card_id, "archived")
+        if was_running:
+            self._event(card_id, "archive_worker_termination",
+                        {"host_local": True, "termination_attempted": True, "terminated": self.terminate_ok})
         return True
+
+    def transition(self, card_id: str, action: str, anchor: int | None = None,
+                   summary: str | None = None) -> dict[str, Any]:
+        self._maybe_fail("transition")
+        card = self.cards.get(card_id)
+        if card is None:
+            raise KanbanError("card not found", code="NO_CARD")
+        events = [e for e in self.events if e["task_id"] == card_id]
+        verdict = transition_verdict(card["status"], events, action, anchor)
+        outcome = verdict
+        if verdict == "apply":
+            if action == "unblock":
+                ok = self.respecify(card_id) if card["status"] == "triage" else self.unblock(card_id)
+            else:
+                ok = getattr(self, action)(card_id, *((summary or "",) if action == "complete" else ()))
+            after = [e for e in self.events if e["task_id"] == card_id]
+            outcome = "done" if ok else (
+                "already" if transition_verdict(card["status"], after, action, anchor) == "already" else "mismatch")
+        termination = None
+        if action == "archive":
+            term = [e for e in self.events if e["task_id"] == card_id and e["kind"] == "archive_worker_termination"]
+            termination = term[-1]["payload"] if term else None
+        if outcome == "done" and action in self.lose_response:
+            self.lose_response.discard(action)
+            raise KanbanError(f"bridge timeout during transition {action}", uncertain=True)
+        return {"outcome": outcome, "status": card["status"], "termination": termination}
 
     def counts(self) -> dict[str, int]:
         result: dict[str, int] = {}

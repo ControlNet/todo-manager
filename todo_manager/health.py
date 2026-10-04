@@ -57,6 +57,13 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
         "SELECT status, COUNT(*) n FROM feedback GROUP BY status")}
     out["delegations"] = {r["status"]: r["n"] for r in conn.execute(
         "SELECT status, COUNT(*) n FROM delegations GROUP BY status")}
+    out["delegation_attention"] = {
+        "cancel_unconfirmed": [r["id"] for r in conn.execute(
+            "SELECT id FROM delegations WHERE cancel_state='unconfirmed' ORDER BY updated_at DESC LIMIT 20")],
+        "approval_outcome_unknown": [r["id"] for r in conn.execute(
+            "SELECT id FROM approvals WHERE outcome='unknown' ORDER BY consumed_at DESC LIMIT 20")],
+        "messages_unconfirmed": conn.execute(
+            "SELECT COUNT(*) FROM delegation_messages WHERE status='sending'").fetchone()[0]}
     out["batches"] = {r["state"]: r["n"] for r in conn.execute("SELECT state, COUNT(*) n FROM batches GROUP BY state")}
     out["runs"] = {}
     for entry in ENTRIES:
@@ -89,6 +96,13 @@ def problems(rep: dict[str, Any], cfg: Config) -> list[str]:
         found.append(f"{rep['feedback']['failed']} feedback items failed")
     if rep["delegations"].get("quarantined"):
         found.append(f"{rep['delegations']['quarantined']} delegations quarantined")
+    attention = rep.get("delegation_attention") or {}
+    if attention.get("cancel_unconfirmed"):
+        found.append(f"cancelled delegations whose worker was not confirmed stopped: "
+                     f"{', '.join(attention['cancel_unconfirmed'])}")
+    if attention.get("approval_outcome_unknown"):
+        found.append(f"approved external actions with unknown outcome (paused, check manually): "
+                     f"{', '.join(attention['approval_outcome_unknown'])}")
     for entry, info in rep["runs"].items():
         last = info["last"]
         if last is None:
