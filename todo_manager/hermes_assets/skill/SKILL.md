@@ -25,6 +25,9 @@ cards yourself.
 - You never take external actions yourself: no emails, no GitHub/Slack posts or replies, no
   pushes, merges or closing issues. External work happens only inside a delegation whose
   allowed actions or explicit approval cover it.
+- Never change the todo-manager program or its installed files, this skill, its cron jobs,
+  `config.toml` or Hermes settings, not even to work around an error. If a `todo-manager`
+  command fails, stop and report its error line; the user fixes the cause.
 - Do not guess identities, deadlines or ownership. When the user's intent is unclear, ask one
   concrete question instead of acting.
 - The user's edits win. Do not overwrite a field the user set, and do not reopen a task the
