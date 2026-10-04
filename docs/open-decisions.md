@@ -18,12 +18,19 @@ are raised to 30.)
 | `notion.cold_comment_poll_minutes` | 60 | Comment polling interval for open tasks without recent activity (active pages: every run) |
 | `notion.cold_comment_pages_per_run` | 30 | Round-robin budget of cold pages per run |
 | `notion.history_poll_hours` | 24 | Sweep of recently closed pages for late comments |
-| `slack.active_hours` / `slack.quiet_poll_minutes` | 168 / 30 | A Slack conversation with a human (non-bot) message in the last 7 days is read every run; quieter ones about every 30 minutes (staggered), so all DMs stay within Slack's rate limits. A new message in a long-quiet DM is seen within ~30 minutes, before the 30 quiet minutes of batching |
 | `wake.max_context_chars` / `max_items_per_run` | 60000 / 60 | Evidence rendered into one intake run; the rest waits for the next run. Batches are taken round-robin across sources, so an email backlog cannot crowd out chat. When more than one run's worth is waiting, the email/GitHub wake interval is skipped so a backlog drains every 5 minutes |
 | `feedback.max_items_per_run` | 20 | Feedback items per model run |
 | `feedback.max_attempts` | 3 | Model runs before an unapplied feedback item is marked failed (with a reminder) |
 | `kanban.max_running` | 1 | Delegations executing at once |
 | `notify.failure_alert_after_minutes` | 60 | A gate that has not run this long is reported |
+
+## Agreed defaults
+
+| Setting | Default | Effect |
+|---|---|---|
+| `slack.quiet_minutes` | 30 | A Slack conversation matures only after 30 quiet minutes (floor) |
+| `slack.active_hours` / `slack.quiet_poll_minutes` | 168 / 30 | A Slack conversation with a human (non-bot) message in the last 7 days is read every run; quieter ones about every 30 minutes (staggered), so all DMs and channels stay within Slack's rate limits. A new message in a long-quiet conversation is seen within ~30 minutes, before the 30 quiet minutes of batching |
+| GitHub: your own PR merged/closed | context unless an open task is about it | A merge/close of a PR you opened (with no newer comment by someone else) wakes the model only when that PR is evidence of an open task, so the task gets updated |
 
 ## Decisions that belong to the user
 

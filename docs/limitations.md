@@ -37,6 +37,9 @@ verified and how.
   not detected automatically; they are blacklisted with `slack.exclude` (an unlisted one costs only
   API reads: bot messages are context only, never analysed, and do not make a channel "active").
   The Slackbot DM is skipped: the API does not return its history.
+- The "own PR merged/closed is news only for an open task" rule applies to the GitHub API sources.
+  GitHub notification emails read through Gmail do not say who opened the PR, so such an email
+  still reaches the model (which can ignore it as `automated_notice`).
 - A discovered Slack conversation that leaves the list (blacklisted, left, or its kind turned
   off while discovery stays on) is retired automatically. A scope removed from the configuration
   itself (an email account, an entry of `slack.conversations`, or all Slack discovery turned off)

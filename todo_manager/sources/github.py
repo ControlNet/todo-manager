@@ -10,6 +10,10 @@ with reasons such as review_requested / assign / mention / author) become items.
 
 Every item is keyed ``github:owner/repo#number`` so mail notifications about the same
 issue/PR land in the same matter instead of creating a second task.
+
+A merge/close of the user's own PR (no newer comment by someone else) is routed
+``if_open_task``: it reaches the model only when that PR is evidence of an open task, which
+then gets updated; otherwise it is stored as context.
 Reading notifications never marks them as read.
 """
 
@@ -124,6 +128,7 @@ class GitHubRepoSource:
         for issue in issues:
             number = issue["number"]
             is_pr = "pull_request" in issue
+            opener = ((issue.get("user") or {}).get("login") or "").lower()
             title = f"{'PR' if is_pr else 'Issue'} {self.repo}#{number}: {issue.get('title', '')}"
             meta = {"is_pr": is_pr, "state": issue.get("state"), "labels": [l.get("name") for l in issue.get("labels", [])],
                     "assignees": [a.get("login") for a in issue.get("assignees", []) or []]}
@@ -156,9 +161,12 @@ class GitHubRepoSource:
                 if e.get("event") not in STATE_EVENTS or not at or (since_dt and at < since_dt):
                     continue
                 detail = {k: (e.get(k) or {}).get("login") for k in ("assignee", "requested_reviewer") if e.get(k)}
-                items.append(self._item(number, f"event:{e['id']}", "event", e.get("actor"), e["created_at"],
-                                        f"{e['event']} {json.dumps(detail) if detail else ''}".strip(), title,
-                                        issue["html_url"], meta={**meta, "event": e["event"], **detail}))
+                item = self._item(number, f"event:{e['id']}", "event", e.get("actor"), e["created_at"],
+                                  f"{e['event']} {json.dumps(detail) if detail else ''}".strip(), title,
+                                  issue["html_url"], meta={**meta, "event": e["event"], **detail})
+                if is_pr and e["event"] in ("merged", "closed") and opener in self.me and item.route == "batch":
+                    item.route = "if_open_task"   # my own PR merged/closed: news only for an open task
+                items.append(item)
         new_cursor = clock.iso(started - timedelta(minutes=self.overlap)).replace(".000Z", "Z")
         return FetchResult(scope=self.scope, items=items, cursor=new_cursor, meta={"issues": len(issues)})
 
@@ -208,6 +216,9 @@ class GitHubNotificationSource:
             login = actor.get("login") or ""
             is_bot = login.lower() in self.bots or actor.get("type") == "Bot" or login.lower().endswith("[bot]")
             body = (latest or {}).get("body") or ""
+            # My own PR merged/closed with no newer comment: news only for a task still open about it.
+            own_pr_closed = ("/pulls/" in url and opener.lower() in self.me and state in ("merged", "closed")
+                             and latest is thread)
             key = f"github:{repo}#{number}"
             html_url = f"https://github.com/{repo}/{'pull' if '/pulls/' in url else 'issues'}/{number}"
             items.append(Item(source="github", account=repo, external_id=f"notification:{note['id']}",
@@ -215,7 +226,8 @@ class GitHubNotificationSource:
                               thread_key=key, occurred_at=_gh_time(note.get("updated_at", clock.iso())),
                               author=login or None, author_is_me=login.lower() in self.me,
                               title=f"{subject.get('type')} {repo}#{number}: {subject.get('title')}",
-                              url=html_url, route="context" if is_bot else "batch",
+                              url=html_url,
+                              route="context" if is_bot else "if_open_task" if own_pr_closed else "batch",
                               body=f"[reason: {note.get('reason')}; state: {state}; opened by {opener}]\n{body}",
                               meta={"reason": note.get("reason"), "number": number, "state": state,
                                     "opener": opener}))

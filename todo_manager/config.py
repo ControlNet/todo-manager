@@ -59,8 +59,8 @@ DEFAULTS: dict[str, Any] = {
         "group_direct_messages": False,  # also read every group DM (mpim) of the user
         "channels": False,  # also read every channel the user is a member of (public and private)
         "exclude": [],  # blacklist for discovered conversations: ids, DM user ids, channel name globs
-        "active_hours": 168,  # PROPOSED: a conversation with a human message this recent is read every run
-        "quiet_poll_minutes": 30,  # PROPOSED: other conversations are read at most this often (staggered)
+        "active_hours": 168,  # agreed: a conversation with a human message this recent is read every run
+        "quiet_poll_minutes": 30,  # agreed: other conversations are read at most this often (staggered)
         "quiet_minutes": 30,  # agreed: >= 30 minutes after the last relevant message
         "page_size": 200,
     },

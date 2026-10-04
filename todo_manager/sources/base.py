@@ -14,7 +14,7 @@ Fetch checkpoint vs. processed checkpoint:
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable
 
 from .. import clock, ids
@@ -41,6 +41,8 @@ class Item:
     #   batch    -> accumulate into a conversation batch (default)
     #   digest   -> only consumed by a daily digest (commits)
     #   context  -> stored as context only, never wakes the model (e.g. my own reactions)
+    #   if_open_task -> batch when the matter is already evidence of an open task (so that task
+    #               gets updated), otherwise context (e.g. my own PR was merged)
     #   superseded -> duplicate of an item another source covers (kept for audit)
     route: str = "batch"
 
@@ -102,6 +104,8 @@ def persist_fetch(conn: sqlite3.Connection, source: str, result: FetchResult) ->
     now = clock.iso()
     with tx(conn):
         for item in result.items:
+            if item.route == "if_open_task":
+                item = replace(item, route="batch" if _open_task_matter(conn, item) else "context")
             inserted_id = _insert_item(conn, item, now)
             if inserted_id is None:
                 stats["duplicate"] += 1
@@ -121,6 +125,15 @@ def persist_fetch(conn: sqlite3.Connection, source: str, result: FetchResult) ->
             " last_error=NULL, consecutive_failures=0, meta=excluded.meta",
             (source, result.scope, result.cursor, now, now, dumps(meta)))
     return stats
+
+
+def _open_task_matter(conn: sqlite3.Connection, item: Item) -> bool:
+    """Is this item's matter (thread key, else conversation) evidence of a task that is still open?"""
+    key = item.thread_key or item.conversation_key
+    return conn.execute(
+        "SELECT 1 FROM evidence_links e JOIN source_items s ON s.id=e.source_item_id"
+        " JOIN tasks t ON t.id=e.entity_id WHERE e.entity_type='task' AND t.status NOT IN ('done','cancelled')"
+        " AND (s.thread_key=? OR s.conversation_key=?) LIMIT 1", (key, key)).fetchone() is not None
 
 
 def _insert_item(conn: sqlite3.Connection, item: Item, now: str) -> str | None:

@@ -8,10 +8,10 @@ are not the real services. Real read-only runs are done separately in a sandbox 
 import base64
 import json
 
-from todo_manager import clock, gate_intake
+from todo_manager import clock, gate_intake, store
 from todo_manager.net import HttpError
-from todo_manager.sources.base import FetchResult, SourceError, get_cursor, record_fetch_error
-from todo_manager.sources.github import GitHubNotificationSource
+from todo_manager.sources.base import FetchResult, Item, SourceError, get_cursor, persist_fetch, record_fetch_error
+from todo_manager.sources.github import GitHubNotificationSource, GitHubRepoSource
 from todo_manager.sources.gmail import GmailSource
 from todo_manager.sources.slack import SlackDirectory, SlackSource
 from tests.helpers import WorkspaceCase
@@ -88,13 +88,15 @@ class GmailAdapterTests(WorkspaceCase):
 
 
 class FakeGitHub:
-    def __init__(self, notifications, objects):
+    def __init__(self, notifications, objects, pages=None):
         self.notifications = notifications
         self.objects = objects
+        self.pages = pages or {}
 
     def paged(self, path, params=None, max_pages=50):
-        assert path == "notifications"
-        return self.notifications
+        if path == "notifications":
+            return self.notifications
+        return self.pages.get(path, [])
 
     def get(self, path, params=None):
         return self.objects[path]
@@ -120,6 +122,27 @@ class GitHubNotificationTests(WorkspaceCase):
         self.assertTrue(item.author_is_me)
         self.assertIn("merged", item.body)
         self.assertIn("opened by me-gh", item.body)
+        self.assertEqual(item.route, "if_open_task", "only news for a task that is still open")
+
+    def test_comment_on_my_closed_pr_by_someone_else_still_counts(self):
+        pr = {"user": {"login": "me-gh"}, "state": "closed", "merged": True, "body": ""}
+        comment = {"user": {"login": "alice"}, "body": "This broke the build"}
+        [item] = self.fetch([notification("n4", "author", self.PR,
+                                          "https://api.github.com/repos/octo/repo/issues/comments/9")],
+                            {"repos/octo/repo/pulls/7": pr, "repos/octo/repo/issues/comments/9": comment})
+        self.assertEqual(item.route, "batch")
+
+    def test_tracked_repo_merge_of_my_pr_is_news_only_for_an_open_task(self):
+        now = clock.iso()
+        issue = {"number": 7, "id": 70, "pull_request": {}, "user": {"login": "me-gh"}, "state": "closed",
+                 "title": "Loader", "html_url": "https://github.com/octo/repo/pull/7", "created_at": "2026-01-01T00:00:00Z",
+                 "comments": 0}
+        events = [{"id": 1, "event": "merged", "actor": {"login": "bob"}, "created_at": now},
+                  {"id": 2, "event": "review_requested", "actor": {"login": "me-gh"}, "created_at": now,
+                   "requested_reviewer": {"login": "bob"}}]
+        client = FakeGitHub([], {}, pages={"repos/octo/repo/issues": [issue], "repos/octo/repo/issues/7/events": events})
+        items = GitHubRepoSource(client, "octo/repo", ["me-gh"], []).fetch(None).items
+        self.assertEqual({i.meta["event"]: i.route for i in items}, {"merged": "if_open_task", "review_requested": "batch"})
 
     def test_latest_comment_by_someone_else_is_attributed_to_them(self):
         pr = {"user": {"login": "me-gh"}, "state": "open", "merged": False, "body": ""}
@@ -130,6 +153,28 @@ class GitHubNotificationTests(WorkspaceCase):
         self.assertEqual((item.author, item.author_is_me), ("alice", False))
         self.assertIn("Could you rebase?", item.body)
         self.assertIn("state: open", item.body)
+
+    def test_if_open_task_items_wake_only_for_an_open_linked_task(self):
+        key = "github:octo/repo#7"
+
+        def merged(ext):
+            return Item(source="github", account="octo/repo", external_id=ext, conversation_key=key, thread_key=key,
+                        occurred_at=clock.iso(), author="me-gh", author_is_me=True, body="merged",
+                        route="if_open_task")
+
+        persist_fetch(self.conn, "github", FetchResult(scope="notifications", items=[merged("n1")], cursor="c"))
+        state = self.conn.execute("SELECT state, batch_id FROM source_items WHERE external_id='n1'").fetchone()
+        self.assertEqual((state["state"], state["batch_id"]), ("processed", None), "no task: context only")
+        tid = store.create_task(self.conn, "Get the loader PR merged", origin="intake")
+        store.link_evidence(self.conn, "task", tid, self.item_id("n1"), "origin")
+        persist_fetch(self.conn, "github", FetchResult(scope="notifications", items=[merged("n2")], cursor="c"))
+        row = self.conn.execute("SELECT state, batch_id FROM source_items WHERE external_id='n2'").fetchone()
+        self.assertEqual(row["state"], "batched")
+        self.assertIsNotNone(row["batch_id"], "open linked task: goes to the model to update it")
+        store.update_task(self.conn, tid, {"status": "done"}, actor="human", origin="cli")
+        persist_fetch(self.conn, "github", FetchResult(scope="notifications", items=[merged("n3")], cursor="c"))
+        self.assertEqual(self.conn.execute("SELECT state FROM source_items WHERE external_id='n3'").fetchone()[0],
+                         "processed", "a closed task is not reopened by more news")
 
     def test_bot_activity_is_context_only(self):
         pr = {"user": {"login": "dependabot[bot]", "type": "Bot"}, "state": "open", "merged": False, "body": "bump"}
