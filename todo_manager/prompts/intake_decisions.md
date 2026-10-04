@@ -14,6 +14,8 @@ Ops:
 - `create_task` {ref?, title, responsibility, evidence: [{item, role, note?}], project?, status?, next_actor?,
   next_step?, done_criteria?, summary?, due_date?, due_basis?, follow_up_date?, waiting_on?, focus?, focus_reason?,
   follow_up_of?, ask?, rationale}
+  - `evidence[].role` is one of {evidence_roles} (`origin`: the message the commitment comes from;
+    omitted means `context`).
   - `responsibility`: one sentence on why this is the user's own commitment (asked directly, promised,
     owner/reviewer/assignee, deadline addressed to them). No responsibility, no task.
   - `project`: an existing project id or `@ref` of a `create_project` in this file.

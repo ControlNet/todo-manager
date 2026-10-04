@@ -253,7 +253,8 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, manifest:
     out.append("\n## Output")
     out.append(f"run_id={run_id} rules_version={rv}")
     out.append(prompts.load("intake_decisions.md").replace(
-        "{max_questions}", str(int(cfg.get("wake.max_questions_per_run", 3)))))
+        "{max_questions}", str(int(cfg.get("wake.max_questions_per_run", 3)))).replace(
+        "{evidence_roles}", ", ".join(f"`{r}`" for r in store.EVIDENCE_ROLES)))
     return "\n".join(out)
 
 
@@ -295,7 +296,7 @@ def _validate(conn: sqlite3.Connection, run_id: str, decisions: dict[str, Any], 
             if not sid or conn.execute("SELECT 1 FROM source_items WHERE id=?", (sid,)).fetchone() is None:
                 errors.append(f"{where}: unknown evidence item {sid!r}")
             if ev.get("role", "context") not in store.EVIDENCE_ROLES:
-                errors.append(f"{where}: invalid role {ev.get('role')!r}")
+                errors.append(f"{where}: invalid role {ev.get('role')!r} (one of {', '.join(store.EVIDENCE_ROLES)})")
             covered.add(sid)
         if kind == "create_task":
             if not (op.get("title") or "").strip():
