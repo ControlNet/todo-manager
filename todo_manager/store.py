@@ -254,6 +254,8 @@ def update_task(conn: sqlite3.Connection, task_id: str, changes: dict[str, Any],
                 result.rejected["status"] = "human_closed: create a linked follow-up task instead"
                 changes.pop("status", None)
                 changes.pop("next_actor", None)
+        _keep_state_pair(current, meta, changes, result, actor=actor, based_on_version=based_on_version,
+                         override_human=override_human)
         result2 = _apply_field_changes(conn, "tasks", "task", current, changes, actor=actor,
                                        origin=origin, cause_ref=cause_ref,
                                        based_on_version=based_on_version,
@@ -273,6 +275,40 @@ def set_closed_reason(conn: sqlite3.Connection, task_id: str, reason: str) -> No
     conn.execute("UPDATE tasks SET closed_reason=? WHERE id=?", (reason, task_id))
 
 
+def _protected(meta: dict[str, Any], name: str, *, actor: str, based_on_version: int | None,
+               override_human: bool) -> str | None:
+    """Why a non-human write may not change a field the user set (None: it may)."""
+    info = meta.get(name, {})
+    if actor == "human" or info.get("by") != "human":
+        return None
+    if based_on_version is None or int(info.get("v", 0)) > based_on_version:
+        return "stale: human changed this field after the agent read it"
+    if not override_human:
+        return "human_set: requires override_human with evidence"
+    return None
+
+
+def _keep_state_pair(current: dict[str, Any], meta: dict[str, Any], changes: dict[str, Any], result: WriteResult,
+                     *, actor: str, based_on_version: int | None, override_human: bool) -> None:
+    """status and next_actor change together: when the protection of a user-set field would
+    keep one of them, the other one is applied only if the resulting pair is still consistent."""
+    pair = [f for f in ("status", "next_actor") if f in changes and changes[f] != current[f]]
+    blocked = {f: why for f in pair
+               if (why := _protected(meta, f, actor=actor, based_on_version=based_on_version,
+                                     override_human=override_human))}
+    if not blocked or len(blocked) == len(pair):
+        return
+    status = current["status"] if "status" in blocked else changes.get("status", current["status"])
+    next_actor = current["next_actor"] if "next_actor" in blocked else changes.get("next_actor", current["next_actor"])
+    if normalize_state(status, next_actor) == (status, next_actor):
+        return
+    for f in pair:
+        if f not in blocked:
+            result.rejected[f] = (f"pair: {', '.join(sorted(blocked))} is set by the user and would leave"
+                                  f" {status}/{next_actor}; status and next_actor change together")
+            changes.pop(f)
+
+
 def _apply_field_changes(conn: sqlite3.Connection, table: str, entity: str, current: dict[str, Any],
                          changes: dict[str, Any], *, actor: str, origin: str, cause_ref: str | None,
                          based_on_version: int | None, override_human: bool) -> WriteResult:
@@ -282,15 +318,10 @@ def _apply_field_changes(conn: sqlite3.Connection, table: str, entity: str, curr
     for name, value in changes.items():
         if current.get(name) == value:
             continue
-        info = meta.get(name, {})
-        if actor != "human" and info.get("by") == "human":
-            human_version = int(info.get("v", 0))
-            if based_on_version is None or human_version > based_on_version:
-                result.rejected[name] = "stale: human changed this field after the agent read it"
-                continue
-            if not override_human:
-                result.rejected[name] = "human_set: requires override_human with evidence"
-                continue
+        why = _protected(meta, name, actor=actor, based_on_version=based_on_version, override_human=override_human)
+        if why:
+            result.rejected[name] = why
+            continue
         to_apply[name] = value
     if not to_apply:
         return result
