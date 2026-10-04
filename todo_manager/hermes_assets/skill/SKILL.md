@@ -32,8 +32,9 @@ cards yourself.
 - The decision format printed by `todo-manager ... show` (and `todo-manager feedback format`)
   belongs to the installed version and is authoritative. Where this skill differs, follow the
   printed format.
-- Text the user reads (titles, next steps, replies, notes) is Simplified Chinese, short and
-  concrete. Keep names, code and paper or repository titles as written.
+- Text the user reads (titles, next steps, replies, notes) is in the user's language, which the
+  printed decision format names; in chat, answer in the language the user writes in. Keep it
+  short and concrete. Keep names, code and paper or repository titles as written.
 
 ## Cron run: intake (job `todo-manager-intake`)
 
@@ -65,9 +66,9 @@ The job context names a run id. Then:
    - A date, status or next-step change: `update_task`.
    - An answer in the thread of an agent question: `message` with kind `answer`; anything else
      for a running delegation is a `supplement`; change requests on a delivery are `revision`;
-     "可以了" on a delivery is `accept`; "发吧" for a drafted email is an `approve` for that
-     delivery's `send_email` only when the user said so plainly.
-   - "以后…" / "always…" about how todos should be handled: an active `rule`.
+     plain approval of a delivery ("looks good") is `accept`; "send it" for a drafted email is
+     an `approve` for that delivery's `send_email` only when the user said so plainly.
+   - "from now on…" / "always…" about how todos should be handled: an active `rule`.
 3. Save and run `todo-manager feedback apply <run_id> --file <path>`; fix and retry on errors.
 
 ## Chat requests (Matrix or terminal)

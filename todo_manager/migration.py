@@ -12,6 +12,9 @@ Nothing is copied wholesale and nothing old is deleted. The flow:
 
 Old-system judgements (priority, confidence, bot notes) are kept as context, not trusted
 as facts. Re-run ``apply`` safely: pages already imported are skipped.
+
+``LEGACY`` describes the old schema (property names and status values, which are data of that
+system, in its language). Adapt it to migrate from a differently named legacy database.
 """
 
 from __future__ import annotations
@@ -23,10 +26,18 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
-from . import clock, store
+from . import clock, i18n, store
 from .config import Config
 from .db import dumps, tx
 
+# The previous Notion Todo Manager's schema (data values, not UI text).
+LEGACY = {
+    "task": {"title": "任务名称", "status": "状态", "priority": "优先级", "confidence": "置信度", "due": "截止日期",
+             "project": "项目", "source_type": "来源类型", "source_id": "来源ID", "note": "备注", "evidence": "证据",
+             "fingerprint": "指纹"},
+    "project": {"title": "项目名称", "status": "状态", "domain": "领域", "tasks": "任务", "note": "备注"},
+    "high_confidence": ("高", "high"),
+}
 ACTIVE = {"待办": "todo", "进行中": "in_progress", "等待中": "waiting"}
 CLOSED = {"已完成": "done", "已放弃": "cancelled"}
 INBOX = "收件箱"
@@ -54,6 +65,14 @@ def _prop(page: dict[str, Any], name: str) -> Any:
     return None
 
 
+def _task(page: dict[str, Any], field: str) -> Any:
+    return _prop(page, LEGACY["task"][field])
+
+
+def _project(page: dict[str, Any], field: str) -> Any:
+    return _prop(page, LEGACY["project"][field])
+
+
 # --------------------------------------------------------------------------- fetch
 
 def fetch_old(client: Any, cfg: Config, tasks_data_source: str, projects_data_source: str) -> Path:
@@ -75,27 +94,28 @@ def fetch_old(client: Any, cfg: Config, tasks_data_source: str, projects_data_so
 def classify(tasks: list[dict[str, Any]], bot_ids: set[str], today: str) -> list[dict[str, Any]]:
     rows = []
     for page in tasks:
-        status = _prop(page, "状态")
+        status = _task(page, "status")
         by_user = (page.get("last_edited_by") or {}).get("id") not in bot_ids
-        priority, confidence = _prop(page, "优先级"), _prop(page, "置信度")
-        due = _prop(page, "截止日期")
+        priority, confidence = _task(page, "priority"), _task(page, "confidence")
+        due = _task(page, "due")
         if page.get("in_trash"):
-            category, action, reason = "trashed", "drop", "page is in the old trash"
+            category, action = "trashed", "drop"
         elif status in ACTIVE:
-            category, action, reason = "active", "keep", f"old status {status}"
+            category, action = "active", "keep"
         elif status in CLOSED and by_user:
-            category, action, reason = "closed_by_user", "history", "you closed it; keep so reminders cannot revive it"
+            category, action = "closed_by_user", "history"
         elif status in CLOSED:
-            category, action, reason = "closed_by_system", "drop", "closed by the old automation"
-        elif status == INBOX and (priority == "P1" or confidence in ("高", "high") or (due and due >= today)):
-            category, action, reason = "inbox_candidate", "review", "old inbox, marked important or due; decide keep/drop"
+            category, action = "closed_by_system", "drop"
+        elif status == INBOX and (priority == "P1" or confidence in LEGACY["high_confidence"] or (due and due >= today)):
+            category, action = "inbox_candidate", "review"
         else:
-            category, action, reason = "inbox_noise", "drop", "old unreviewed inbox item"
+            category, action = "inbox_noise", "drop"
+        reason = i18n.t(f"mig.reason.{category}", status=status or "")
         rows.append({
-            "old_page_id": page["id"], "category": category, "action": action, "title": _prop(page, "任务名称") or "",
+            "old_page_id": page["id"], "category": category, "action": action, "title": _task(page, "title") or "",
             "old_status": status or "", "edited_by_user": "yes" if by_user else "no", "due": due or "",
-            "priority": priority or "", "confidence": confidence or "", "source_type": _prop(page, "来源类型") or "",
-            "old_project": ",".join(_prop(page, "项目") or []), "created": page.get("created_time", "")[:10],
+            "priority": priority or "", "confidence": confidence or "", "source_type": _task(page, "source_type") or "",
+            "old_project": ",".join(_task(page, "project") or []), "created": page.get("created_time", "")[:10],
             "last_edited": page.get("last_edited_time", "")[:10], "old_url": page.get("url") or "", "reason": reason})
     return rows
 
@@ -111,8 +131,8 @@ def propose(root: Path, cfg: Config, extra_bot_ids: set[str] | None = None) -> d
     rows = classify(tasks, bot_ids, clock.local_date(cfg.tz).isoformat())
     kept_projects = {p for r in rows if r["action"] in ("keep", "review") for p in r["old_project"].split(",") if p}
     project_rows = [{"old_page_id": p["id"], "action": "keep" if p["id"] in kept_projects else "drop",
-                     "title": _prop(p, "项目名称") or "", "old_status": _prop(p, "状态") or "",
-                     "domain": _prop(p, "领域") or "", "tasks": len(_prop(p, "任务") or []),
+                     "title": _project(p, "title") or "", "old_status": _project(p, "status") or "",
+                     "domain": _project(p, "domain") or "", "tasks": len(_project(p, "tasks") or []),
                      "old_url": p.get("url") or ""} for p in projects]
     with (root / "tasks.csv").open("w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, TASK_COLUMNS)
@@ -135,26 +155,11 @@ def propose(root: Path, cfg: Config, extra_bot_ids: set[str] | None = None) -> d
 
 def _summary_md(s: dict[str, Any]) -> str:
     c, a = s["by_category"], s["by_action"]
-    return f"""# 旧 Todo Manager 迁移建议
-
-数据快照：{s.get('fetched_at') or '未知'}（只读查询；旧页面与旧数据未做任何修改）。
-旧任务 {s['old_tasks']} 条，旧项目 {s['old_projects']} 个。
-
-| 类别 | 数量 | 默认处理 |
-|---|---|---|
-| 仍在进行（待办／进行中／等待中） | {c.get('active', 0)} | keep：导入为新任务（保留旧备注作背景） |
-| 收件箱中标为 P1、高置信度或有未来截止日期 | {c.get('inbox_candidate', 0)} | review：需要你逐条改成 keep 或 drop |
-| 你手动完成／放弃的 | {c.get('closed_by_user', 0)} | history：作为已关闭记录导入，不显示在 Notion，用来阻止旧 reminder 再建任务 |
-| 旧自动化自行关闭的 | {c.get('closed_by_system', 0)} | drop |
-| 其余收件箱（未复核的旧噪声） | {c.get('inbox_noise', 0)} | drop：留在旧页面，不导入 |
-| 已在旧回收站 | {c.get('trashed', 0)} | drop |
-
-处理合计：{', '.join(f'{k} {v}' for k, v in sorted(a.items()))}；保留项目 {s['projects_kept']} 个（被 keep/review 任务引用的）。
-
-怎么改：编辑同目录的 `tasks.csv` / `projects.csv` 的 `action` 列（keep / history / drop），
-`review` 必须改掉才能导入。然后运行 `todo-manager migrate apply <本目录>`（先不加 --yes 预览）。
-导入只写本地数据库；新 Notion 页面在下一次同步时才出现，且只显示 keep 的任务。
-"""
+    counts = {k: c.get(k, 0) for k in ("active", "inbox_candidate", "closed_by_user", "closed_by_system",
+                                         "inbox_noise", "trashed")}
+    return i18n.t("mig.summary", fetched_at=s.get("fetched_at") or "?", tasks=s["old_tasks"],
+                  projects=s["old_projects"], actions=", ".join(f"{k} {v}" for k, v in sorted(a.items())),
+                  projects_kept=s["projects_kept"], **counts)
 
 
 # --------------------------------------------------------------------------- apply
@@ -192,7 +197,7 @@ def apply(conn: sqlite3.Connection, cfg: Config, root: Path, *, dry_run: bool = 
             page = old_projects.get(pr["old_page_id"], {})
             project_map[pr["old_page_id"]] = store.create_project(
                 conn, pr["title"], origin="migration", actor="program", cause_ref=f"old:{pr['old_page_id']}",
-                domain=pr["domain"] or None, goal=_prop(page, "备注"))
+                domain=pr["domain"] or None, goal=_project(page, "note"))
             report["projects"] += 1
         for r in rows:
             action = r["action"]
@@ -204,11 +209,12 @@ def apply(conn: sqlite3.Connection, cfg: Config, root: Path, *, dry_run: bool = 
                 report["skipped_existing"] += 1
                 continue
             page = old_tasks[r["old_page_id"]]
-            old_source = _prop(page, "来源ID")
+            old_source = _task(page, "source_id")
             thread_key = resolve_thread(old_source) if (resolve_thread and old_source) else None
             report["threads_linked"] += 1 if thread_key else 0
-            note = _prop(page, "备注")
-            evidence = _prop(page, "证据")
+            note = _task(page, "note")
+            evidence = _task(page, "evidence")
+            summary = i18n.t("mig.old_note", note=note) if note else None
             project = next((project_map[p] for p in r["old_project"].split(",") if p in project_map), None)
             if action == "keep":
                 status = ACTIVE.get(r["old_status"], "todo")
@@ -217,17 +223,15 @@ def apply(conn: sqlite3.Connection, cfg: Config, root: Path, *, dry_run: bool = 
                     conn, r["title"], origin="migration", actor="human" if user_status else "program",
                     cause_ref=f"old:{r['old_page_id']}", project_id=project, status=status,
                     next_actor="external" if status == "waiting" else "me", due_date=r["due"] or None,
-                    due_basis="旧系统记录的截止日期（迁移时未重新核实）" if r["due"] else None,
-                    summary=("旧系统备注：" + note) if note else None,
-                    change_note="从旧 Todo Manager 迁移")
+                    due_basis=i18n.t("mig.old_due") if r["due"] else None,
+                    summary=summary, change_note=i18n.t("mig.change_note"))
             else:
                 tid = store.create_task(
                     conn, r["title"], origin="migration", actor="human", cause_ref=f"old:{r['old_page_id']}",
-                    project_id=project, status=CLOSED.get(r["old_status"], "done"),
-                    summary=("旧系统备注：" + note) if note else None)
+                    project_id=project, status=CLOSED.get(r["old_status"], "done"), summary=summary)
                 closed_at = page.get("last_edited_time") or clock.iso()
                 conn.execute("UPDATE tasks SET closed_at=?, closed_reason=? WHERE id=?",
-                             (closed_at, f"旧系统中由你标为{r['old_status']}", tid))
+                             (closed_at, i18n.t("mig.closed_reason", status=r["old_status"]), tid))
             item_id = f"src_mig_{r['old_page_id'].replace('-', '')}"
             conn.execute(
                 "INSERT INTO source_items(id, source, account, external_id, kind, thread_key, conversation_key,"
@@ -237,7 +241,7 @@ def apply(conn: sqlite3.Connection, cfg: Config, root: Path, *, dry_run: bool = 
                 (item_id, r["old_page_id"], thread_key, page.get("created_time"), r["title"], r["old_url"] or None,
                  (evidence or "")[:1000], dumps({"old_source_id": old_source, "old_source_type": r["source_type"],
                                                  "priority": r["priority"], "confidence": r["confidence"],
-                                                 "fingerprint": _prop(page, "指纹")}), clock.iso()))
+                                                 "fingerprint": _task(page, "fingerprint")}), clock.iso()))
             conn.execute("INSERT INTO source_bodies(item_id, body) VALUES (?,?)",
                          (item_id, "\n\n".join(x for x in (evidence, note) if x)))
             store.link_evidence(conn, "task", tid, item_id, "origin", "migrated from the old Todo Manager")

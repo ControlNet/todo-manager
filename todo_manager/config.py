@@ -20,10 +20,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import i18n
+
 DEFAULT_HOME = Path("~/.hermes/workspace/todo-manager").expanduser()
 
 DEFAULTS: dict[str, Any] = {
     "timezone": "Pacific/Auckland",
+    # Language of everything the user reads (Notion, replies, reminders); see i18n.
+    # TODO_MANAGER_LANG overrides it for one process.
+    "language": i18n.DEFAULT,
     "identity": {
         # The user's own identities. Never guessed: filled from verified inventory.
         "emails": [],
@@ -137,6 +142,10 @@ class Config:
         return self.data["timezone"]
 
     @property
+    def language(self) -> str:
+        return self.data["language"]
+
+    @property
     def db_path(self) -> Path:
         return self.home / "state" / "todo.sqlite"
 
@@ -171,6 +180,7 @@ def load(home: str | os.PathLike[str] | None = None, overrides: dict[str, Any] |
             data = _deep_merge(data, tomllib.load(fh))
     if overrides:
         data = _deep_merge(data, overrides)
+    data["language"] = i18n.set_language(os.environ.get("TODO_MANAGER_LANG") or data.get("language"))
     return Config(home=root, data=data)
 
 

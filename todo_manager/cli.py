@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import clock, config, db, delegation, feedback, feedback_flow, health, rules, store
+from . import clock, config, db, delegation, feedback, feedback_flow, health, i18n, rules, store
 from .db import dumps, loads
 
 EXIT_INVALID = 2
@@ -449,11 +449,17 @@ def cmd_init(args: argparse.Namespace) -> int:
         (cfg.home / sub).mkdir(parents=True, exist_ok=True)
     target = cfg.home / "config.toml"
     created = False
+    language = i18n.normalize(args.language) if args.language else i18n.from_environment()
+    if args.language and not language:
+        raise SystemExit(f"unsupported language {args.language!r}; choose one of {', '.join(i18n.LANGUAGES)}")
     if not target.exists():
-        target.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+        target.write_text(CONFIG_TEMPLATE.replace('language = "en"', f'language = "{language}"'), encoding="utf-8")
         created = True
+    else:
+        language = config.load(args.home).language   # an existing config is never rewritten
     db.connect(cfg.db_path).close()
-    _print({"home": str(cfg.home), "config": str(target), "config_created": created, "db": str(cfg.db_path)})
+    _print({"home": str(cfg.home), "config": str(target), "config_created": created, "db": str(cfg.db_path),
+            "language": language})
     return 0
 
 
@@ -461,6 +467,9 @@ CONFIG_TEMPLATE = """\
 # Todo Manager runtime configuration. Secrets are NOT stored here: connectors name
 # environment variables (optionally loaded from notion.env_file).
 timezone = "Pacific/Auckland"
+# Language of what you read in Notion, replies and reminders: en, zh-CN.
+# Notion property/option names keep the language used at `notion setup`.
+language = "en"
 
 [identity]
 # Your own identities (never guessed). Messages from these are yours.
@@ -509,6 +518,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("init", help="create the runtime workspace and database")
+    s.add_argument("--language", help="en or zh-CN (default: from TODO_MANAGER_LANG / the system locale)")
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("gate", help="Hermes cron pre-run gate (prints the wake line)")

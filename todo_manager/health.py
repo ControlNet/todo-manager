@@ -10,7 +10,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from . import clock, effects
+from . import clock, effects, i18n
 from .config import Config
 from .db import get_meta, loads
 
@@ -105,7 +105,7 @@ def raise_alerts(conn: sqlite3.Connection, cfg: Config) -> dict[str, int]:
     day = clock.local_date(cfg.tz).isoformat()
     for text in found:
         kind = hashlib.sha1(re.sub(r"\d+", "#", text).encode()).hexdigest()[:12]
-        effects.notify(conn, cfg, f"health:{kind}:{day}", f"⚠️ Todo Manager: {text}（todo-manager health 查看详情）")
+        effects.notify(conn, cfg, f"health:{kind}:{day}", i18n.t("health.alert", text=text))
     return {"problems": len(found)}
 
 

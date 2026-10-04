@@ -29,7 +29,7 @@ import json
 import sqlite3
 from typing import Any
 
-from . import clock, effects, ids, store
+from . import clock, effects, i18n, ids, store
 from .config import Config
 from .db import dumps, loads, row_dict, tx
 from .kanban import Kanban, KanbanError
@@ -50,8 +50,8 @@ WORKER_PROTOCOL = """\
 - Do ONLY this delegation. Do not widen the scope, do not handle unrelated matters, do not create or decompose kanban cards.
 - Allowed actions: {allowed}. Anything else is NOT allowed. External actions (sending email, public comments, push, opening/merging PRs, closing issues, publishing) are allowed only when listed here, or when a later comment by `todo-manager` says `APPROVED <action> for delivery <delivery id>`; an approval covers exactly that delivered version - any substantive change voids it.
 - Never change the Notion task or its status yourself; the Todo Manager owns that.
-- Need information or a decision from the user? Call kanban_block(kind="needs_input", reason="<one concrete question in Simplified Chinese>"). Do not guess.
-- Deliverable ready? Call kanban_request_review(summary="<2-3 sentence summary in Simplified Chinese>", metadata={{"deliverable_markdown": "<the full deliverable in Markdown>", "external_actions_done": [...], "notes": "..."}}, artifacts=[<absolute paths of files to keep>]). Do NOT call kanban_complete: the user reviews in Notion.
+- Need information or a decision from the user? Call kanban_block(kind="needs_input", reason="<one concrete question in {language}>"). Do not guess.
+- Deliverable ready? Call kanban_request_review(summary="<2-3 sentence summary in {language}>", metadata={{"deliverable_markdown": "<the full deliverable in Markdown>", "external_actions_done": [...], "notes": "..."}}, artifacts=[<absolute paths of files to keep>]). Do NOT call kanban_complete: the user reviews in Notion.
 - Comments by `todo-manager` are the user's supplements, answers, revision requests or approvals: follow them. A comment starting with {pause} means stop immediately and take no further action.
 - Scratch workspaces are deleted when the card ends: keep needed files in artifacts.
 """
@@ -92,7 +92,7 @@ def card_body(d: dict[str, Any], task: dict[str, Any], notion_url: str | None, e
     parts.append(f"## Task background\n{task['title']}" + (f"\n{task['summary']}" if task.get("summary") else ""))
     if extra:
         parts.append("## Later supplements\n" + "\n".join(f"- {e}" for e in extra))
-    parts.append(WORKER_PROTOCOL.format(allowed=allowed, pause=PAUSE_MARK))
+    parts.append(WORKER_PROTOCOL.format(allowed=allowed, pause=PAUSE_MARK, language=i18n.language_name()))
     return "\n\n".join(parts)
 
 
@@ -128,7 +128,7 @@ def create(conn: sqlite3.Connection, cfg: Config, *, task_id: str, title: str, g
             "INSERT INTO delegation_messages(id, delegation_id, kind, feedback_id, body, requirement_version, status,"
             " created_at, sent_at) VALUES (?,?,?,?,?,1,'sent',?,?)",
             (ids.new_id("event"), did, "requirement", feedback_id, goal.strip(), now, now))
-        _task_state(conn, did, "in_progress", "agent", "委派给 Agent：" + title.strip(), actor=actor,
+        _task_state(conn, did, "in_progress", "agent", i18n.t("dlg.assigned", title=title.strip()), actor=actor,
                     cause=feedback_id or did)
         # Human edits made AFTER this point win over delegation-driven status changes.
         conn.execute("UPDATE delegations SET base_task_version=(SELECT version FROM tasks WHERE id=?) WHERE id=?",
@@ -195,7 +195,7 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[st
                     _set(conn, d["id"], status="quarantined",
                          last_error="multiple cards match: " + ",".join(m["id"] for m in matches))
                     effects.task_comment(conn, d["task_id"], f"quarantine:{d['id']}",
-                                         f"⚠️ 委派 {d['title']} 在看板上出现多张匹配卡片，已隔离等待人工处理。")
+                                         i18n.t("dlg.quarantine", title=d["title"]))
                 stats["quarantined"] += 1
                 continue
             if matches:
@@ -299,12 +299,12 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
             block_reason = reason
             failure = payload.get("kind") is None and not reason
             delivery_kind = "failure" if failure else "question"
-            dlv = _record_delivery(conn, d, snap, kind=delivery_kind, summary=reason or "执行失败", body=reason,
+            dlv = _record_delivery(conn, d, snap, kind=delivery_kind, summary=reason or i18n.t("dlg.failed_short"), body=reason,
                                    seq=block_seq)
             if dlv:
                 stats["questions" if delivery_kind == "question" else "failures"] += 1
-                text = (f"❓ Agent 需要你补充（{d['title']}）：{reason}" if delivery_kind == "question"
-                        else f"⚠️ Agent 执行失败（{d['title']}），需要你决定重试或取消。")
+                text = (i18n.t("dlg.question", title=d["title"], reason=reason) if delivery_kind == "question"
+                        else i18n.t("dlg.failed", title=d["title"]))
                 effects.task_comment(conn, d["task_id"], f"dlv:{dlv}", text)
                 effects.notify(conn, cfg, f"dlv:{dlv}", text, task_id=d["task_id"])
         elif kind in ("crashed", "timed_out", "spawn_failed"):
@@ -312,12 +312,13 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
         elif kind == "gave_up":
             # The failure breaker parked the card (blocked, untyped): the user decides retry/cancel.
             block_seq += 1
-            block_reason = f"执行失败：{payload.get('error') or payload.get('reason') or kind}"[:500]
+            block_reason = i18n.t("dlg.failure_reason",
+                                  reason=payload.get("error") or payload.get("reason") or kind)[:500]
             dlv = _record_delivery(conn, d, snap, kind="failure", summary=block_reason, body=block_reason,
                                    seq=block_seq)
             if dlv:
                 stats["failures"] += 1
-                text = f"⚠️ Agent 执行失败（{d['title']}）：{block_reason}。回复“重试”或“取消”。"
+                text = i18n.t("dlg.failed_retry", title=d["title"], reason=block_reason)
                 effects.task_comment(conn, d["task_id"], f"dlv:{dlv}", text)
                 effects.notify(conn, cfg, f"dlv:{dlv}", text, task_id=d["task_id"])
         elif kind == "completed" and _accepted_by_us(conn, d["id"]):
@@ -337,7 +338,7 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
                 # A new version voids approvals given for an earlier version.
                 conn.execute("UPDATE approvals SET revoked_at=? WHERE delegation_id=? AND delivery_id != ?"
                              " AND consumed_at IS NULL AND revoked_at IS NULL", (clock.iso(), d["id"], dlv))
-                text = f"📦 Agent 交付 v{seq}（{d['title']}）：{summary[:300]}"
+                text = i18n.t("dlg.delivered", seq=seq, title=d["title"], summary=summary[:300])
                 effects.task_comment(conn, d["task_id"], f"dlv:{dlv}", text)
                 effects.notify(conn, cfg, f"dlv:{dlv}", text, task_id=d["task_id"])
     card_status = snap["task"]["status"]
@@ -351,10 +352,10 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
             _task_state(conn, d["id"], "in_progress", "agent", None)
         elif new_status in ("blocked", "review"):
             _task_state(conn, d["id"], "review", "me",
-                        "Agent 等你补充信息" if new_status == "blocked" else "Agent 交付待验收")
+                        i18n.t("dlg.needs_input" if new_status == "blocked" else "dlg.to_review"))
         elif new_status in ("ended", "cancelled") and not for_task_active_other(conn, d):
             _task_state(conn, d["id"], "todo", "me",
-                        "Agent 委派已结束" if new_status == "ended" else "Agent 委派已取消")
+                        i18n.t("dlg.ended" if new_status == "ended" else "dlg.cancelled"))
         effects.task_push(conn, d["task_id"])
 
 
@@ -505,8 +506,6 @@ def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any
         return "superseded"
     with tx(conn):
         conn.execute("UPDATE delegation_messages SET status='sending' WHERE id=?", (mid,))
-    labels = {"supplement": "补充", "answer": "回答", "revision": "修订要求", "approval": "批准",
-              "resume": "继续", "accept": "已验收", "cancel": "取消"}
     if kind == "pause":
         if status in EXECUTING:
             _comment_once(kb, d, mid, f"{PAUSE_MARK} PAUSE: stop now and take no further actions. {msg['body']}", retry)
@@ -524,7 +523,7 @@ def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any
         with tx(conn):
             _set(conn, d["id"], status="cancelled")
             if not for_task_active_other(conn, d):
-                _task_state(conn, d["id"], "todo", "me", "Agent 委派已取消")
+                _task_state(conn, d["id"], "todo", "me", i18n.t("dlg.cancelled"))
         return "sent"
     if kind == "accept":
         if status != "review":
@@ -535,7 +534,7 @@ def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any
         with tx(conn):
             _set(conn, d["id"], status="ended")
             if not for_task_active_other(conn, d):
-                _task_state(conn, d["id"], "todo", "me", "Agent 交付已验收")
+                _task_state(conn, d["id"], "todo", "me", i18n.t("dlg.accepted"))
         return "sent"
     if kind == "resume":
         if status == "paused":
@@ -545,7 +544,7 @@ def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any
         _finish(conn, mid, "sent")
         return "sent"
     # supplement / answer / revision / approval: comment, then state transition if applicable.
-    _comment_once(kb, d, mid, f"[{labels[kind]}] {msg['body']}", retry)
+    _comment_once(kb, d, mid, f"[{i18n.t('dlg.msg.' + kind)}] {msg['body']}", retry)
     snap = kb.snapshot(d["card_id"], after_event=10**12)
     card_status = snap["task"]["status"]
     if kind == "answer" and status == "blocked":

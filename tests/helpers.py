@@ -20,7 +20,8 @@ class WorkspaceCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="tm-test-"))
         clock.set_now(T0)
-        base = {"identity": {"emails": ["me@example.edu"], "github_logins": ["me-gh"],
+        # The fixtures assert Chinese labels: run under zh-CN (English is covered in test_i18n).
+        base = {"language": "zh-CN", "identity": {"emails": ["me@example.edu"], "github_logins": ["me-gh"],
                              "slack_user_ids": ["UME"], "display_names": ["Test User"]}}
         self.cfg = config.load(self.tmp, overrides=config._deep_merge(base, self.overrides))
         self.conn = db.connect(self.cfg.db_path)

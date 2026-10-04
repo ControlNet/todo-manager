@@ -1,6 +1,7 @@
 """The Todo-Manager-maintained region of a Task/Project page body.
 
-The region is ONE top-level callout whose first line carries ``MARKER``. Everything
+The region is ONE top-level callout whose first line carries the marker text
+(``body.marker`` in the language catalogs; any language's marker is recognised). Everything
 outside it (the user's own notes) is never touched. Updates go through the markdown
 endpoint as a search-and-replace of the exact region text read just before, so a
 concurrent edit elsewhere on the page is preserved and an edit inside the region is
@@ -13,7 +14,9 @@ import hashlib
 import re
 from typing import Any
 
-MARKER = "当前说明（由 Todo Manager 维护；手写笔记请写在此框外）"
+from .. import i18n
+
+MARKER = "body.marker"        # catalog key of the task-page marker
 _ESCAPE = re.compile(r"([\\*~`$\[\]<>{}|^])")
 MAX_DELIVERY_CHARS = 15000
 
@@ -48,60 +51,67 @@ def _link(title: str, url: str | None) -> str:
     return label
 
 
-def render(sections: dict[str, Any], marker: str = MARKER) -> str:
-    """Render the managed callout. ``sections`` keys (all optional):
+def render(sections: dict[str, Any], marker: str = MARKER, lang: str | None = None) -> str:
+    """Render the managed callout. ``marker`` is a catalog key; ``sections`` keys (all optional):
 
     goal, responsibility, done_criteria, summary, due_basis, focus_reason,
     sources: [{title, url, when, source}], delegations: [{title, status, versions}],
     delivery: {seq, when, summary, body, artifacts}, extra: [(label, text)]
     """
-    lines = ['<callout icon="🤖" color="gray_bg">', f"\t**{escape(marker)}**"]
-    for key, label in (("goal", "目标"), ("responsibility", "为什么是我的事"), ("done_criteria", "完成标准"),
-                       ("due_basis", "截止依据"), ("focus_reason", "精选理由")):
+    def t(key: str, **values: Any) -> str:
+        return i18n.t(key, lang, **values)
+
+    sep = t("body.sep")
+    lines = ['<callout icon="🤖" color="gray_bg">', f"\t**{escape(t(marker))}**"]
+    for key in ("goal", "responsibility", "done_criteria", "due_basis", "focus_reason"):
         value = sections.get(key)
         if value:
-            lines.append(f"\t**{label}**：" + "<br>".join(escape_inline(v.rstrip()) for v in str(value).strip().splitlines()))
+            lines.append(f"\t**{t('body.' + key)}**{sep}"
+                         + "<br>".join(escape_inline(v.rstrip()) for v in str(value).strip().splitlines()))
     if sections.get("summary"):
-        lines.append("\t**背景**")
+        lines.append(f"\t**{t('body.summary')}**")
         lines.extend(_para(str(sections["summary"])))
     for label, text in sections.get("extra") or []:
-        lines.append(f"\t**{escape(label)}**：" + escape(str(text)))
+        lines.append(f"\t**{escape(label)}**{sep}" + escape(str(text)))
     sources = sections.get("sources") or []
     if sources:
-        lines.append("\t**来源**")
+        lines.append(f"\t**{t('body.sources')}**")
         for s in sources[:12]:
             meta = " · ".join(x for x in (s.get("source"), s.get("when")) if x)
             lines.append("\t- " + _link(s.get("title") or "", s.get("url")) + (f" · {escape(meta)}" if meta else ""))
         if len(sources) > 12:
-            lines.append(f"\t- …另有 {len(sources) - 12} 条来源（todo-manager task show 查看全部）")
+            lines.append("\t- " + escape_inline(t("body.more_sources", n=len(sources) - 12)))
     delegations = sections.get("delegations") or []
     if delegations:
-        lines.append("\t**委派**")
+        lines.append(f"\t**{t('body.delegations')}**")
         for d in delegations[:8]:
             lines.append(f"\t- {escape(d['title'])} · {escape(d['status'])}"
-                         + (f" · 交付 {d['versions']} 版" if d.get("versions") else ""))
+                         + (" · " + t("body.delivery_versions", n=d["versions"]) if d.get("versions") else ""))
     delivery = sections.get("delivery")
     if delivery:
-        lines.append(f"\t**最新交付 v{delivery['seq']}**" + (f"（{escape(delivery['when'])}）" if delivery.get("when") else ""))
+        lines.append(f"\t**{t('body.latest_delivery', seq=delivery['seq'])}**"
+                     + (t("body.when", when=escape(delivery["when"])) if delivery.get("when") else ""))
         if delivery.get("summary"):
             lines.append("\t" + escape(delivery["summary"].strip()))
         body = (delivery.get("body") or "").strip()
         if body and body != (delivery.get("summary") or "").strip():
             clipped = body[:MAX_DELIVERY_CHARS]
             lines.append("\t<details>")
-            lines.append("\t<summary>展开交付内容</summary>")
+            lines.append(f"\t<summary>{escape_inline(t('body.expand_delivery'))}</summary>")
             lines.extend(_para(clipped, depth=2))
             if len(body) > MAX_DELIVERY_CHARS:
-                lines.append(f"\t\t（内容过长，已截断；完整内容见看板卡片 {escape(delivery.get('card') or '')}）")
+                lines.append("\t\t" + escape(t("body.truncated", card=delivery.get("card") or "")))
             lines.append("\t</details>")
         for path in (delivery.get("artifacts") or [])[:10]:
-            lines.append("\t- 附件：`" + str(path).replace("`", "'") + "`")
+            lines.append(f"\t- {t('body.attachment')}{sep}`" + str(path).replace("`", "'") + "`")
     lines.append("</callout>")
     return "\n".join(lines)
 
 
 def locate(markdown: str, marker: str = MARKER) -> tuple[int, int] | None:
-    """(start, end) offsets of the managed callout in a page's markdown, or None."""
+    """(start, end) offsets of the managed callout in a page's markdown, or None.
+    ``marker`` is a catalog key; the marker text of any language is recognised."""
+    heads = [text[:12] for text in i18n.variants(marker)]
     pos = 0
     while True:
         start = markdown.find("<callout", pos)
@@ -112,7 +122,7 @@ def locate(markdown: str, marker: str = MARKER) -> tuple[int, int] | None:
             end_tag = re.compile(r"^</callout>[ \t]*$", re.M)
             head = markdown[start:start + 400]
             close = end_tag.search(markdown, start)
-            if close and marker[:12] in _unescape(head):
+            if close and any(h in _unescape(head) for h in heads):
                 return line_start, close.end()
         pos = start + 8
 

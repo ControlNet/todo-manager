@@ -5,7 +5,7 @@ Write one JSON object and pass it to `todo-manager intake apply <run_id> --file 
     {"run_id": "<run id>", "rules_version": <int>, "items": [ <op>, ... ]}
 
 Every NEW source item listed above must be covered exactly by one of: evidence of an op, or an `ignore` op.
-Human-facing text (titles, next_step, responsibility, notes) is Simplified Chinese; keep names, code,
+Human-facing text (titles, next_step, responsibility, notes) is in {language}; keep names, code,
 repository and paper titles as written in the source.
 
 Ops:
@@ -19,12 +19,12 @@ Ops:
     (waiting implies external; decision/review imply me).
   - Dates are `YYYY-MM-DD` in the user's timezone. Set `due_date` only when a deadline is stated or clearly
     implied, and say where it came from in `due_basis`. `follow_up_date` is when to check on someone else.
-  - `focus` (精选) only for genuinely important or time-critical work; say why in `focus_reason`.
+  - `focus` only for genuinely important or time-critical work; say why in `focus_reason`.
   - `follow_up_of`: the task id this continues (use it instead of reopening a task the user closed).
 - `update_task` {task, based_on_version, set: {field: value}, note?, evidence?, override_human?, closed_reason?, rationale}
   - `based_on_version` is the version shown for the task. Fields the user set later are kept automatically.
   - Changing a field the user set requires `override_human: true` plus evidence; prefer not to.
-  - `note` is a short 变化 line shown on the home page (what changed and why).
+  - `note` is a short "what changed" line shown on the home page (what changed and why).
   - Closing: `set: {"status": "done"}` only on clear evidence that the commitment is fulfilled
     (reply sent, PR merged, meeting held); commits are not completion.
 - `link` {task, evidence, rationale}: new messages that belong to an existing task without changing it.

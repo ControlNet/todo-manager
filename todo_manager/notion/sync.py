@@ -7,7 +7,7 @@ Import (gate B, every run)
     human edit, applied with ``actor=human`` and recorded as feedback. Our own writes
     never show up as edits because ``last_seen_props`` is updated when we write.
   * Pages created by the user become tasks/projects (``origin=notion``).
-  * Edits with workflow meaning are not guessed: "下一步由谁=Agent" without an active
+  * Edits with workflow meaning are not guessed: "next by = Agent" without an active
     delegation becomes a pending feedback item for the model; closing a task stops its
     active delegations deterministically (accept a delivered review, cancel otherwise).
 
@@ -33,14 +33,14 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from .. import clock, delegation, effects, feedback, ids, outbox, store
+from .. import clock, delegation, effects, feedback, i18n, ids, outbox, store
 from ..config import Config
 from ..db import dumps, get_meta, loads, set_meta, tx
 from . import body, schema
 from .client import NotionClient, NotionError, NotionUncertain, plain_text
 
-TRASH_REASON = "页面已在 Notion 中删除"
-HOME_MARKER = "数据新鲜度（由 Todo Manager 维护）"
+TRASH_REASON = "sync.trash_reason"    # catalog keys
+HOME_MARKER = "home.marker"
 
 
 @dataclass
@@ -51,6 +51,7 @@ class NotionState:
     bot_user_id: str | None
     task_props: schema.PropertyMap
     project_props: schema.PropertyMap
+    language: str = i18n.DEFAULT    # language of the Notion structure and managed text (fixed at setup)
 
     @property
     def ready(self) -> bool:
@@ -67,13 +68,15 @@ def load_state(conn: sqlite3.Connection, cfg: Config) -> NotionState:
     def pick(key: str) -> str:
         return n.get(key) or get_meta(conn, f"notion.{key}") or ""
 
+    lang = i18n.normalize(get_meta(conn, "notion.language")) or i18n.language()
     return NotionState(
         tasks_data_source_id=pick("tasks_data_source_id"),
         projects_data_source_id=pick("projects_data_source_id"),
         home_page_id=pick("home_page_id") or None,
         bot_user_id=pick("bot_user_id") or None,
-        task_props=schema.PropertyMap("task", _meta_json(conn, "notion.props.task")),
-        project_props=schema.PropertyMap("project", _meta_json(conn, "notion.props.project")),
+        task_props=schema.PropertyMap("task", _meta_json(conn, "notion.props.task"), lang),
+        project_props=schema.PropertyMap("project", _meta_json(conn, "notion.props.project"), lang),
+        language=lang,
     )
 
 
@@ -137,6 +140,13 @@ class NotionSync:
     def data_source(self, kind: str) -> str:
         return self.state.tasks_data_source_id if kind == "task" else self.state.projects_data_source_id
 
+    def t(self, key: str, **values: Any) -> str:
+        """Text written into Notion, in the language of the Notion structure."""
+        return i18n.t(key, self.state.language, **values)
+
+    def render_body(self, task: dict[str, Any]) -> str:
+        return body.render(self.task_sections(task), lang=self.state.language)
+
     # ================================================================== local -> values
 
     def project_page_id(self, project_id: str | None) -> str | None:
@@ -195,11 +205,11 @@ class NotionSync:
             when = ev.get("occurred_at")
             day = clock.local_dt(tz, clock.parse(when)).strftime("%Y-%m-%d") if when else ""
             sources.append({"title": ev.get("title") or (ev.get("excerpt") or "")[:80], "url": ev.get("url"),
-                            "when": day, "source": schema.SOURCE_LABELS.get(ev["source"], ev["source"])})
+                            "when": day, "source": schema.label("source", ev["source"], self.state.language)})
         sections["sources"] = sources[-12:] if len(sources) > 12 else sources
         dels = delegation.for_task(self.conn, task["id"])
-        status_names = {**schema.DELEGATION_LABELS, "pending_submit": "排队中", "reconcile": "排队中",
-                        "ended": "已结束", "cancelled": "已取消"}
+        status_names = i18n.prefixed("label.delegation", self.state.language)
+        status_names.update(pending_submit=status_names["queued"], reconcile=status_names["queued"])
         shown = [d for d in dels if d["status"] in delegation.ACTIVE] + \
                 [d for d in dels if d["status"] not in delegation.ACTIVE][-3:]
         sections["delegations"] = [
@@ -297,7 +307,7 @@ class NotionSync:
                     return "ignored"
                 self._link("task", tm_id, page, current)   # recovery: page exists, link was lost
                 return "unchanged"
-            title = values.get("title") or "(未命名)"
+            title = values.get("title") or self.t("sync.untitled_task")
             project_id = self._local_project(values.get("project_id"))
             fields = {k: values.get(k) for k in ("next_step", "waiting_on", "due_date", "follow_up_date",
                                                  "snooze_until") if values.get(k)}
@@ -316,7 +326,7 @@ class NotionSync:
         if tm_id and store.get_project(self.conn, tm_id):
             self._link("project", tm_id, page, current)
             return "unchanged"
-        title = values.get("title") or "(未命名项目)"
+        title = values.get("title") or self.t("sync.untitled_project")
         with tx(self.conn):
             pid = store.create_project(self.conn, title, origin="notion", actor="human", cause_ref=page["id"],
                                        domain=values.get("domain"), goal=values.get("goal"),
@@ -367,17 +377,19 @@ class NotionSync:
         notes: list[str] = []
         active = delegation.for_task(self.conn, after["id"], active_only=True)
         if "status" in changed and after["status"] in store.CLOSED_STATUSES:
+            status = schema.label("task_status", after["status"], self.state.language)
             return delegation.on_task_closed(self.conn, after["id"], after["status"],
-                                             f"用户在 Notion 将事项标为{schema.TASK_STATUS_LABELS[after['status']]}", fid)
+                                             self.t("sync.closed_in_notion", status=status), fid)
+        field = schema.prop("task", "next_actor").name(self.state.language)
         if "next_actor" in changed and after["next_actor"] == "agent" and before["next_actor"] != "agent" and not active:
             feedback.record(self.conn, origin="notion_property", source_id=after["id"],
-                            source_version=f"delegate:{fid}", text="用户把“下一步由谁”设为 Agent",
+                            source_version=f"delegate:{fid}", text=self.t("sync.set_to_agent", field=field),
                             scope_type="task", scope_id=after["id"], kind="delegate_request",
                             payload={"from_feedback": fid})
             notes.append("delegate_request")
         elif "next_actor" in changed and before["next_actor"] == "agent" and after["next_actor"] != "agent" and active:
             feedback.record(self.conn, origin="notion_property", source_id=after["id"],
-                            source_version=f"unassign:{fid}", text="用户把“下一步由谁”从 Agent 改走，但委派仍在进行",
+                            source_version=f"unassign:{fid}", text=self.t("sync.unassigned", field=field),
                             scope_type="task", scope_id=after["id"], kind="delegate_unassigned",
                             payload={"from_feedback": fid, "delegations": [d["id"] for d in active]})
             notes.append("delegate_unassigned")
@@ -409,16 +421,17 @@ class NotionSync:
 
     def page_trashed(self, row: dict[str, Any]) -> None:
         task = store.get_task(self.conn, row["entity_id"])
+        reason = self.t(TRASH_REASON)
         with tx(self.conn):
             self.conn.execute("UPDATE notion_pages SET trashed=1 WHERE page_id=?", (row["page_id"],))
             if task and task["status"] not in store.CLOSED_STATUSES:
                 fid, _ = feedback.record(self.conn, origin="notion_page", source_id=row["page_id"],
-                                         source_version=f"trashed:{clock.iso()}", text=TRASH_REASON, scope_type="task",
+                                         source_version=f"trashed:{clock.iso()}", text=reason, scope_type="task",
                                          scope_id=task["id"], kind="page_trashed", status="applied")
                 store.update_task(self.conn, task["id"], {"status": "cancelled"}, actor="human", origin="notion",
                                   cause_ref=fid)
-                store.set_closed_reason(self.conn, task["id"], TRASH_REASON)
-                delegation.on_task_closed(self.conn, task["id"], "cancelled", TRASH_REASON, fid)
+                store.set_closed_reason(self.conn, task["id"], reason)
+                delegation.on_task_closed(self.conn, task["id"], "cancelled", reason, fid)
 
     def _page_restored(self, kind: str, row: dict[str, Any], page: dict[str, Any]) -> None:
         with tx(self.conn):
@@ -426,11 +439,11 @@ class NotionSync:
             if kind != "task":
                 return
             task = store.get_task(self.conn, row["entity_id"])
-            if task and task["status"] == "cancelled" and task.get("closed_reason") == TRASH_REASON:
+            if task and task["status"] == "cancelled" and task.get("closed_reason") in i18n.variants(TRASH_REASON):
                 previous = row["last_seen_props"].get("status") or "todo"
                 fid, _ = feedback.record(self.conn, origin="notion_page", source_id=row["page_id"],
                                          source_version=f"restored:{page.get('last_edited_time')}",
-                                         text="页面已从 Notion 回收站恢复", scope_type="task", scope_id=task["id"],
+                                         text=self.t("sync.restored"), scope_type="task", scope_id=task["id"],
                                          kind="page_restored", status="applied")
                 store.update_task(self.conn, task["id"], {"status": previous}, actor="human", origin="notion",
                                   cause_ref=fid)
@@ -498,7 +511,7 @@ class NotionSync:
             raise outbox.Retryable("waiting for an uncertain create to become visible", retry_after=60)
         values = self.task_values(entity) if kind == "task" else self.project_values(entity)
         props = schema.render_properties(kind, values, self.pmap(kind))
-        markdown = body.render(self.task_sections(entity)) if kind == "task" else None
+        markdown = self.render_body(entity) if kind == "task" else None
         parent = {"type": "data_source_id", "data_source_id": self.data_source(kind)}
         try:
             page = self.client.create_page(parent, props, markdown=markdown)
@@ -546,7 +559,7 @@ class NotionSync:
 
     def _sync_body(self, page_id: str, task: dict[str, Any]) -> str:
         row = self.page_row(page_id)
-        rendered = body.render(self.task_sections(task))
+        rendered = self.render_body(task)
         if row["rendered_hash"] == _h(rendered) and row["managed_hash"]:
             return "unchanged"
         if self.conn.execute("SELECT 1 FROM feedback WHERE kind='body_edit' AND status='pending' AND scope_id=?",
@@ -767,7 +780,7 @@ class NotionSync:
         home = self.state.home_page_id
         if not home:
             return "no home page"
-        rendered = body.render(sections, marker=HOME_MARKER)
+        rendered = body.render(sections, marker=HOME_MARKER, lang=self.state.language)
         if get_meta(self.conn, "notion.home_hash") == _h(rendered):
             return "unchanged"
         doc = self.client.page_markdown(home)
@@ -800,7 +813,7 @@ class NotionSync:
                 continue  # migrated history: kept locally only, never shown in Notion
             task = dict(t)
             target = schema.comparable("task", self.task_values(task))
-            stale_body = row is not None and row["rendered_hash"] != _h(body.render(self.task_sections(task)))
+            stale_body = row is not None and row["rendered_hash"] != _h(self.render_body(task))
             if row is None or row["last_seen_props"] != {**row["last_seen_props"], **target} or stale_body:
                 if effects.task_push(self.conn, t["id"]):
                     count += 1
@@ -824,7 +837,7 @@ def _select_raw_present(page: dict[str, Any], pmap: schema.PropertyMap, field: s
     key = pmap.ids.get(field)
     props = page.get("properties") or {}
     raw = next((v for v in props.values() if isinstance(v, dict) and v.get("id") == key), None) if key \
-        else props.get(prop.name)
+        else props.get(prop.name(pmap.lang))
     return bool(raw and raw.get("select"))
 
 

@@ -17,9 +17,9 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from . import clock, db, delegation, rules, store
+from . import clock, db, delegation, i18n, rules, store
 from .config import Config
-from .notion.schema import NEXT_ACTOR_LABELS, PROJECT_STATUS_LABELS, TASK_STATUS_LABELS
+from .notion.schema import label as option_label
 
 
 def _stamp() -> str:
@@ -46,40 +46,43 @@ def _table_hash(rows: list[dict[str, Any]]) -> str:
 
 # --------------------------------------------------------------------------- markdown
 
+def _t(key: str, **values: Any) -> str:
+    return i18n.t(f"export.{key}", **values)
+
+
 def _task_md(conn: sqlite3.Connection, t: dict[str, Any], projects: dict[str, str]) -> str:
     lines = [f"# {t['title']}", "",
-             f"- ID: `{t['id']}` · 状态: {TASK_STATUS_LABELS.get(t['status'], t['status'])}"
-             f" · 下一步由谁: {NEXT_ACTOR_LABELS.get(t['next_actor'], t['next_actor'])}"
-             f" · 版本: {t['version']}"]
+             f"- ID: `{t['id']}` · {_t('status')}: {option_label('task_status', t['status'])}"
+             f" · {_t('next_actor')}: {option_label('next_actor', t['next_actor'])}"
+             f" · {_t('version')}: {t['version']}"]
     if t.get("project_id"):
-        lines.append(f"- 项目: {projects.get(t['project_id'], t['project_id'])} (`{t['project_id']}`)")
-    dates = [f"{label}: {t[k][:10]}" for k, label in (("due_date", "截止"), ("follow_up_date", "跟进"),
-                                                      ("snooze_until", "暂缓至")) if t.get(k)]
+        lines.append(f"- {_t('project')}: {projects.get(t['project_id'], t['project_id'])} (`{t['project_id']}`)")
+    dates = [f"{_t(label)}: {t[k][:10]}" for k, label in (("due_date", "due"), ("follow_up_date", "follow_up"),
+                                                          ("snooze_until", "snooze")) if t.get(k)]
     if dates:
         lines.append("- " + " · ".join(dates))
     if t.get("focus"):
-        lines.append("- 精选" + (f"：{t['focus_reason']}" if t.get("focus_reason") else ""))
+        lines.append(f"- {_t('focus')}" + (f": {t['focus_reason']}" if t.get("focus_reason") else ""))
     if t.get("waiting_on"):
-        lines.append(f"- 等待对象: {t['waiting_on']}")
-    for key, label in (("next_step", "下一步"), ("responsibility", "为什么是我的事"), ("done_criteria", "完成标准"),
-                       ("due_basis", "截止依据"), ("summary", "背景"), ("change_note", "变化")):
+        lines.append(f"- {_t('waiting_on')}: {t['waiting_on']}")
+    for key in ("next_step", "responsibility", "done_criteria", "due_basis", "summary", "change_note"):
         if t.get(key):
-            lines += ["", f"## {label}", "", str(t[key])]
+            lines += ["", f"## {_t(key)}", "", str(t[key])]
     ev = store.evidence_for(conn, "task", t["id"])
     if ev:
-        lines += ["", "## 来源", ""]
+        lines += ["", f"## {_t('sources')}", ""]
         for e in ev:
             lines.append(f"- [{e.get('role')}] {e.get('source')} {e.get('title') or ''} {e.get('url') or ''}".rstrip())
     ds = delegation.for_task(conn, t["id"])
     if ds:
-        lines += ["", "## 委派", ""]
+        lines += ["", f"## {_t('delegations')}", ""]
         for d in ds:
             lines.append(f"- `{d['id']}` [{d['status']}] {d['title']}")
             for v in delegation.deliveries(conn, d["id"]):
                 lines.append(f"  - {v['kind']} v{v['seq']} {v['received_at'][:16]}: {(v['summary'] or '')[:200]}")
     hist = store.history(conn, "task", t["id"])[-20:]
     if hist:
-        lines += ["", "## 历史（最近 20 条）", ""]
+        lines += ["", f"## {_t('history')}", ""]
         for h in hist:
             changes = json.dumps(h["changes"], ensure_ascii=False)
             lines.append(f"- v{h['version']} {h['at'][:16]} {h['actor']}/{h['origin']}: {changes[:300]}")
@@ -87,22 +90,22 @@ def _task_md(conn: sqlite3.Connection, t: dict[str, Any], projects: dict[str, st
 
 
 def _project_md(conn: sqlite3.Connection, p: dict[str, Any]) -> str:
-    lines = [f"# {p['title']}", "", f"- ID: `{p['id']}` · 状态: {PROJECT_STATUS_LABELS.get(p['status'], p['status'])}"
-             + (f" · 领域: {p['domain']}" if p.get("domain") else "")]
+    lines = [f"# {p['title']}", "", f"- ID: `{p['id']}` · {_t('status')}: {option_label('project_status', p['status'])}"
+             + (f" · {_t('domain')}: {p['domain']}" if p.get("domain") else "")]
     if p.get("repos"):
-        lines.append("- 仓库: " + ", ".join(p["repos"]))
-    for key, label in (("goal", "目标"), ("next_step", "下一步"), ("blockers", "阻碍"), ("recent_activity", "近期进展")):
+        lines.append(f"- {_t('repos')}: " + ", ".join(p["repos"]))
+    for key in ("goal", "next_step", "blockers", "recent_activity"):
         if p.get(key):
-            lines += ["", f"## {label}", "", str(p[key])]
+            lines += ["", f"## {_t(key)}", "", str(p[key])]
     tasks = store.list_tasks(conn, store.TASK_STATUSES, project_id=p["id"])
     if tasks:
-        lines += ["", "## 任务", ""]
-        lines += [f"- `{t['id']}` [{TASK_STATUS_LABELS[t['status']]}] {t['title']}" for t in tasks]
+        lines += ["", f"## {_t('tasks')}", ""]
+        lines += [f"- `{t['id']}` [{option_label('task_status', t['status'])}] {t['title']}" for t in tasks]
     return "\n".join(lines) + "\n"
 
 
 def view_rows(conn: sqlite3.Connection, cfg: Config) -> dict[str, list[dict[str, Any]]]:
-    """The home-page sections computed locally (same filters as the Notion views)."""
+    """The home-page sections computed locally (same filters as the Notion views), by section key."""
     today = clock.local_date(cfg.tz).isoformat()
     week = (clock.local_date(cfg.tz) + timedelta(days=7)).isoformat()
     since = clock.iso(clock.now() - timedelta(days=7))
@@ -114,13 +117,13 @@ def view_rows(conn: sqlite3.Connection, cfg: Config) -> dict[str, list[dict[str,
     agent_ids = {r["task_id"] for r in conn.execute(
         "SELECT task_id FROM delegations WHERE status IN ('queued','running','paused','quarantined','pending_submit')")}
     return {
-        "⭐ 精选待办": [t for t in open_ if t["status"] in ("todo", "in_progress") and t["next_actor"] == "me"
+        "focus": [t for t in open_ if t["status"] in ("todo", "in_progress") and t["next_actor"] == "me"
                     and awake(t) and (t["focus"] or (t.get("due_date") and t["due_date"][:10] <= week))],
-        "⏳ 等待别人": [t for t in open_ if t["status"] == "waiting" and awake(t)],
-        "🤔 需要决定": [t for t in open_ if t["status"] == "decision"],
-        "🤖 Agent 排队／处理中": [t for t in open_ if t["id"] in agent_ids],
-        "✅ 待我验收／待我补充": [t for t in open_ if t["status"] == "review"],
-        "🕘 最近完成与重要变化": [dict(r) for r in conn.execute(
+        "waiting": [t for t in open_ if t["status"] == "waiting" and awake(t)],
+        "decision": [t for t in open_ if t["status"] == "decision"],
+        "agent": [t for t in open_ if t["id"] in agent_ids],
+        "review": [t for t in open_ if t["status"] == "review"],
+        "recent": [dict(r) for r in conn.execute(
             "SELECT * FROM tasks WHERE updated_at >= ? AND (status IN ('done','cancelled') OR change_note IS NOT NULL)"
             " ORDER BY updated_at DESC", (since,))],
     }
@@ -135,15 +138,15 @@ def export_snapshot(conn: sqlite3.Connection, cfg: Config, out_dir: Path | None 
         (root / "tasks" / f"{t['id']}.md").write_text(_task_md(conn, t, projects), encoding="utf-8")
     for pid in projects:
         (root / "projects" / f"{pid}.md").write_text(_project_md(conn, store.get_project(conn, pid)), encoding="utf-8")
-    rule_lines = ["# 规则", ""]
+    rule_lines = [f"# {_t('rules')}", ""]
     for status in ("active", "suggested", "retired"):
         rule_lines += [f"## {status}", "", rules.render_rules(rules.list_rules(conn, (status,))), ""]
     (root / "rules" / "rules.md").write_text("\n".join(rule_lines), encoding="utf-8")
-    view_lines = [f"# 首页视图快照 {clock.local_dt(cfg.tz):%Y-%m-%d %H:%M}", ""]
-    for name, rows in view_rows(conn, cfg).items():
-        view_lines += [f"## {name}", ""] + [
-            f"- `{t['id']}` {t['title']}" + (f" · 截止 {t['due_date'][:10]}" if t.get("due_date") else "")
-            + (f" · {t['next_step']}" if t.get("next_step") else "") for t in rows] + ["(空)" if not rows else "", ""]
+    view_lines = [f"# {_t('views_title', when=f'{clock.local_dt(cfg.tz):%Y-%m-%d %H:%M}')}", ""]
+    for key, rows in view_rows(conn, cfg).items():
+        view_lines += [f"## {i18n.t(f'home.section.{key}')}", ""] + [
+            f"- `{t['id']}` {t['title']}" + (f" · {_t('due')} {t['due_date'][:10]}" if t.get("due_date") else "")
+            + (f" · {t['next_step']}" if t.get("next_step") else "") for t in rows] + [_t("empty") if not rows else "", ""]
     (root / "views" / "home.md").write_text("\n".join(view_lines), encoding="utf-8")
     data = dump(conn)
     (root / "data.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")

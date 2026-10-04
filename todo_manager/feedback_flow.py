@@ -28,7 +28,7 @@ import sqlite3
 from datetime import timedelta
 from typing import Any
 
-from . import clock, delegation, effects, feedback, prompts, rules, store
+from . import clock, delegation, effects, feedback, i18n, prompts, rules, store
 from .config import Config
 from .db import dumps, loads, rules_version, tx
 
@@ -130,7 +130,7 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, items: li
             out.append("The user created this task directly in Notion. Triage it: project, next_step, responsibility,"
                        " done_criteria; do NOT change what the user typed unless clearly wrong.")
         elif fb["kind"] == "delegate_request":
-            out.append("The user set 下一步由谁=Agent. Create ONE delegation with a concrete goal/deliverable if the"
+            out.append("The user set the task's next actor to Agent. Create ONE delegation with a concrete goal/deliverable if the"
                        " task and thread make the work clear; otherwise clarify with one question.")
         elif fb["kind"] == "delegate_unassigned":
             out.append("The user moved the task away from Agent while a delegation is active: pause, cancel or keep"
@@ -307,7 +307,7 @@ def _human_update_task(conn: sqlite3.Connection, op: dict[str, Any], fid: str, o
         conn.execute("UPDATE tasks SET change_note_at=? WHERE id=?", (clock.iso(), task["id"]))
     closed = result.applied.get("status")
     if closed in store.CLOSED_STATUSES and task["status"] not in store.CLOSED_STATUSES:
-        delegation.on_task_closed(conn, task["id"], closed, op.get("note") or "用户关闭了事项", fid)
+        delegation.on_task_closed(conn, task["id"], closed, op.get("note") or i18n.t("fb.user_closed"), fid)
     result.rejected.update(stale)
     return result
 

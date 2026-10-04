@@ -18,7 +18,7 @@ import sqlite3
 from datetime import timedelta
 from typing import Any, Callable
 
-from . import clock, delegation, effects, feedback, health, outbox, runs
+from . import clock, delegation, effects, feedback, health, i18n, outbox, runs
 from .config import Config
 from .db import tx
 from .notion import schema
@@ -50,35 +50,38 @@ def fail_exhausted_claims(conn: sqlite3.Connection, cfg: Config) -> dict[str, in
         for r in rows:
             feedback.resolve(conn, r["id"], "failed", error=f"not applied after {max_attempts} model runs")
             effects.notify(conn, cfg, f"feedback-failed:{r['id']}",
-                           f"⚠️ 一条反馈连续 {max_attempts} 次未能处理（{r['id']}），请查看 todo-manager health。",
+                           i18n.t("fb.failed_alert", n=max_attempts, id=r["id"]),
                            task_id=r["scope_id"] if r["scope_type"] == "task" else None)
     return {"failed": len(rows)}
 
 
-def freshness_sections(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
+def freshness_sections(conn: sqlite3.Connection, cfg: Config, lang: str | None = None) -> dict[str, Any]:
     """Content of the home freshness callout. Stable within an hour when nothing is wrong."""
+    def t(key: str, **values: Any) -> str:
+        return i18n.t(key, lang, **values)
+
     local = clock.local_dt(cfg.tz)
     lines: list[tuple[str, str]] = []
     marks = ",".join("?" for _ in SOURCE_SCOPES)
     for r in conn.execute(f"SELECT * FROM cursors WHERE source IN ({marks}) ORDER BY source, scope", SOURCE_SCOPES):
         age = clock.minutes_since(r["last_success_at"])
         if r["consecutive_failures"] or age is None or age > FRESH_MINUTES:
-            label = schema.SOURCE_LABELS.get(r["source"], r["source"])
             when = (f"{clock.local_dt(cfg.tz, clock.parse(r['last_success_at'])):%m-%d %H:%M}"
-                    if r["last_success_at"] else "从未成功")
-            lines.append((f"⚠️ {label}（{r['scope']}）", f"上次成功 {when}；连续失败 {r['consecutive_failures']} 次"))
+                    if r["last_success_at"] else t("home.never_succeeded"))
+            lines.append((t("home.source_stale", label=schema.label("source", r["source"], lang), scope=r["scope"]),
+                          t("home.source_stale_detail", when=when, n=r["consecutive_failures"])))
     dead = conn.execute("SELECT COUNT(*) FROM outbox WHERE status='dead'").fetchone()[0]
     if dead:
-        lines.append(("⚠️ 写入失败", f"{dead} 项 Notion／提醒写入已放弃（todo-manager health 查看）"))
+        lines.append((t("home.dead_writes"), t("home.dead_writes_detail", n=dead)))
     quarantined = conn.execute("SELECT COUNT(*) FROM delegations WHERE status='quarantined'").fetchone()[0]
     if quarantined:
-        lines.append(("⚠️ 委派异常", f"{quarantined} 个委派已隔离，需人工处理"))
+        lines.append((t("home.quarantined"), t("home.quarantined_detail", n=quarantined)))
     failed = conn.execute("SELECT COUNT(*) FROM feedback WHERE status='failed' AND applied_at >= ?",
                           (clock.iso(clock.now() - timedelta(days=7)),)).fetchone()[0]
     if failed:
-        lines.append(("⚠️ 反馈未处理", f"近 7 天有 {failed} 条反馈处理失败"))
-    status = "所有数据源同步正常" if not lines else f"{len(lines)} 项需要注意"
-    return {"extra": [("状态", status), *lines, ("最近确认", f"{local:%Y-%m-%d %H}:00")]}
+        lines.append((t("home.failed_feedback"), t("home.failed_feedback_detail", n=failed)))
+    status = t("home.all_ok") if not lines else t("home.attention", n=len(lines))
+    return {"extra": [(t("home.status"), status), *lines, (t("home.last_checked"), f"{local:%Y-%m-%d %H}:00")]}
 
 
 def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanban: Any | None,
@@ -105,7 +108,8 @@ def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanba
         handlers[("matrix", "notify")] = notifier
     _step(summary, problems, "outbox", lambda: outbox.process(conn, handlers))
     if notion is not None:
-        _step(summary, problems, "home", lambda: notion.sync_home(freshness_sections(conn, cfg)))
+        _step(summary, problems, "home", lambda: notion.sync_home(
+            freshness_sections(conn, cfg, notion.state.language)))
         if notion.problems:
             summary["notion_problems"] = notion.problems[:20]
     if problems:

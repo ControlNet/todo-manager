@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from todo_manager import clock, delegation, feedback, outbox, store
+from todo_manager import clock, delegation, feedback, i18n, outbox, store
 from todo_manager.kanban import FakeKanban
 from todo_manager.net import HttpError
 from todo_manager.notion import body, schema, setup
@@ -304,7 +304,7 @@ class BodyTests(NotionCase):
         md = self.fake.markdown[self.page]
         self.assertIn("组会在周三", md)
         self.assertIn("我的笔记：先看上周反馈", md)
-        self.assertEqual(md.count(body.MARKER), 1)
+        self.assertEqual(md.count(i18n.t(body.MARKER)), 1)
 
     def test_user_edit_inside_region_is_held_for_interpretation(self):
         self.push(self.task)  # records the region fingerprint
