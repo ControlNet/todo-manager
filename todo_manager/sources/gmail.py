@@ -35,7 +35,10 @@ from .base import FetchResult, Item, SourceError
 
 API = "https://gmail.googleapis.com/gmail/v1/users/me"
 GITHUB_MSGID = re.compile(r"<([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(?:issues|pull)/(\d+)", re.I)
-MAX_BODY_CHARS = 20000
+# The whole body is stored (the model context clips it at render time); this cap only guards
+# against pathological messages and is recorded on the item when it applies.
+MAX_BODY_CHARS = 2_000_000
+PERMANENT_STATUSES = (400, 403, 404, 410)
 EXCLUDED_LABELS = {"SPAM", "TRASH", "DRAFT", "CHAT"}
 BULK_LABELS = {"CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL"}
 
@@ -73,10 +76,15 @@ def _b64(data: str) -> str:
     return base64.urlsafe_b64decode(padded.encode()).decode("utf-8", errors="replace")
 
 
-def extract_body(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+def extract_body(payload: dict[str, Any], read_part: Callable[[str], str | None] | None = None
+                 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    """(text, file attachments, notes). Text parts given by reference (``attachmentId``, used by
+    Gmail for large bodies) are read through ``read_part``; None from it means the part cannot
+    be read, which is recorded in the notes and marked in the text."""
     plain: list[str] = []
     html_parts: list[str] = []
     attachments: list[dict[str, Any]] = []
+    notes: dict[str, Any] = {}
 
     def walk(part: dict[str, Any]) -> None:
         mime = part.get("mimeType", "")
@@ -84,16 +92,28 @@ def extract_body(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
         if part.get("filename"):
             attachments.append({"filename": part["filename"], "mime": mime, "size": body.get("size", 0),
                                 "attachment_id": body.get("attachmentId")})
-        elif mime == "text/plain" and body.get("data"):
-            plain.append(_b64(body["data"]))
-        elif mime == "text/html" and body.get("data"):
-            html_parts.append(_b64(body["data"]))
+        elif mime in ("text/plain", "text/html"):
+            target = plain if mime == "text/plain" else html_parts
+            if body.get("data"):
+                target.append(_b64(body["data"]))
+            elif body.get("attachmentId"):
+                content = read_part(body["attachmentId"]) if read_part else None
+                if content is None:
+                    notes.setdefault("body_incomplete", []).append(mime)
+                else:
+                    target.append(content)
         for child in part.get("parts", []) or []:
             walk(child)
 
     walk(payload)
     text = "\n".join(plain).strip() or html_to_text("\n".join(html_parts))
-    return text[:MAX_BODY_CHARS], attachments
+    if notes.get("body_incomplete"):   # first, so a clipped rendering still shows it
+        text = "[part of this email's body could not be read: " + ", ".join(notes["body_incomplete"]) + "]" \
+            + ("\n\n" + text if text else "")
+    if len(text) > MAX_BODY_CHARS:
+        notes["body_truncated"] = len(text) - MAX_BODY_CHARS
+        text = text[:MAX_BODY_CHARS] + f"\n[... {notes['body_truncated']} more chars not stored]"
+    return text, attachments, notes
 
 
 class TokenProvider:
@@ -242,6 +262,20 @@ class GmailSource:
                 return f"gmail:{self.account}:{thread}"
         return None
 
+    def _body_part(self, message_id: str, attachment_id: str) -> str | None:
+        """A text part stored by reference. A transient failure fails the fetch (it is retried
+        and the cursor does not move); a permanent one returns None (recorded as incomplete)."""
+        try:
+            data = self.http("GET", f"{API}/messages/{message_id}/attachments/{attachment_id}",
+                             headers={"Authorization": f"Bearer {self.token()}"}, timeout=45)
+        except HttpError as exc:
+            if exc.status in PERMANENT_STATUSES:
+                return None
+            raise SourceError(f"body of message {message_id}: {exc}", retry_after=exc.retry_after) from None
+        except HttpTimeout as exc:
+            raise SourceError(f"body of message {message_id}: {exc}") from None
+        return _b64(data.get("data") or "")
+
     def _thread_items(self, thread_id: str) -> list[Item]:
         try:
             data = self._get(f"threads/{thread_id}", {"format": "full"})
@@ -262,7 +296,7 @@ class GmailSource:
             return None
         payload = msg.get("payload", {}) or {}
         headers = {h["name"].lower(): h["value"] for h in payload.get("headers", []) or []}
-        body, attachments = extract_body(payload)
+        body, attachments, notes = extract_body(payload, lambda att: self._body_part(msg["id"], att))
         sender_name, sender = parseaddr(headers.get("from", ""))
         sender = sender.lower()
         author_is_me = "SENT" in labels or sender in self.me
@@ -292,5 +326,5 @@ class GmailSource:
                   "bulk_hint": bulk and not author_is_me, "github_ref": github_ref,
                   "github_sender": headers.get("x-github-sender") if github_ref else None,
                   "gmail_thread": thread_id, "rfc_message_id": headers.get("message-id"),
-                  "in_reply_to": headers.get("in-reply-to")},
+                  "in_reply_to": headers.get("in-reply-to"), **notes},
         )

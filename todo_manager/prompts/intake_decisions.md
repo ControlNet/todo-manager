@@ -5,6 +5,8 @@ Write one JSON object and pass it to `todo-manager intake apply <run_id> --file 
     {"run_id": "<run id>", "rules_version": <int>, "items": [ <op>, ... ]}
 
 Every NEW source item listed above must be covered exactly by one of: evidence of an op, or an `ignore` op.
+An item shown with `[... N more chars; todo-manager source show <id> ...]` was clipped for this context: when the
+visible part does not settle the decision (requests often come last), read it with that command first.
 Human-facing text (titles, next_step, responsibility, notes) is in {language}; keep names, code,
 repository and paper titles as written in the source.
 
