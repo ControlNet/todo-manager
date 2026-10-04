@@ -287,12 +287,18 @@ def check_settings(conn: sqlite3.Connection, kb: Kanban) -> list[str]:
     return wrong
 
 
+def _failed(stats: dict[str, Any], counter: str, error: str) -> None:
+    """Count a failed Kanban call; the first error of the pass is kept for channel health."""
+    stats[counter] += 1
+    stats.setdefault("error", error[:500])
+
+
 def settings_problems(conn: sqlite3.Connection) -> list[str]:
     return (loads(get_meta(conn, SETTINGS_KEY), None) or {}).get("problems", [])
 
 
-def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, int]:
-    stats = {"submitted": 0, "linked": 0, "waiting_capacity": 0, "errors": 0, "quarantined": 0, "held": 0,
+def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, Any]:
+    stats: dict[str, Any] = {"submitted": 0, "linked": 0, "waiting_capacity": 0, "errors": 0, "quarantined": 0, "held": 0,
              "unsafe_settings": 0}
     settings_ok: bool | None = None
     if held(conn):
@@ -316,7 +322,7 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[st
             except KanbanError as exc:
                 with tx(conn):
                     _set(conn, d["id"], last_error=f"lookup failed: {exc}")
-                stats["errors"] += 1
+                _failed(stats, "errors", f"lookup failed: {exc}")
                 continue
             if len(matches) > 1:
                 with tx(conn):
@@ -348,7 +354,7 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[st
                 except KanbanError as exc:
                     with tx(conn):
                         _set(conn, d["id"], last_error=f"Hermes settings not verified: {exc}")
-                    stats["errors"] += 1
+                    _failed(stats, "errors", f"Hermes settings not verified: {exc}")
                     settings_ok = False
                     continue
             if not settings_ok:
@@ -369,7 +375,7 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[st
                 with tx(conn):
                     _set(conn, d["id"], status="reconcile" if exc.uncertain else "pending_submit",
                          last_error=f"create failed: {exc}")
-                stats["errors"] += 1
+                _failed(stats, "errors", f"create failed: {exc}")
                 continue
             with tx(conn):
                 _set(conn, d["id"], card_id=card_id, card_status="ready", status="queued", last_error=None)
@@ -406,8 +412,8 @@ def _status_from_card(card_status: str, d: dict[str, Any]) -> str:
 
 # --------------------------------------------------------------------------- result sync
 
-def sync_cards(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, int]:
-    stats = {"checked": 0, "deliveries": 0, "questions": 0, "failures": 0, "errors": 0}
+def sync_cards(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, Any]:
+    stats: dict[str, Any] = {"checked": 0, "deliveries": 0, "questions": 0, "failures": 0, "errors": 0}
     rows = conn.execute("SELECT id FROM delegations WHERE card_id IS NOT NULL AND status NOT IN"
                         " ('ended','cancelled','quarantined')").fetchall()
     for row in rows:
@@ -417,7 +423,7 @@ def sync_cards(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, i
         except KanbanError as exc:
             with tx(conn):
                 _set(conn, d["id"], last_error=f"snapshot failed: {exc}")
-            stats["errors"] += 1
+            _failed(stats, "errors", f"snapshot failed: {exc}")
             continue
         stats["checked"] += 1
         # While a cancel is on its way, whatever the card still does is history only.
@@ -760,8 +766,8 @@ def _comment_once(kb: Kanban, d: dict[str, Any], mid: str, text: str, already: b
     kb.comment(d["card_id"], f"{text}\n[tm:{mid}]")
 
 
-def send_messages(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, int]:
-    stats = {"sent": 0, "waiting": 0, "superseded": 0, "failed": 0}
+def send_messages(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, Any]:
+    stats: dict[str, Any] = {"sent": 0, "waiting": 0, "superseded": 0, "failed": 0}
     if held(conn):
         stats["held"] = conn.execute("SELECT COUNT(*) FROM delegation_messages WHERE status IN"
                                      " ('pending','sending','waiting_capacity') AND kind != 'requirement'").fetchone()[0]
@@ -790,7 +796,7 @@ def send_messages(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str
                     conn.execute("UPDATE delegation_messages SET status=?, error=? WHERE id=?",
                                  ("sending" if exc.uncertain or msg["status"] == "sending" else "pending",
                                   str(exc)[:500], msg["id"]))
-                stats["failed"] += 1
+                _failed(stats, "failed", f"{msg['kind']} not delivered: {exc}")
                 continue
             stats[outcome] = stats.get(outcome, 0) + 1
     return stats

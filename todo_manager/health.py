@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import sqlite3
 from datetime import timedelta
 from pathlib import Path
@@ -12,7 +11,7 @@ from typing import Any
 
 from . import clock, effects, i18n
 from .config import Config
-from .db import get_meta, loads
+from .db import dumps, get_meta, loads, set_meta, tx
 
 STALE_SOURCE_MINUTES = 30
 GROUP_STALE_SCOPES = 3   # more stale scopes than this of one source are reported as one line
@@ -21,18 +20,65 @@ ENTRIES = ("intake", "feedback")
 
 def stale_sources(conn: sqlite3.Connection, sources: tuple[str, ...] | None = None) -> dict[str, list[dict[str, Any]]]:
     """Failing or stale source scopes, grouped by source. A scope may go ``STALE_SOURCE_MINUTES``
-    plus its own polling interval (cursor meta ``poll_interval_minutes``) without a success;
-    retired scopes (dropped from a discovered list) are left out."""
+    plus its own polling interval (cursor meta ``poll_interval_minutes``) without a success; a
+    scope read on a schedule (meta ``next_due_at``, e.g. the daily commit digest) only once its
+    next read was due, and a channel of the gate itself (meta ``channel``: Notion comments and
+    bodies, the Kanban steps) only while it fails. Any failure since the last success counts.
+    Retired scopes (dropped from a discovered list) are left out."""
     found: dict[str, list[dict[str, Any]]] = {}
     for r in conn.execute("SELECT * FROM cursors ORDER BY source, scope"):
         meta = loads(r["meta"], {})
         if (sources is not None and r["source"] not in sources) or meta.get("retired"):
             continue
-        age = clock.minutes_since(r["last_success_at"])
-        allowed = STALE_SOURCE_MINUTES + int(meta.get("poll_interval_minutes") or 0)
-        if r["consecutive_failures"] or age is None or age > allowed:
+        if r["consecutive_failures"]:
+            stale = True
+        elif meta.get("channel"):
+            stale = False
+        elif meta.get("next_due_at"):
+            stale = clock.now() > clock.parse(meta["next_due_at"]) + timedelta(minutes=STALE_SOURCE_MINUTES)
+        else:
+            age = clock.minutes_since(r["last_success_at"])
+            stale = age is None or age > STALE_SOURCE_MINUTES + int(meta.get("poll_interval_minutes") or 0)
+        if stale:
             found.setdefault(r["source"], []).append(dict(r))
     return found
+
+
+def record_channel(conn: sqlite3.Connection, source: str, scope: str, error: str | None) -> None:
+    """Persist the outcome of one of the gate's own channels (``source``/``scope`` in the
+    cursors table, marked ``channel``): an error adds a consecutive failure, a clean pass
+    clears them. Shown and alerted like a failing source; never wakes the model."""
+    now = clock.iso()
+    with tx(conn):
+        if error is None:
+            conn.execute(
+                "INSERT INTO cursors(source, scope, last_attempt_at, last_success_at, consecutive_failures, meta)"
+                " VALUES (?,?,?,?,0,'{\"channel\":true}') ON CONFLICT(source, scope) DO UPDATE SET"
+                " last_attempt_at=excluded.last_attempt_at, last_success_at=excluded.last_success_at,"
+                " last_error=NULL, consecutive_failures=0,"
+                " meta=json_set(COALESCE(cursors.meta, '{}'), '$.channel', json('true'))",
+                (source, scope, now, now))
+        else:
+            conn.execute(
+                "INSERT INTO cursors(source, scope, last_attempt_at, last_error, consecutive_failures, meta)"
+                " VALUES (?,?,?,?,1,'{\"channel\":true}') ON CONFLICT(source, scope) DO UPDATE SET"
+                " last_attempt_at=excluded.last_attempt_at, last_error=excluded.last_error,"
+                " consecutive_failures=cursors.consecutive_failures+1,"
+                " meta=json_set(COALESCE(cursors.meta, '{}'), '$.channel', json('true'))",
+                (source, scope, now, error[:1000]))
+
+
+def record_problems(conn: sqlite3.Connection, origin: str, found: list[str]) -> None:
+    """Keep the problems one gate run found in ``origin`` (e.g. Notion pages it could not use)
+    until the next run replaces them: reported by ``health`` and alerted by the next run's
+    alert step. A run that finds none clears them."""
+    key = f"health.problems.{origin}"
+    found = list(dict.fromkeys(found))[:20]
+    with tx(conn):
+        if found:
+            set_meta(conn, key, dumps({"at": clock.iso(), "problems": found}))
+        else:
+            conn.execute("DELETE FROM meta WHERE key=?", (key,))
 
 
 def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
@@ -40,7 +86,9 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
                            "rules_version": int(get_meta(conn, "rules_version", "0") or 0)}
     out["sources"] = [{"source": r["source"], "scope": r["scope"], "last_success_at": r["last_success_at"],
                        "minutes_since_success": round(clock.minutes_since(r["last_success_at"]) or -1),
-                       "failures": r["consecutive_failures"], "error": (r["last_error"] or "")[:200]}
+                       "failures": r["consecutive_failures"], "error": (r["last_error"] or "")[:200],
+                       "channel": bool(loads(r["meta"], {}).get("channel")),
+                       "next_due_at": loads(r["meta"], {}).get("next_due_at")}
                       for r in conn.execute("SELECT * FROM cursors ORDER BY source, scope")]
     stale = {(r["source"], r["scope"]) for rows in stale_sources(conn).values() for r in rows}
     out["stale_sources"] = {}
@@ -82,62 +130,83 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
     out["delegations_held"] = loads(get_meta(conn, "delegations.hold"), None)
     out["kanban_settings"] = loads(get_meta(conn, "kanban.settings_problems"), None)
     out["notion_ready"] = bool(get_meta(conn, "notion.tasks_data_source_id") or cfg.get("notion.tasks_data_source_id"))
-    out["problems"] = problems(out, cfg)
+    out["recorded_problems"] = {r["key"].split(".", 2)[2]: loads(r["value"], {})
+                                for r in conn.execute("SELECT key, value FROM meta WHERE key LIKE 'health.problems.%'")}
+    items = problem_items(out, cfg)
+    out["problems"] = [text for _, text in items]
+    out["problem_keys"] = [key for key, _ in items]
     return out
 
 
 def problems(rep: dict[str, Any], cfg: Config) -> list[str]:
-    found = []
+    return [text for _, text in problem_items(rep, cfg)]
+
+
+def problem_items(rep: dict[str, Any], cfg: Config) -> list[tuple[str, str]]:
+    """Current problems as (identity, text). The identity names what is wrong (a source scope,
+    a kind of problem) and never the details that change from run to run (error text, counts,
+    minutes), so an alert for it is sent once a day however its text changes."""
+    found: list[tuple[str, str]] = []
+
+    def add(key: str, text: str) -> None:
+        found.append((key, text.strip()))
+
     for source, scopes in rep["stale_sources"].items():
         s = scopes[0]
         if len(scopes) > GROUP_STALE_SCOPES:
-            found.append(f"source {source}: {len(scopes)} scopes stale, e.g. {s['scope']} ({s['minutes_since_success']} min, "
-                         f"{s['failures']} failures) {s['error']}".strip())
+            add(f"source:{source}:*", f"source {source}: {len(scopes)} scopes stale, e.g. {s['scope']}"
+                f" ({s['minutes_since_success']} min, {s['failures']} failures) {s['error']}")
             continue
         for s in scopes:
-            found.append(f"source {source}:{s['scope']} stale ({s['minutes_since_success']} min, "
-                         f"{s['failures']} failures) {s['error']}".strip())
+            state = "failing" if s.get("channel") else "stale"
+            add(f"source:{source}:{s['scope']}", f"source {source}:{s['scope']} {state}"
+                f" ({s['minutes_since_success']} min, {s['failures']} failures) {s['error']}")
+    for origin, recorded in sorted((rep.get("recorded_problems") or {}).items()):
+        for text in recorded.get("problems", []):
+            add(f"{origin}:{text}", f"{origin}: {text}")
     if rep.get("notion_ready") and not cfg.get("identity.notion_user_ids"):
-        found.append("identity.notion_user_ids is empty: Notion comments and edits are treated as evidence only,"
-                     " never as the user's instructions")
+        add("identity.notion_user_ids", "identity.notion_user_ids is empty: Notion comments and edits are treated as"
+            " evidence only, never as the user's instructions")
     if rep["outbox_dead"]:
-        found.append(f"{len(rep['outbox_dead'])} outbox effects gave up")
+        add("outbox_dead", f"{len(rep['outbox_dead'])} outbox effects gave up")
     if rep["feedback"].get("failed"):
-        found.append(f"{rep['feedback']['failed']} feedback items failed")
+        add("feedback_failed", f"{rep['feedback']['failed']} feedback items failed")
     if rep["delegations"].get("quarantined"):
-        found.append(f"{rep['delegations']['quarantined']} delegations quarantined")
+        add("delegations_quarantined", f"{rep['delegations']['quarantined']} delegations quarantined")
     if rep.get("delegations_held"):
         hold = rep["delegations_held"]
-        found.append(f"delegations held since {hold.get('reason')} at {hold.get('at')}: check the Kanban board, then"
-                     " `todo-manager delegate release-hold`")
+        add("delegations_held", f"delegations held since {hold.get('reason')} at {hold.get('at')}: check the Kanban"
+            " board, then `todo-manager delegate release-hold`")
     if rep.get("kanban_settings"):
         for problem in rep["kanban_settings"].get("problems", []):
-            found.append(f"Hermes {problem}; new delegations wait, cards already on the board are at risk")
+            add(f"kanban_settings:{problem.split(' ', 1)[0]}",
+                f"Hermes {problem}; new delegations wait, cards already on the board are at risk")
     attention = rep.get("delegation_attention") or {}
     if attention.get("cancel_unconfirmed"):
-        found.append(f"cancelled delegations whose worker was not confirmed stopped: "
-                     f"{', '.join(attention['cancel_unconfirmed'])}")
+        add("cancel_unconfirmed", f"cancelled delegations whose worker was not confirmed stopped: "
+            f"{', '.join(attention['cancel_unconfirmed'])}")
     if attention.get("approval_outcome_unknown"):
-        found.append(f"approved external actions with unknown outcome (paused, check manually): "
-                     f"{', '.join(attention['approval_outcome_unknown'])}")
+        add("approval_outcome_unknown", f"approved external actions with unknown outcome (paused, check manually): "
+            f"{', '.join(attention['approval_outcome_unknown'])}")
     if rep.get("followups_failed"):
-        found.append(f"follow-ups no run handled (set a new follow-up date to retry): "
-                     f"{', '.join(rep['followups_failed'])}")
+        add("followups_failed", f"follow-ups no run handled (set a new follow-up date to retry): "
+            f"{', '.join(rep['followups_failed'])}")
     for entry, info in rep["runs"].items():
         last = info["last"]
         if last is None:
             continue
         age = clock.minutes_since(last["at"]) or 0
         if age > int(cfg.get("notify.failure_alert_after_minutes", 60)):
-            found.append(f"{entry} gate has not run for {round(age)} min")
+            add(f"gate_idle:{entry}", f"{entry} gate has not run for {round(age)} min")
         if last["status"] == "error":
-            found.append(f"{entry} gate error: {last['error']}")
+            add(f"gate_error:{entry}", f"{entry} gate error: {last['error']}")
         woke = info["last_wake"]
         if woke and woke.get("over_budget"):
-            found.append(f"{entry} run {woke['id']} context is over budget ({woke['over_budget']} chars): fewer open"
-                         " tasks/rules or a larger wake.max_context_chars")
+            add(f"over_budget:{entry}", f"{entry} run {woke['id']} context is over budget ({woke['over_budget']} chars):"
+                " fewer open tasks/rules or a larger wake.max_context_chars")
         if woke and not woke["completed"] and (clock.minutes_since(woke["at"]) or 0) > 90:
-            found.append(f"{entry} run {woke['id']} woke the model but never applied its decisions")
+            add(f"never_applied:{entry}:{woke['id']}", f"{entry} run {woke['id']} woke the model but never applied"
+                " its decisions")
     return found
 
 
@@ -164,13 +233,14 @@ def metrics(conn: sqlite3.Connection, days: int = 7) -> dict[str, Any]:
 
 
 def raise_alerts(conn: sqlite3.Connection, cfg: Config) -> dict[str, int]:
-    """Queue a Matrix reminder for each current problem, at most once per problem kind per day."""
-    found = report(conn, cfg)["problems"]
+    """Queue a Matrix reminder for each current problem, at most once per problem (its
+    identity from ``problem_items``) per day."""
+    rep = report(conn, cfg)
     day = clock.local_date(cfg.tz).isoformat()
-    for text in found:
-        kind = hashlib.sha1(re.sub(r"\d+", "#", text).encode()).hexdigest()[:12]
+    for key, text in zip(rep["problem_keys"], rep["problems"]):
+        kind = hashlib.sha1(key.encode()).hexdigest()[:12]
         effects.notify(conn, cfg, f"health:{kind}:{day}", i18n.t("health.alert", text=text))
-    return {"problems": len(found)}
+    return {"problems": len(rep["problems"])}
 
 
 def usage(cfg: Config, job_ids: list[str], days: int = 7) -> dict[str, Any]:

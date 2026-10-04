@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from . import batching, clock, intake, runs
 from .config import Config
@@ -98,6 +99,13 @@ def _digest_time(cfg: Config) -> tuple[int, int]:
     return int(hh), int(mm)
 
 
+def next_digest_at(cfg: Config) -> str:
+    """Tomorrow's digest time (local wall clock, so a 23- or 25-hour day is respected), UTC."""
+    hh, mm = _digest_time(cfg)
+    tomorrow = clock.local_date(cfg.tz) + timedelta(days=1)
+    return clock.iso(datetime(tomorrow.year, tomorrow.month, tomorrow.day, hh, mm, tzinfo=ZoneInfo(cfg.tz)))
+
+
 def commit_digest_check(conn: sqlite3.Connection, cfg: Config, adapters: list[Any]) -> tuple[dict[str, Any] | None, dict]:
     """Return a digest manifest when today's digest should run now (at most one model
     attempt per day plus ``max_attempts_per_day - 1`` retries of a run that never completed)."""
@@ -128,6 +136,15 @@ def commit_digest_check(conn: sqlite3.Connection, cfg: Config, adapters: list[An
             info["digest"] = "exhausted"
             return None, info
     info["fetch"] = fetch_all(conn, adapters, budget=120)
+    # Commits are read only here, once a day: the scope is due again at tomorrow's digest time
+    # (health reports it stale only after that, or at once when a due read fails).
+    due_at = next_digest_at(cfg)
+    with tx(conn):
+        for adapter in adapters:
+            read = info["fetch"].get(f"{adapter.name}:{adapter.scope}") or {"skipped": "not read"}
+            if "error" not in read and "skipped" not in read:
+                conn.execute("UPDATE cursors SET meta=json_set(COALESCE(meta, '{}'), '$.next_due_at', ?)"
+                             " WHERE source=? AND scope=?", (due_at, adapter.name, adapter.scope))
     if any("error" in v for v in info["fetch"].values()):
         return None, info  # retry fetching next tick; no model call on partial data
     item_ids = [r["id"] for r in conn.execute(

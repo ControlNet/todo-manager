@@ -24,17 +24,29 @@ from .db import tx
 from .notion import schema
 
 Step = Callable[[], Any]
-SOURCE_SCOPES = ("gmail", "slack", "github", "commit", "notion")
+SOURCE_SCOPES = ("gmail", "slack", "github", "commit", "notion", "kanban")
+# Steps whose failures are kept as channel health here (``health.record_channel``). The Notion
+# pulls and the comment poll record their own (``notion``/``projects``, ``tasks``, ``bodies``,
+# ``comments``) since a partly failed pass does not raise.
+CHANNELS = {"claims": ("gate", "claims"), "kanban_settings": ("kanban", "settings"),
+            "kanban_messages": ("kanban", "messages"), "kanban_submit": ("kanban", "submit"),
+            "kanban_cards": ("kanban", "cards"), "alerts": ("gate", "alerts"), "dirty": ("notion", "dirty"),
+            "outbox": ("gate", "outbox"), "home": ("notion", "home")}
 
 
-def _step(summary: dict[str, Any], problems: list[str], name: str, fn: Step) -> Any:
+def _step(conn: sqlite3.Connection, summary: dict[str, Any], problems: list[str], name: str, fn: Step) -> Any:
+    channel = CHANNELS.get(name)
     try:
         result = fn()
     except Exception as exc:  # noqa: BLE001 - isolate systems from each other
         problems.append(f"{name}: {type(exc).__name__}")
         summary[name] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        if channel:
+            health.record_channel(conn, *channel, f"{type(exc).__name__}: {exc}")
         return None
     summary[name] = result
+    if channel:
+        health.record_channel(conn, *channel, (result or {}).get("error") if isinstance(result, dict) else None)
     return result
 
 
@@ -62,7 +74,7 @@ def freshness_sections(conn: sqlite3.Connection, cfg: Config, lang: str | None =
     local = clock.local_dt(cfg.tz)
     lines: list[tuple[str, str]] = []
     for source, scopes in health.stale_sources(conn, SOURCE_SCOPES).items():
-        label = schema.label("source", source, lang)
+        label = t("home.kanban_label") if source == "kanban" else schema.label("source", source, lang)
         for r in scopes:
             when = (f"{clock.local_dt(cfg.tz, clock.parse(r['last_success_at'])):%m-%d %H:%M}"
                     if r["last_success_at"] else t("home.never_succeeded"))
@@ -91,31 +103,35 @@ def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanba
     """Steps 1-4 (no model). ``notion``: a NotionSync or None; ``kanban``: a Kanban client or None."""
     summary: dict[str, Any] = {}
     problems: list[str] = []
-    _step(summary, problems, "claims", lambda: fail_exhausted_claims(conn, cfg))
+
+    def step(name: str, fn: Step) -> Any:
+        return _step(conn, summary, problems, name, fn)
+
+    step("claims", lambda: fail_exhausted_claims(conn, cfg))
     if notion is not None:
-        _step(summary, problems, "pull_projects", lambda: notion.pull("project"))
-        _step(summary, problems, "pull_tasks", lambda: notion.pull("task"))
-        _step(summary, problems, "comments", lambda: notion.poll_comments(
-            int(cfg.get("notion.cold_comment_pages_per_run", 30))))
+        step("pull_projects", lambda: notion.pull("project"))
+        step("pull_tasks", lambda: notion.pull("task"))
+        step("comments", lambda: notion.poll_comments(int(cfg.get("notion.cold_comment_pages_per_run", 30))))
     if kanban is not None:
         on_board = conn.execute("SELECT 1 FROM delegations WHERE card_id IS NOT NULL AND status IN (%s) LIMIT 1"
                                 % ",".join("?" * len(delegation.ACTIVE)), delegation.ACTIVE).fetchone()
         if on_board:  # cards in flight are exposed to the global switches; re-read them every run
-            _step(summary, problems, "kanban_settings", lambda: delegation.check_settings(conn, kanban))
-        _step(summary, problems, "kanban_messages", lambda: delegation.send_messages(conn, cfg, kanban))
-        _step(summary, problems, "kanban_submit", lambda: delegation.submit_pending(conn, cfg, kanban))
-        _step(summary, problems, "kanban_cards", lambda: delegation.sync_cards(conn, cfg, kanban))
-    _step(summary, problems, "alerts", lambda: health.raise_alerts(conn, cfg))
+            step("kanban_settings", lambda: delegation.check_settings(conn, kanban))
+        step("kanban_messages", lambda: delegation.send_messages(conn, cfg, kanban))
+        step("kanban_submit", lambda: delegation.submit_pending(conn, cfg, kanban))
+        step("kanban_cards", lambda: delegation.sync_cards(conn, cfg, kanban))
+    step("alerts", lambda: health.raise_alerts(conn, cfg))
     handlers: dict[tuple[str, str], Any] = {}
     if notion is not None:
-        _step(summary, problems, "dirty", notion.enqueue_dirty)
+        step("dirty", notion.enqueue_dirty)
         handlers.update(notion.handlers())
     if notifier is not None:
         handlers[("matrix", "notify")] = notifier
-    _step(summary, problems, "outbox", lambda: outbox.process(conn, handlers))
+    step("outbox", lambda: outbox.process(conn, handlers))
     if notion is not None:
-        _step(summary, problems, "home", lambda: notion.sync_home(
-            freshness_sections(conn, cfg, notion.state.language)))
+        step("home", lambda: notion.sync_home(freshness_sections(conn, cfg, notion.state.language)))
+        # Kept until the next run replaces them: shown by `health`, alerted by the next alert step.
+        health.record_problems(conn, "notion", notion.problems)
         if notion.problems:
             summary["notion_problems"] = notion.problems[:20]
     if problems:

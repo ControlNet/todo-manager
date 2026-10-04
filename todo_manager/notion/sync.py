@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from .. import clock, delegation, effects, feedback, i18n, ids, outbox, store
+from .. import clock, delegation, effects, feedback, health, i18n, ids, outbox, store
 from ..config import Config
 from ..db import dumps, get_meta, loads, set_meta, tx
 from . import body, schema
@@ -257,21 +257,31 @@ class NotionSync:
     # ================================================================== import (pull)
 
     def pull(self, kind: str, overlap_minutes: int = 3) -> dict[str, int]:
+        """Import edits of ``kind`` pages since the cursor, then (tasks) read edited bodies. Any
+        failure of the import is kept on the cursor (``notion``/``{kind}s``); body reads keep
+        their own channel (``notion``/``bodies``)."""
+        scope = f"{kind}s"
+        try:
+            stats = self._pull(kind, scope, overlap_minutes)
+        except Exception as exc:
+            _cursor_error(self.conn, scope, _describe(exc))
+            raise
+        if kind == "task":
+            stats["bodies"] = self.check_bodies(int(self.cfg.get("notion.body_reads_per_run", 10)))
+        stats["problems"] = len(self.problems)
+        return stats
+
+    def _pull(self, kind: str, scope: str, overlap_minutes: int) -> dict[str, int]:
         stats = {"pages": 0, "edits": 0, "created": 0, "problems": 0}
         ds = self.data_source(kind)
-        scope = f"{kind}s"
         row = self.conn.execute("SELECT cursor FROM cursors WHERE source='notion' AND scope=?", (scope,)).fetchone()
         since = row["cursor"] if row and row["cursor"] else get_meta(self.conn, "notion.setup_at")
         flt = None
         if since:
             start = clock.iso(clock.parse(since) - timedelta(minutes=overlap_minutes))
             flt = {"timestamp": "last_edited_time", "last_edited_time": {"on_or_after": start}}
-        try:
-            pages = self.client.query_data_source(ds, filter=flt, sorts=[{"timestamp": "last_edited_time",
-                                                                          "direction": "ascending"}])
-        except NotionError as exc:
-            _cursor_error(self.conn, scope, str(exc))
-            raise
+        pages = self.client.query_data_source(ds, filter=flt, sorts=[{"timestamp": "last_edited_time",
+                                                                      "direction": "ascending"}])
         newest = since
         for page in pages:
             stats["pages"] += 1
@@ -286,9 +296,6 @@ class NotionSync:
                 " VALUES ('notion',?,?,?,?,0) ON CONFLICT(source, scope) DO UPDATE SET cursor=excluded.cursor,"
                 " last_attempt_at=excluded.last_attempt_at, last_success_at=excluded.last_success_at,"
                 " last_error=NULL, consecutive_failures=0", (scope, newest, clock.iso(), clock.iso()))
-        if kind == "task":
-            stats["bodies"] = self.check_bodies(int(self.cfg.get("notion.body_reads_per_run", 10)))
-        stats["problems"] = len(self.problems)
         return stats
 
     def body_unread(self, row: dict[str, Any]) -> bool:
@@ -300,22 +307,30 @@ class NotionSync:
         return clock.parse(row["body_read_at"]) < clock.parse(row["last_edited_time"]) + BODY_TIME_SLACK
 
     def check_bodies(self, limit: int) -> int:
-        """Read the bodies of pages edited by someone other than our bot since the last read."""
-        rows = [self.page_row(r["page_id"]) for r in self.conn.execute(
-            "SELECT page_id FROM notion_pages WHERE entity_type='task' AND trashed=0 AND last_edited_time IS NOT NULL"
-            " AND last_edited_by IS NOT ?", (self.state.bot_user_id,))]
-        due = sorted((r for r in rows if self.body_unread(r)), key=lambda r: r["body_read_at"] or "")
+        """Read the bodies of pages edited by someone other than our bot since the last read.
+        A body that cannot be read stays unread (retried next run) and marks the ``bodies``
+        channel failing until a run reads every due body."""
+        failure: str | None = None
         done = 0
-        for row in due[:max(0, limit)]:
-            task = store.get_task(self.conn, row["entity_id"])
-            if task is None:
-                continue
-            try:
-                self.check_body(row, task)
-            except NotionError as exc:
-                self.problems.append(f"body of {row['page_id']}: {exc}")
-                continue
-            done += 1
+        try:
+            rows = [self.page_row(r["page_id"]) for r in self.conn.execute(
+                "SELECT page_id FROM notion_pages WHERE entity_type='task' AND trashed=0 AND last_edited_time IS NOT NULL"
+                " AND last_edited_by IS NOT ?", (self.state.bot_user_id,))]
+            due = sorted((r for r in rows if self.body_unread(r)), key=lambda r: r["body_read_at"] or "")
+            for row in due[:max(0, limit)]:
+                task = store.get_task(self.conn, row["entity_id"])
+                if task is None:
+                    continue
+                try:
+                    self.check_body(row, task)
+                except NotionError as exc:
+                    failure = failure or f"body of {row['page_id']}: {exc}"
+                    continue
+                done += 1
+        except Exception as exc:
+            health.record_channel(self.conn, "notion", "bodies", _describe(exc))
+            raise
+        health.record_channel(self.conn, "notion", "bodies", failure)
         return done
 
     def check_body(self, row: dict[str, Any], task: dict[str, Any]) -> list[str]:
@@ -893,41 +908,55 @@ class NotionSync:
         return list(targets.values())
 
     def poll_comments(self, cold_limit: int = 30) -> dict[str, int]:
-        stats = {"pages": 0, "new": 0, "edited": 0, "errors": 0}
+        """Read the comments of the pages due. A page that is gone is a problem of that page
+        (``problems``); any other failure marks the ``comments`` channel failing until a run
+        reads every due page."""
+        stats = {"pages": 0, "new": 0, "edited": 0, "errors": 0, "missing": 0}
         user_ids = set(self.cfg.get("identity.notion_user_ids") or [])
-        for target in self.comment_targets(cold_limit):
-            page_id = target["page_id"]
-            try:
-                comments = self.client.list_comments(page_id)
-            except NotionError as exc:
-                stats["errors"] += 1
-                if exc.not_found and target["entity_type"] == "task":
-                    self._check_missing(page_id)
-                else:
-                    self.problems.append(f"comments of {page_id}: {exc}")
-                continue
-            stats["pages"] += 1
-            for c in comments:
-                outcome = self._comment(c, target, user_ids)
-                if outcome in ("new", "edited"):
-                    stats[outcome] += 1
-            if target["entity_type"] != "home":
-                with tx(self.conn):
-                    self.conn.execute("UPDATE notion_pages SET comments_checked_at=? WHERE page_id=?",
-                                      (clock.iso(), page_id))
+        failure: str | None = None
+        try:
+            for target in self.comment_targets(cold_limit):
+                page_id = target["page_id"]
+                try:
+                    comments = self.client.list_comments(page_id)
+                except NotionError as exc:
+                    stats["errors"] += 1
+                    error = self._check_missing(page_id) if exc.not_found and target["entity_type"] == "task" \
+                        else f"comments of {page_id}: {exc}"
+                    if error is None:
+                        stats["missing"] += 1
+                    failure = failure or error
+                    continue
+                stats["pages"] += 1
+                for c in comments:
+                    outcome = self._comment(c, target, user_ids)
+                    if outcome in ("new", "edited"):
+                        stats[outcome] += 1
+                if target["entity_type"] != "home":
+                    with tx(self.conn):
+                        self.conn.execute("UPDATE notion_pages SET comments_checked_at=? WHERE page_id=?",
+                                          (clock.iso(), page_id))
+        except Exception as exc:
+            health.record_channel(self.conn, "notion", "comments", _describe(exc))
+            raise
+        health.record_channel(self.conn, "notion", "comments", failure)
         return stats
 
-    def _check_missing(self, page_id: str) -> None:
+    def _check_missing(self, page_id: str) -> str | None:
+        """A task page whose comments are not found: trashed (imported as such), or gone
+        (a problem of that page). Returns the error when that could not be told."""
         try:
             page = self.client.retrieve_page(page_id)
         except NotionError as exc:
             if exc.not_found:
                 self.problems.append(f"page {page_id} is no longer accessible (deleted or unshared)")
-            return
+                return None
+            return f"page {page_id}: {exc}"
         if page.get("in_trash"):
             row = self.page_row(page_id)
             if row and not row["trashed"]:
                 self.page_trashed(row, page)
+        return None
 
     def _comment(self, c: dict[str, Any], target: dict[str, Any], user_ids: set[str]) -> str:
         author = (c.get("created_by") or {}).get("id")
@@ -1084,6 +1113,10 @@ def _note_holds(payload: dict[str, Any], notes: str, present: set[str]) -> bool:
 
 def _split_repos(text: str | None) -> list[str]:
     return [r.strip() for r in (text or "").replace("\n", ",").split(",") if r.strip()]
+
+
+def _describe(exc: BaseException) -> str:
+    return str(exc) if isinstance(exc, NotionError) else f"{type(exc).__name__}: {exc}"
 
 
 def _cursor_error(conn: sqlite3.Connection, scope: str, error: str) -> None:

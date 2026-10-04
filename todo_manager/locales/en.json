@@ -87,6 +87,7 @@
   "home.dead_writes_detail": "{n} Notion/reminder writes were given up (see todo-manager health)",
   "home.failed_feedback": "⚠️ Feedback not handled",
   "home.failed_feedback_detail": "{n} feedback items failed in the last 7 days",
+  "home.kanban_label": "Hermes Kanban",
   "home.last_checked": "Last checked",
   "home.marker": "Data freshness (maintained by Todo Manager)",
   "home.never_succeeded": "never succeeded",
