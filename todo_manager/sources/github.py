@@ -312,9 +312,11 @@ class GitHubNotificationSource:
                 continue
             # The thread itself (opener, state) and its latest activity (author, text): without them
             # the model cannot tell "my own PR was merged" from "someone needs me".
-            thread = self._get(url)
+            unavailable: list[str] = []
+            thread = self._get(url, "thread", unavailable)
             latest_url = subject.get("latest_comment_url")
-            latest = thread if not latest_url or latest_url == url else self._get(latest_url)
+            latest = thread if not latest_url or latest_url == url else self._get(latest_url, "latest_comment",
+                                                                                   unavailable)
             opener = ((thread or {}).get("user") or {}).get("login") or "?"
             state = (thread or {}).get("state") or "?"
             if (thread or {}).get("merged"):
@@ -333,13 +335,17 @@ class GitHubNotificationSource:
                     "assignees": [a.get("login") for a in (thread or {}).get("assignees") or []],
                     "requested_reviewers": sorted(r.get("login") for r in (thread or {}).get("requested_reviewers") or []
                                                   if r.get("login"))}
+            gaps = "".join(f"\n[{u.split(':')[0].replace('_', ' ')} unavailable ({u.split(': ', 1)[1]}): deleted or"
+                           " no access; its content is unknown]" for u in unavailable)
+            if unavailable:
+                meta["unavailable"] = unavailable
             items.append(Item(source="github", account=repo, external_id=f"notification:{note['id']}",
                               version=note.get("updated_at", ""), kind="notification", conversation_key=key,
                               thread_key=key, occurred_at=_gh_time(note.get("updated_at", clock.iso())),
                               author=login or None, author_is_me=login.lower() in self.me,
                               title=title, url=html_url,
                               route="context" if is_bot else "if_open_task" if own_pr_closed else "batch",
-                              body=f"[reason: {note.get('reason')}; state: {state}; opened by {opener}]\n{body}",
+                              body=f"[reason: {note.get('reason')}; state: {state}; opened by {opener}]{gaps}\n{body}",
                               meta=meta))
             if thread:
                 latest_id = str((latest or {}).get("id")) if latest is not thread and latest else ""
@@ -388,13 +394,18 @@ class GitHubNotificationSource:
                               c.get("body") or "", version=edited or ""))
         return found
 
-    def _get(self, api_url: str) -> dict[str, Any] | None:
+    def _get(self, api_url: str, what: str = "", unavailable: list[str] | None = None) -> dict[str, Any] | None:
+        """404/410 (deleted or no longer accessible) is ``None`` and noted in ``unavailable``; any
+        other failure raises, so the read fails and the cursor stays for the next run."""
         try:
             data = self.client.get(api_url.replace(API + "/", ""))
         except SourceError as exc:
-            if "HTTP 404" in str(exc) or "HTTP 410" in str(exc):
-                return None   # deleted or no longer accessible
-            raise
+            status = next((s for s in ("HTTP 404", "HTTP 410") if s in str(exc)), None)
+            if status is None:
+                raise
+            if unavailable is not None and what:
+                unavailable.append(f"{what}: {status}")
+            return None
         return data if isinstance(data, dict) else None
 
 

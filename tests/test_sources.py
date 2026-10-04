@@ -10,7 +10,8 @@ import json
 
 from todo_manager import clock, gate_intake, store
 from todo_manager.net import HttpError
-from todo_manager.sources.base import FetchResult, Item, SourceError, get_cursor, persist_fetch, record_fetch_error
+from todo_manager.sources.base import (FetchResult, Item, SourceError, get_cursor, item_body, persist_fetch,
+                                      record_fetch_error)
 from todo_manager.sources.github import GitHubNotificationSource, GitHubRepoSource
 from todo_manager.sources.gmail import GmailSource
 from todo_manager.sources.slack import SlackDirectory, SlackSource
@@ -510,3 +511,58 @@ class FetchAllTests(WorkspaceCase):
         report = gate_intake.fetch_all(self.conn, [quiet])
         self.assertEqual((quiet.calls, report["slack:conversation:Q"]), (0, {"skipped": "not due"}))
         self.assertIsNone(get_cursor(self.conn, "slack", "conversation:Q"))
+
+
+class FailingGitHub(FakeGitHub):
+    """``FakeGitHub`` whose objects may be an exception to raise (test double)."""
+
+    def get(self, path, params=None):
+        value = self.objects[path]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+class GitHubFetchFailureTests(WorkspaceCase):
+    """R13 regression: a failed body / latest-comment fetch is a failed read that the next run
+    repeats, never an empty item; 404/410 (deleted or no access) are stated in the item."""
+
+    PR = "https://api.github.com/repos/octo/repo/pulls/7"
+    COMMENT = "https://api.github.com/repos/octo/repo/issues/comments/5"
+
+    def setUp(self):
+        super().setUp()
+        self.objects = {"repos/octo/repo/pulls/7": {"user": {"login": "bob"}, "state": "open", "body": "Loader"},
+                        "repos/octo/repo/issues/comments/5": {"id": 5, "user": {"login": "alice"},
+                                                              "body": "Can you review this today?"}}
+        self.client = FailingGitHub([notification("n1", "review_requested", self.PR, self.COMMENT)], self.objects)
+        self.source = GitHubNotificationSource(self.client, set(), ["me-gh"])
+
+    def stored(self):
+        return [item_body(self.conn, r["id"]) for r in self.conn.execute("SELECT id FROM source_items WHERE kind='notification'")]
+
+    def test_a_server_error_fails_the_read_and_the_next_run_repeats_it(self):
+        self.objects["repos/octo/repo/issues/comments/5"] = SourceError("HTTP 502: Bad Gateway")
+        gate_intake.run_gate(self.conn, self.cfg, [self.source], [])
+        row = self.conn.execute("SELECT cursor, last_error FROM cursors WHERE source='github'").fetchone()
+        self.assertIn("502", row["last_error"])
+        self.assertIsNone(row["cursor"], "the cursor does not move past the unread notification")
+        self.assertEqual(self.stored(), [], "nothing half-read is stored as evidence")
+        self.objects["repos/octo/repo/issues/comments/5"] = {"id": 5, "user": {"login": "alice"},
+                                                             "body": "Can you review this today?"}
+        clock.advance(minutes=20)
+        gate_intake.run_gate(self.conn, self.cfg, [self.source], [])
+        [body] = self.stored()
+        self.assertIn("Can you review this today?", body)
+
+    def test_a_deleted_comment_is_stated_not_blank(self):
+        self.objects["repos/octo/repo/issues/comments/5"] = SourceError("HTTP 404: Not Found")
+        [item] = [i for i in self.source.fetch(None).items if i.kind == "notification"]
+        self.assertIn("latest comment unavailable (HTTP 404", item.body)
+        self.assertEqual(item.meta["unavailable"], ["latest_comment: HTTP 404"])
+
+    def test_an_inaccessible_thread_is_stated_not_blank(self):
+        self.objects["repos/octo/repo/pulls/7"] = SourceError("HTTP 410: Gone")
+        [item] = [i for i in self.source.fetch(None).items if i.kind == "notification"]
+        self.assertIn("thread unavailable (HTTP 410", item.body)
+        self.assertIn("Can you review this today?", item.body, "what could be read is kept")
