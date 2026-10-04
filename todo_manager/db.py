@@ -509,14 +509,15 @@ def schema_version(conn: sqlite3.Connection) -> int:
     return int(row["value"]) if row else 0
 
 
-def migrate(conn: sqlite3.Connection) -> None:
+def migrate(conn: sqlite3.Connection, target: int = SCHEMA_VERSION) -> None:
+    """Upgrade the schema to ``target`` (default: this code's version)."""
     current = schema_version(conn)
     if current > SCHEMA_VERSION:
         raise RuntimeError(
             f"database schema {current} is newer than this code ({SCHEMA_VERSION}); upgrade the code")
-    if 0 < current < SCHEMA_VERSION:
+    if 0 < current < target:
         backup_before_migration(conn, current)
-    for version in range(current + 1, SCHEMA_VERSION + 1):
+    for version in range(current + 1, target + 1):
         with tx(conn):
             for statement in _split_sql(MIGRATIONS[version]):
                 conn.execute(statement)

@@ -79,6 +79,7 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
             "last_wake": dict(id=woke["id"], at=woke["started_at"], completed=bool(woke["agent_completed_at"]),
                               over_budget=loads(woke["summary"], {}).get("context_over_budget"))
             if woke else None}
+    out["delegations_held"] = loads(get_meta(conn, "delegations.hold"), None)
     out["notion_ready"] = bool(get_meta(conn, "notion.tasks_data_source_id") or cfg.get("notion.tasks_data_source_id"))
     out["problems"] = problems(out, cfg)
     return out
@@ -104,6 +105,10 @@ def problems(rep: dict[str, Any], cfg: Config) -> list[str]:
         found.append(f"{rep['feedback']['failed']} feedback items failed")
     if rep["delegations"].get("quarantined"):
         found.append(f"{rep['delegations']['quarantined']} delegations quarantined")
+    if rep.get("delegations_held"):
+        hold = rep["delegations_held"]
+        found.append(f"delegations held since {hold.get('reason')} at {hold.get('at')}: check the Kanban board, then"
+                     " `todo-manager delegate release-hold`")
     attention = rep.get("delegation_attention") or {}
     if attention.get("cancel_unconfirmed"):
         found.append(f"cancelled delegations whose worker was not confirmed stopped: "

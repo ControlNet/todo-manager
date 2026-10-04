@@ -283,6 +283,9 @@ def cmd_delegate(args: argparse.Namespace) -> int:
         if args.action == "message":
             _print({"message": delegation.add_message(conn, args.id, args.kind, args.body)})
             return 0
+        if args.action == "release-hold":
+            _print({"released": delegation.release_hold(conn)})
+            return 0
         _print({"approval": delegation.record_approval(conn, args.id, args.delivery, args.action_name,
                                                        args.detail or "", None)})
         return 0
@@ -412,6 +415,19 @@ def cmd_restore(args: argparse.Namespace) -> int:
     with file_lock(lock_path(cfg.home, "intake"), blocking=True, timeout=300), \
             file_lock(lock_path(cfg.home, "feedback"), blocking=True, timeout=300):
         _print(export.restore(conn, cfg, path))
+    return 0
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    from . import export
+    try:
+        report = export.import_bundle(Path(args.bundle), Path(args.into))
+    except export.ImportError_ as exc:
+        return _fail("INVALID", str(exc))
+    report["next"] = ("set the secrets again (environment / token files), check config.toml, run "
+                      "`todo-manager --home <new> health`, check the Kanban board, then "
+                      "`todo-manager --home <new> delegate release-hold`")
+    _print(report)
     return 0
 
 
@@ -635,6 +651,7 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--delivery", required=True)
     x.add_argument("--action", dest="action_name", required=True)
     x.add_argument("--detail")
+    ds.add_parser("release-hold", help="resume card submissions and messages after a restore or import")
     s.set_defaults(fn=cmd_delegate)
 
     s = sub.add_parser("rule", help="business rules")
@@ -690,6 +707,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("file")
     s.add_argument("--yes", action="store_true")
     s.set_defaults(fn=cmd_restore)
+    s = sub.add_parser("import", help="build a new workspace from an export (into an empty directory)")
+    s.add_argument("bundle", help="an exports/<stamp> directory")
+    s.add_argument("--into", required=True, help="new workspace directory (absent or empty)")
+    s.set_defaults(fn=cmd_import)
 
     s = sub.add_parser("migrate", help="proposal-based migration from the old Notion Todo Manager")
     ms = s.add_subparsers(dest="action", required=True)

@@ -135,6 +135,24 @@ class CliTests(CliCase):
         _, out = self.tm("task", "list")
         self.assertIn(" A", out)
         self.assertNotIn(" B", out)
+        _, out = self.tm("health")
+        self.assertIn("delegate release-hold", out, "a restore holds delegations until the user checks the board")
+        code, out = self.tm("delegate", "release-hold")
+        self.assertEqual((code, json.loads(out)["released"]["reason"]), (0, "restore"))
+
+    def test_export_imports_into_a_new_directory(self):
+        _, out = self.tm("task", "create", "--title", "Moving task")
+        tid = json.loads(out)["task"]
+        _, out = self.tm("export")
+        bundle = json.loads(out)["export"]
+        new_home = self.home.parent / "moved-home"
+        code, out = run("--home", str(new_home), "import", bundle, "--into", str(new_home))
+        self.assertEqual(code, 0, out)
+        self.assertTrue(json.loads(out)["delegations_held"])
+        code, out = run("--home", str(new_home), "task", "show", tid)
+        self.assertEqual(json.loads(out)["title"], "Moving task")
+        code, out = run("--home", str(new_home), "import", bundle, "--into", str(new_home))
+        self.assertEqual(code, 2, "an existing workspace is never overwritten")
 
 
 class HermesInstallTests(CliCase):

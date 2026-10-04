@@ -15,6 +15,7 @@ import re
 from typing import Any
 
 from .. import i18n
+from ..files import artifact_label
 
 MARKER = "body.marker"        # catalog key of the task-page marker
 _ESCAPE = re.compile(r"([\\*~`$\[\]<>{}|^])")
@@ -102,8 +103,8 @@ def render(sections: dict[str, Any], marker: str = MARKER, lang: str | None = No
             if len(body) > MAX_DELIVERY_CHARS:
                 lines.append("\t\t" + escape(t("body.truncated", card=delivery.get("card") or "")))
             lines.append("\t</details>")
-        for path in (delivery.get("artifacts") or [])[:10]:
-            lines.append(f"\t- {t('body.attachment')}{sep}`" + str(path).replace("`", "'") + "`")
+        for artifact in (delivery.get("artifacts") or [])[:10]:
+            lines.append(f"\t- {t('body.attachment')}{sep}`" + artifact_label(artifact).replace("`", "'") + "`")
     lines.append("</callout>")
     return "\n".join(lines)
 

@@ -1,16 +1,26 @@
-"""Exports, rebuild verification, backup and restore. Everything is written under TODO_HOME.
+"""Exports, rebuild verification, import, backup and restore. Everything is written under TODO_HOME.
 
-* ``export_snapshot`` writes human-readable Markdown (tasks/, projects/, rules/, views/)
-  plus ``data.json`` (every table) into ``exports/<stamp>/``.
+* ``export_snapshot`` writes human-readable Markdown (tasks/, projects/, rules/, views/),
+  ``data.json`` (every table) and ``workspace/`` (config.toml without secrets, AGENTS.md, run
+  context ``runs/``, delivery files ``deliveries/``) into ``exports/<stamp>/``; ``manifest.json``
+  lists every file with its SHA-256 and every table with its row hash.
 * ``verify_rebuild`` loads ``data.json`` into a fresh database and compares every table,
   proving the export alone is enough to rebuild the state.
+* ``import_bundle`` builds a new workspace in an empty directory from an export (checked
+  against the manifest first; nothing is written on a mismatch).
 * ``backup`` / ``restore`` use SQLite's online backup API (safe while gates run).
+* After an import or a restore, ``reconcile_after_restore`` releases claims of runs that no
+  longer exist, holds Matrix reminders and Notion comments that may already have been sent
+  (state pushes stay: they converge), and holds delegation submissions and messages until the
+  user checks the board and runs ``todo-manager delegate release-hold``.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
+import shutil
 import sqlite3
 import tempfile
 from datetime import timedelta
@@ -19,7 +29,18 @@ from typing import Any
 
 from . import clock, db, delegation, i18n, rules, store
 from .config import Config
+from .files import sha256_file
 from .notion.schema import label as option_label
+
+EXPORT_FORMAT = "todo-manager-export/2"
+WORKSPACE_FILES = ("config.toml", "AGENTS.md")
+WORKSPACE_DIRS = ("runs", "deliveries")
+SECRET_KEY = re.compile(r"(token|secret|password|passwd|api_?key|private_?key|credential)", re.I)
+SAFE_KEYS = {"token_env", "token_file"}   # names of where a secret lives, not the secret
+
+
+class ImportError_(RuntimeError):
+    """An export bundle cannot be imported (integrity, version or target problem)."""
 
 
 def _stamp() -> str:
@@ -150,10 +171,161 @@ def export_snapshot(conn: sqlite3.Connection, cfg: Config, out_dir: Path | None 
     (root / "views" / "home.md").write_text("\n".join(view_lines), encoding="utf-8")
     data = dump(conn)
     (root / "data.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    manifest = {"exported_at": clock.iso(), "schema_version": db.schema_version(conn),
-                "tables": {k: {"rows": len(v), "hash": _table_hash(v)} for k, v in data.items()}}
+    redacted = _export_workspace(cfg.home, root / "workspace")
+    files = {str(p.relative_to(root)): {"sha256": sha256_file(p), "size": p.stat().st_size}
+             for p in sorted(root.rglob("*")) if p.is_file() and p != root / "manifest.json"}
+    manifest = {"format": EXPORT_FORMAT, "exported_at": clock.iso(), "schema_version": db.schema_version(conn),
+                "tables": {k: {"rows": len(v), "hash": _table_hash(v)} for k, v in data.items()},
+                "files": files, "redacted_config_keys": redacted,
+                "not_exported": ["secrets (environment variables, token files)", "backups/", "state/locks",
+                                 "state/hermes (machine-specific install record)"]}
     (root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
     return root
+
+
+def _scrub_config(text: str) -> tuple[str, list[str]]:
+    """config.toml with values of secret-looking keys replaced; returns (text, redacted keys)."""
+    redacted, out, section = [], [], ""
+    for line in text.splitlines():
+        head = re.match(r"\s*\[([^\]]+)\]", line)
+        if head:
+            section = head.group(1).strip()
+        match = re.match(r"(\s*)([A-Za-z0-9_.-]+)(\s*=\s*)(.+)$", line)
+        if match and SECRET_KEY.search(match.group(2)) and match.group(2) not in SAFE_KEYS:
+            redacted.append(f"{section}.{match.group(2)}" if section else match.group(2))
+            line = f'{match.group(1)}{match.group(2)}{match.group(3)}"<redacted: set it again after import>"'
+        out.append(line)
+    return "\n".join(out) + "\n", redacted
+
+
+def _export_workspace(home: Path, dest: Path) -> list[str]:
+    dest.mkdir(parents=True, exist_ok=True)
+    redacted: list[str] = []
+    for name in WORKSPACE_FILES:
+        src = home / name
+        if not src.is_file():
+            continue
+        if name == "config.toml":
+            text, redacted = _scrub_config(src.read_text(encoding="utf-8"))
+            (dest / name).write_text(text, encoding="utf-8")
+        else:
+            shutil.copyfile(src, dest / name)
+    for name in WORKSPACE_DIRS:
+        if (home / name).is_dir():
+            shutil.copytree(home / name, dest / name, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns("*.tmp"))
+    return redacted
+
+
+def check_bundle(root: Path) -> dict[str, Any]:
+    """Compare an export with its manifest: every listed file present with the same SHA-256,
+    no unlisted workspace file, every table hash equal."""
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        raise ImportError_(f"{root} has no manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("format") != EXPORT_FORMAT:
+        raise ImportError_(f"unsupported export format {manifest.get('format')!r} (need {EXPORT_FORMAT})")
+    problems = []
+    for rel, info in (manifest.get("files") or {}).items():
+        path = root / rel
+        if not path.is_file():
+            problems.append(f"missing {rel}")
+        elif sha256_file(path) != info["sha256"]:
+            problems.append(f"changed {rel}")
+    listed = set(manifest.get("files") or {})
+    for path in (root / "workspace").rglob("*") if (root / "workspace").is_dir() else []:
+        if path.is_file() and str(path.relative_to(root)) not in listed:
+            problems.append(f"unlisted {path.relative_to(root)}")
+    data = json.loads((root / "data.json").read_text(encoding="utf-8")) if (root / "data.json").is_file() else {}
+    for name, info in (manifest.get("tables") or {}).items():
+        if _table_hash(data.get(name, [])) != info["hash"]:
+            problems.append(f"table {name} differs from the manifest")
+    if int(manifest.get("schema_version") or 0) > db.SCHEMA_VERSION:
+        problems.append(f"schema {manifest.get('schema_version')} is newer than this code ({db.SCHEMA_VERSION})")
+    if problems:
+        raise ImportError_("export bundle does not match its manifest: " + "; ".join(problems[:20]))
+    return {"manifest": manifest, "data": data}
+
+
+def import_bundle(root: Path, target: Path) -> dict[str, Any]:
+    """Build a new workspace in ``target`` (absent or empty) from an export. The bundle is
+    checked first; the workspace is assembled next to the target and moved into place only when
+    complete. Afterwards nothing is replayed: see ``reconcile_after_restore``."""
+    root, target = Path(root).expanduser(), Path(target).expanduser()
+    if target.exists() and any(target.iterdir()):
+        raise ImportError_(f"{target} is not empty; import only into a new directory")
+    bundle = check_bundle(root)
+    manifest, data = bundle["manifest"], bundle["data"]
+    staging = target.parent / f".{target.name}.importing"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    try:
+        if (root / "workspace").is_dir():
+            shutil.copytree(root / "workspace", staging, dirs_exist_ok=True)
+        (staging / "state").mkdir(exist_ok=True)
+        conn = sqlite3.connect(str(staging / "state" / "todo.sqlite"), isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        try:
+            db.migrate(conn, target=int(manifest["schema_version"]))
+            conn.execute("PRAGMA foreign_keys = OFF")
+            with db.tx(conn):
+                conn.execute("DELETE FROM meta")
+                for name, rows in data.items():
+                    for row in rows:
+                        cols = list(row)
+                        conn.execute(f"INSERT OR REPLACE INTO {name}({','.join(cols)}) VALUES"
+                                     f" ({','.join('?' for _ in cols)})", [row[c] for c in cols])
+            mismatched = [k for k, rows in dump(conn).items() if k in data and _table_hash(rows) != _table_hash(data[k])]
+            if mismatched:
+                raise ImportError_(f"rebuilt tables differ from the export: {mismatched}")
+            conn.execute("PRAGMA foreign_keys = ON")
+            fk = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if fk:
+                raise ImportError_(f"{len(fk)} foreign key errors in the export")
+            db.migrate(conn)
+            report = reconcile_after_restore(conn, "import")
+        finally:
+            conn.close()
+        staging.rename(target) if not target.exists() else _move_into(staging, target)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return {"ok": True, "home": str(target), "schema_version": db.SCHEMA_VERSION,
+            "from_schema": manifest["schema_version"], "tables": len(data),
+            "files": len(manifest.get("files") or {}), "redacted_config_keys": manifest.get("redacted_config_keys"),
+            **report}
+
+
+def _move_into(staging: Path, target: Path) -> None:
+    for child in staging.iterdir():
+        child.rename(target / child.name)
+    staging.rmdir()
+
+
+def reconcile_after_restore(conn: sqlite3.Connection, reason: str) -> dict[str, Any]:
+    """After an import or a restore: runs that held claims do not exist any more; effects that
+    may already have happened are not replayed; workers are not started or messaged until the
+    user releases the hold."""
+    now = clock.iso()
+    report: dict[str, Any] = {}
+    with db.tx(conn):
+        report["released_batches"] = conn.execute(
+            "UPDATE batches SET state='mature', claimed_run=NULL, claimed_at=NULL WHERE state='claimed'").rowcount
+        report["released_feedback"] = conn.execute(
+            "UPDATE feedback SET claimed_run=NULL, claimed_at=NULL WHERE status='pending' AND claimed_run IS NOT NULL"
+        ).rowcount
+        report["released_followups"] = conn.execute("DELETE FROM followup_checks WHERE state='claimed'").rowcount
+        conn.execute("UPDATE daily_jobs SET updated_at='1970-01-01T00:00:00.000Z' WHERE state='claimed'")
+        report["held_effects"] = conn.execute(
+            "UPDATE outbox SET status='dead', last_error=?, updated_at=? WHERE status IN"
+            " ('pending','in_flight','uncertain','failed') AND (target='matrix' OR op='comment')",
+            (f"held after {reason}: not replayed because it may already have been sent; re-send by hand if needed",
+             now)).rowcount
+        delegation.hold(conn, reason)
+    report["delegations_held"] = True
+    return report
 
 
 def verify_rebuild(data_path: Path) -> dict[str, Any]:
@@ -224,4 +396,4 @@ def restore(conn: sqlite3.Connection, cfg: Config, path: Path) -> dict[str, Any]
     finally:
         src.close()
     db.migrate(conn)
-    return {**info, "safety_backup": str(safety)}
+    return {**info, "safety_backup": str(safety), **reconcile_after_restore(conn, "restore")}

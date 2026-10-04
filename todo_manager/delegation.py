@@ -36,11 +36,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 from . import clock, effects, i18n, ids, store
 from .config import Config
-from .db import dumps, loads, row_dict, tx
+from .db import dumps, get_meta, loads, row_dict, set_meta, tx
+from .files import keep_artifacts
 from .kanban import Kanban, KanbanError, transition_verdict
 from .locks import file_lock, lock_path
 
@@ -235,8 +237,33 @@ def enforce_task_lifecycle(conn: sqlite3.Connection) -> dict[str, int]:
 
 # --------------------------------------------------------------------------- submission
 
+HOLD_KEY = "delegations.hold"
+
+
+def hold(conn: sqlite3.Connection, reason: str) -> None:
+    """Stop submitting cards and sending messages until the user releases the hold (after a
+    restore or an import: the board may have moved on, or be a different one). Card results
+    are still read."""
+    set_meta(conn, HOLD_KEY, dumps({"reason": reason, "at": clock.iso()}))
+
+
+def held(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    return loads(get_meta(conn, HOLD_KEY), None)
+
+
+def release_hold(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    previous = held(conn)
+    with tx(conn):
+        conn.execute("DELETE FROM meta WHERE key=?", (HOLD_KEY,))
+    return previous
+
+
 def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, int]:
     stats = {"submitted": 0, "linked": 0, "waiting_capacity": 0, "errors": 0, "quarantined": 0, "held": 0}
+    if held(conn):
+        stats["held"] = conn.execute("SELECT COUNT(*) FROM delegations WHERE status IN ('pending_submit','reconcile')"
+                                     ).fetchone()[0]
+        return stats
     with file_lock(lock_path(cfg.home, "kanban-submit"), blocking=True, timeout=60):
         rows = conn.execute("SELECT id FROM delegations WHERE status IN ('pending_submit','reconcile')"
                             " AND pause_requested=0 ORDER BY created_at").fetchall()
@@ -433,7 +460,7 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
                                (d["id"],)).fetchone()[0] + 1
             dlv = _record_delivery(conn, d, kind="result", summary=summary, body=body, seq=seq, artifacts=artifacts,
                                    run_id=str(run.get("id") or ev.get("run_id") or ""), event_id=ev["id"],
-                                   after_cancel=quiet)
+                                   after_cancel=quiet, home=cfg.home)
             if dlv:
                 stats["deliveries"] += 1
                 _settle_approvals(conn, cfg, d, dlv)
@@ -510,15 +537,22 @@ def for_task_active_other(conn: sqlite3.Connection, d: dict[str, Any]) -> bool:
 
 def _record_delivery(conn: sqlite3.Connection, d: dict[str, Any], *, kind: str, summary: str, body: str, seq: int,
                      event_id: int, artifacts: list[str] | None = None, run_id: str = "",
-                     after_cancel: bool = False) -> str | None:
-    """One delivery per Kanban event: a replay (older cursor after a restore) is ignored."""
+                     after_cancel: bool = False, home: Path | None = None) -> str | None:
+    """One delivery per Kanban event: a replay (older cursor after a restore) is ignored. Its
+    files are copied into the workspace (relative path + SHA-256): a worker's scratch space is
+    deleted when the card ends."""
     dlv = ids.new_id("delivery")
+    paths = [a for a in (artifacts or []) if a]
     cur = conn.execute(
         "INSERT OR IGNORE INTO deliveries(id, delegation_id, card_id, run_id, seq, kind, summary, body, artifacts,"
         " requirement_version, received_at, source_event_id, after_cancel) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (dlv, d["id"], d["card_id"], run_id, seq, kind, summary, body, dumps([a for a in (artifacts or []) if a]),
+        (dlv, d["id"], d["card_id"], run_id, seq, kind, summary, body, dumps(paths),
          d["requirement_version"], clock.iso(), event_id, 1 if after_cancel else 0))
-    return dlv if cur.rowcount == 1 else None
+    if cur.rowcount != 1:
+        return None
+    if paths and home is not None:
+        conn.execute("UPDATE deliveries SET artifacts=? WHERE id=?", (dumps(keep_artifacts(home, dlv, paths)), dlv))
+    return dlv
 
 
 def deliveries(conn: sqlite3.Connection, delegation_id: str) -> list[dict[str, Any]]:
@@ -641,6 +675,10 @@ def _comment_once(kb: Kanban, d: dict[str, Any], mid: str, text: str, already: b
 
 def send_messages(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, int]:
     stats = {"sent": 0, "waiting": 0, "superseded": 0, "failed": 0}
+    if held(conn):
+        stats["held"] = conn.execute("SELECT COUNT(*) FROM delegation_messages WHERE status IN"
+                                     " ('pending','sending','waiting_capacity') AND kind != 'requirement'").fetchone()[0]
+        return stats
     # Same lock as submission: capacity reservations and card links are decided one at a time.
     with file_lock(lock_path(cfg.home, "kanban-submit"), blocking=True, timeout=60):
         enforce_task_lifecycle(conn)
