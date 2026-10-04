@@ -13,6 +13,16 @@ Import (gate B, every run)
     delegation becomes a pending feedback item for the model; closing a task stops its
     active delegations deterministically (accept a delivered review, cancel otherwise).
 
+Page bodies (gate B, after the property import)
+  * A page last edited by someone other than our bot gets its body read until a read
+    happened after the edit's timestamp plus ``BODY_TIME_SLACK`` (edit timestamps can be
+    coarse, so a read in the same minute may predate a later edit with the same stamp).
+    At most ``notion.body_reads_per_run`` reads per run, least recently read first. A change inside the managed box is ``body_edit``; a change to the
+    user's own notes outside it is ``page_notes`` with the added/removed text. Both go to
+    the model, which decides whether the text is information, a requirement for the task
+    or its delegation, or a lasting rule. The first read of a page is a baseline only.
+  * The body of a page created by the user is part of its ``new_task`` feedback.
+
 Push (outbox handlers)
   * Read-before-write: the page is fetched first; unseen human edits are imported before
     anything is written, then only the properties that differ are patched.
@@ -32,6 +42,7 @@ Comments
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import sqlite3
 from dataclasses import dataclass
@@ -45,6 +56,7 @@ from . import body, schema
 from .client import NotionClient, NotionError, NotionUncertain, plain_text
 
 TRASH_REASON = "sync.trash_reason"    # catalog keys
+BODY_TIME_SLACK = timedelta(minutes=1)
 HOME_MARKER = "home.marker"
 
 
@@ -274,8 +286,71 @@ class NotionSync:
                 " VALUES ('notion',?,?,?,?,0) ON CONFLICT(source, scope) DO UPDATE SET cursor=excluded.cursor,"
                 " last_attempt_at=excluded.last_attempt_at, last_success_at=excluded.last_success_at,"
                 " last_error=NULL, consecutive_failures=0", (scope, newest, clock.iso(), clock.iso()))
+        if kind == "task":
+            stats["bodies"] = self.check_bodies(int(self.cfg.get("notion.body_reads_per_run", 10)))
         stats["problems"] = len(self.problems)
         return stats
+
+    def body_unread(self, row: dict[str, Any]) -> bool:
+        """The page's last edit (not ours) may not be reflected in our last body read."""
+        if not row["last_edited_time"] or row["last_edited_by"] == self.state.bot_user_id:
+            return False
+        if not row["body_read_at"]:
+            return True
+        return clock.parse(row["body_read_at"]) < clock.parse(row["last_edited_time"]) + BODY_TIME_SLACK
+
+    def check_bodies(self, limit: int) -> int:
+        """Read the bodies of pages edited by someone other than our bot since the last read."""
+        rows = [self.page_row(r["page_id"]) for r in self.conn.execute(
+            "SELECT page_id FROM notion_pages WHERE entity_type='task' AND trashed=0 AND last_edited_time IS NOT NULL"
+            " AND last_edited_by IS NOT ?", (self.state.bot_user_id,))]
+        due = sorted((r for r in rows if self.body_unread(r)), key=lambda r: r["body_read_at"] or "")
+        done = 0
+        for row in due[:max(0, limit)]:
+            task = store.get_task(self.conn, row["entity_id"])
+            if task is None:
+                continue
+            try:
+                self.check_body(row, task)
+            except NotionError as exc:
+                self.problems.append(f"body of {row['page_id']}: {exc}")
+                continue
+            done += 1
+        return done
+
+    def check_body(self, row: dict[str, Any], task: dict[str, Any]) -> list[str]:
+        doc = self.client.page_markdown(row["page_id"])
+        markdown = doc.get("markdown") or ""
+        region = body.extract(markdown)
+        notes = body.outside(markdown).strip()
+        editor = row["last_edited_by"]
+        trust = {"author": editor, "author_is_user": self.is_user(editor)}
+        found: list[str] = []
+        with tx(self.conn):
+            if region is not None and row["managed_hash"] \
+                    and body.content_fingerprint(region) != row["managed_hash"]:
+                fp = body.content_fingerprint(region)
+                feedback.record(self.conn, origin="notion_page", source_id=row["page_id"], source_version=f"body:{fp}",
+                                text=region, scope_type="task", scope_id=task["id"], kind="body_edit",
+                                payload={"page_id": row["page_id"], "region": region,
+                                         "would_render": self.render_body(task)}, **trust)
+                found.append("body_edit")
+            notes_fp = body.content_fingerprint(notes) if notes else ""
+            if row["notes_hash"] is not None and notes_fp != row["notes_hash"]:
+                added, removed = _line_diff(row["notes_text"] or "", notes)
+                if added.strip() or removed.strip():
+                    payload = {"page_id": row["page_id"], "added": added[:3000], "removed": removed[:1500],
+                               "notes": notes[:3000], "truncated": bool(doc.get("truncated"))}
+                    if not self.user_ids():
+                        payload["identity_unverified"] = True
+                    feedback.record(self.conn, origin="notion_page", source_id=row["page_id"],
+                                    source_version=f"notes:{notes_fp}", text=added[:3000] or removed[:1500],
+                                    scope_type="task", scope_id=task["id"], kind="page_notes", payload=payload,
+                                    **trust)
+                    found.append("page_notes")
+            self.conn.execute("UPDATE notion_pages SET body_read_at=?, notes_hash=?, notes_text=? WHERE page_id=?",
+                              (clock.iso(), notes_fp, notes[:50000], row["page_id"]))
+        return found
 
     def import_page(self, kind: str, page: dict[str, Any]) -> str:
         """Apply unseen human edits of one page. Returns created|edited|unchanged|ignored."""
@@ -357,6 +432,11 @@ class NotionSync:
                 return "unchanged"
             title = values.get("title") or self.t("sync.untitled_task")
             project_id = self._local_project(values.get("project_id"))
+            try:
+                page_text = (self.client.page_markdown(page["id"]).get("markdown") or "").strip()
+            except NotionError as exc:
+                self.problems.append(f"body of new page {page['id']}: {exc}")
+                page_text = None
             fields = {k: values.get(k) for k in ("next_step", "waiting_on", "due_date", "follow_up_date",
                                                  "snooze_until") if values.get(k)}
             with tx(self.conn):
@@ -365,9 +445,15 @@ class NotionSync:
                                         next_actor=values.get("next_actor") or "me",
                                         focus=bool(values.get("focus")), notion_page_id=None, **fields)
                 self._link("task", tid, page, {**current, "tm_id": None})
+                if page_text is not None:   # the body is in this feedback; later edits are diffed against it
+                    self.conn.execute("UPDATE notion_pages SET body_read_at=?, notes_hash=?, notes_text=?"
+                                      " WHERE page_id=?",
+                                      (clock.iso(), body.content_fingerprint(page_text) if page_text else "",
+                                       page_text[:50000], page["id"]))
                 feedback.record(self.conn, origin="notion_page", source_id=page["id"], source_version="created",
                                 text=title, scope_type="task", scope_id=tid, kind="new_task", author=creator,
-                                author_is_user=by_user, payload={"page_id": page["id"], "values": current})
+                                author_is_user=by_user, payload={"page_id": page["id"], "values": current,
+                                                                 "body": (page_text or "")[:4000]})
                 effects.task_push(self.conn, tid)
             return "created"
         if tm_id and store.get_project(self.conn, tm_id):
@@ -583,6 +669,9 @@ class NotionSync:
         if markdown:
             # The visible-text fingerprint of what we sent identifies our region until the next read.
             self._store_region(page["id"], markdown, markdown)
+            with tx(self.conn):
+                self.conn.execute("UPDATE notion_pages SET notes_hash='', notes_text='', body_read_at=? WHERE page_id=?",
+                                  (clock.iso(), page["id"]))
         return None
 
     def _update_page(self, kind: str, entity_id: str, row: dict[str, Any]) -> Any:
@@ -598,6 +687,10 @@ class NotionSync:
             return {"skipped": "page trashed"}
         self.import_page(kind, page)          # unseen human edits first
         row = self.entity_row(kind, entity_id)
+        if kind == "task" and self.body_unread(row):
+            # Our write below would make the bot the page's last editor and hide this edit.
+            self.check_body(row, store.get_task(self.conn, entity_id))
+            row = self.entity_row(kind, entity_id)
         entity = store.get_task(self.conn, entity_id) if kind == "task" else store.get_project(self.conn, entity_id)
         values = self.task_values(entity) if kind == "task" else self.project_values(entity)
         target = schema.comparable(kind, values)
@@ -908,6 +1001,17 @@ def _select_raw_present(page: dict[str, Any], pmap: schema.PropertyMap, field: s
     raw = next((v for v in props.values() if isinstance(v, dict) and v.get("id") == key), None) if key \
         else props.get(prop.name(pmap.lang))
     return bool(raw and raw.get("select"))
+
+
+def _line_diff(before: str, after: str) -> tuple[str, str]:
+    """Lines added to and removed from the user's notes."""
+    added, removed = [], []
+    for line in difflib.ndiff(before.splitlines(), after.splitlines()):
+        if line.startswith("+ ") and line[2:].strip():
+            added.append(line[2:])
+        elif line.startswith("- ") and line[2:].strip():
+            removed.append(line[2:])
+    return "\n".join(added), "\n".join(removed)
 
 
 def _split_repos(text: str | None) -> list[str]:

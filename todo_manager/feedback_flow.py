@@ -136,6 +136,17 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, items: li
         elif fb["kind"] == "new_task":
             out.append("The user created this task directly in Notion. Triage it: project, next_step, responsibility,"
                        " done_criteria; do NOT change what the user typed unless clearly wrong.")
+            if p.get("body"):
+                out.append("Page body as written:")
+                out.append(quote(_clip(p["body"], 3000)))
+        elif fb["kind"] == "page_notes":
+            out.append("The page's own notes (outside the Todo-Manager box) changed. Decide per text: a plain note or"
+                       " information -> ignored (reason) or a task field (summary/next_step/done_criteria); a new"
+                       " requirement for an active delegation -> message supplement; a note is not a rule: a lasting"
+                       " rule only when the text explicitly says so (from now on / always).")
+            if p.get("removed"):
+                out.append("Removed lines:")
+                out.append(quote(_clip(p["removed"], 1500)))
         elif fb["kind"] == "delegate_request":
             out.append("The user set the task's next actor to Agent. Create ONE delegation with a concrete goal/deliverable if the"
                        " task and thread make the work clear; otherwise clarify with one question.")
@@ -143,7 +154,7 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, items: li
             out.append("The user moved the task away from Agent while a delegation is active: pause, cancel or keep"
                        " (ask only if unclear).")
         if fb.get("text") and fb["kind"] not in ("body_edit",):
-            out.append("Text:\n" + quote(fb["text"]))
+            out.append(("Added lines:\n" if fb["kind"] == "page_notes" else "Text:\n") + quote(fb["text"]))
         if p.get("delegation_id"):
             out.append(f"In reply to our {p.get('delivery_kind')} (delivery {p.get('delivery_id')}, v{p.get('delivery_seq')})"
                        f" of delegation {p['delegation_id']}")

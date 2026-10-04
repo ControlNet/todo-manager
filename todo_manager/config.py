@@ -92,6 +92,7 @@ DEFAULTS: dict[str, Any] = {
         "cold_comment_poll_minutes": 60,  # PROPOSED: open tasks without recent activity
         "cold_comment_pages_per_run": 30,  # PROPOSED: round-robin budget per gate run
         "history_poll_hours": 24,  # PROPOSED low-frequency sweep of recently closed pages
+        "body_reads_per_run": 10,  # PROPOSED: page bodies read per gate run after human edits (rest next run)
     },
     "kanban": {
         "enabled": False,

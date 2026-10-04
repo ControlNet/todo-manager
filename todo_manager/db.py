@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -451,6 +451,13 @@ CREATE INDEX delegation_messages_approval ON delegation_messages(approval_id);
     # later pull recognises our own write instead of importing it as a human edit.
     3: """
 ALTER TABLE notion_pages ADD COLUMN pending_write TEXT;
+""",
+    # 4: page bodies are read after a human edit (not only when we push): when we last read the
+    # body, and the user's own notes outside the managed region as last read.
+    4: """
+ALTER TABLE notion_pages ADD COLUMN body_read_at TEXT;
+ALTER TABLE notion_pages ADD COLUMN notes_hash TEXT;
+ALTER TABLE notion_pages ADD COLUMN notes_text TEXT;
 """,
 }
 

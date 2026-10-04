@@ -39,5 +39,7 @@ Ops:
 
 Kinds you will see: comment / comment_edit (Notion comment), new_task (the user created a page),
 delegate_request, delegate_unassigned, body_edit (the user edited text inside the Todo-Manager box:
-carry real changes into task fields; `applied` or `ignored` lets the box be regenerated), direct.
+carry real changes into task fields; `applied` or `ignored` lets the box be regenerated), page_notes (the
+user's own notes on the page changed: most are notes, some are requirements; never a rule unless stated as
+one), property_edit (an edit by someone else, not applied), page_trashed, direct.
 On error the command prints `{"error": CODE, "details": [...]}` and applies nothing: fix the file and re-run.

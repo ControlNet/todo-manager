@@ -141,3 +141,9 @@ def content_fingerprint(region: str) -> str:
 def extract(markdown: str, marker: str = MARKER) -> str | None:
     span = locate(markdown, marker)
     return markdown[span[0]:span[1]] if span else None
+
+
+def outside(markdown: str, marker: str = MARKER) -> str:
+    """The page text outside the managed region: the user's own notes."""
+    span = locate(markdown, marker)
+    return markdown if span is None else markdown[:span[0]] + markdown[span[1]:]
