@@ -51,6 +51,12 @@ class FakeGitHubApi:
         self.issues[number]["comments"] = len(self.comments[number])
         self.touch(number, at)
 
+    def edit_comment(self, number, cid, body, at):
+        for c in self.comments[number]:
+            if c["id"] == cid:
+                c.update(body=body, updated_at=at)
+        self.touch(number, at)
+
     def event(self, number, eid, event, actor, at, **extra):
         self.events[number].append({"id": eid, "event": event, "actor": {"login": actor}, "created_at": at, **extra})
         self.touch(number, at)
@@ -240,8 +246,54 @@ class NotificationContextTests(WorkspaceCase):
         self.api.comment(7, 101, "dave", "@me-gh any idea?", ago(minutes=1))
         self.notify("n1", 101)
         items = by_kind(self.fetch())
-        self.assertEqual([c.external_id for c in items[("comment", "context")]], ["comment:100"])
+        self.assertEqual([c.external_id for c in items[("comment", "batch")]], ["comment:100"],
+                         "a person's comment since the last view is news, not only context")
         self.assertNotIn(("opened", "context"), items, "known matter: no body replay")
+
+    def seen_once(self):
+        self.api.comment(7, 99, "dave", "@me-gh can you look?", ago(minutes=1))
+        self.notify("n1", 99)
+        self.fetch()
+        clock.advance(hours=2)
+
+    def test_every_comment_since_the_last_view_is_kept(self):
+        self.seen_once()
+        for n in range(15):
+            self.api.comment(7, 200 + n, "erin", f"step {n}", ago(minutes=60 - n))
+        self.api.comment(7, 300, "dave", "@me-gh which one?", ago(minutes=1))
+        self.notify("n1", 300)
+        items = by_kind(self.fetch())
+        self.assertEqual(len(items[("comment", "batch")]), 15, "no comment is dropped; the budget segments later")
+
+    def test_an_edit_of_an_older_comment_is_read(self):
+        self.seen_once()
+        self.api.edit_comment(7, 72, "old comment 2 (EDITED: deadline is Friday)", ago(minutes=10))
+        self.api.comment(7, 301, "dave", "@me-gh see the edit above", ago(minutes=1))
+        self.notify("n1", 301)
+        edits = [i for i in self.fetch() if i.kind == "edit"]
+        self.assertEqual([(i.external_id, i.route) for i in edits], [("comment:72", "if_open_task")])
+        self.assertIn("deadline is Friday", edits[0].body)
+
+    def test_a_comment_just_before_the_watermark_is_not_lost(self):
+        self.api.comment(7, 99, "dave", "@me-gh can you look?", ago(minutes=1))
+        self.notify("n1", 99)
+        self.fetch()
+        # Created a moment before that check but not yet listed by it (clock skew / listing lag).
+        self.api.comment(7, 150, "erin", "the log is attached", ago(seconds=30))
+        clock.advance(hours=2)
+        self.api.comment(7, 151, "dave", "@me-gh ping", ago(minutes=1))
+        self.notify("n1", 151)
+        self.assertIn("comment:150", [c.external_id for c in by_kind(self.fetch())[("comment", "batch")]])
+
+    def test_a_bot_comment_last_does_not_hide_the_request_before_it(self):
+        self.seen_once()
+        self.api.comment(7, 400, "dave", "@me-gh please review the fix", ago(minutes=20))
+        self.api.comment(7, 401, "ci-bot", "CI passed", ago(minutes=1))
+        self.api.comments[7][-1]["user"]["type"] = "Bot"
+        self.notify("n1", 401)
+        items = by_kind(self.fetch())
+        self.assertEqual([i.route for i in items[("notification", "context")]], ["context"])
+        self.assertEqual([c.external_id for c in items[("comment", "batch")]], ["comment:400"])
 
 
 class MailApiDuplicateTests(WorkspaceCase):

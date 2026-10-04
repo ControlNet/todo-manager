@@ -18,10 +18,13 @@ Reading notifications never marks them as read.
 
 Context: the cursor keeps a bounded cache per issue/PR (body digest, last seen). Activity on a
 matter seen for the first time, or again after ``REACTIVATE_DAYS``, brings its original body and
-the last ``CONTEXT_COMMENTS`` earlier comments as context-only items; a notification also brings
-the comments since the previous one. Items carry state, opener, assignees and requested
-reviewers. A body edit is a new version of the opening item keyed by its content digest
-(``if_open_task``: news only for an open task); re-reading an unchanged body adds nothing.
+the last ``CONTEXT_COMMENTS`` earlier comments as context-only items. On a known matter a
+notification brings EVERY comment since the previous view (read from ``WATERMARK_OVERLAP``
+before it; repeats are dropped by id/version when stored): a person's comment is news (batch),
+a bot's is context, and the intake budget segments a long discussion. An edit of an older
+comment is a new version of it (``if_open_task``). Items carry state, opener, assignees and
+requested reviewers. A body edit is a new version of the opening item keyed by its content
+digest (``if_open_task``: news only for an open task); re-reading an unchanged body adds nothing.
 """
 
 from __future__ import annotations
@@ -43,7 +46,7 @@ STATE_EVENTS = {"assigned", "unassigned", "review_requested", "review_request_re
 PARTICIPATING_REASONS = {"review_requested", "assign", "mention", "author", "comment", "team_mention",
                          "state_change", "manual"}
 CONTEXT_COMMENTS = 3       # earlier comments given with a matter seen for the first time
-SINCE_COMMENTS = 10        # at most this many comments since the previous notification
+WATERMARK_OVERLAP = timedelta(minutes=10)   # re-read before the last view (clock skew, listing lag)
 REACTIVATE_DAYS = 14       # a matter idle this long gets its context again
 SEEN_MAX = 1000            # matters remembered per source cursor
 
@@ -368,7 +371,10 @@ class GitHubNotificationSource:
                 latest_id = str((latest or {}).get("id")) if latest is not thread and latest else ""
                 items.extend(self._context(repo, number, key, thread, latest_id, title, html_url, meta,
                                            seen.get(key), note.get("updated_at") or clock.iso(started), started))
-                seen[key] = {"b": _digest(thread.get("body")), "at": clock.iso(started)}
+                # Comments delivered as a notification's latest comment are not repeated as
+                # comments when the next view re-reads the overlap before its watermark.
+                delivered = [*(seen.get(key) or {}).get("n", []), *([latest_id] if latest_id else [])][-5:]
+                seen[key] = {"b": _digest(thread.get("body")), "at": clock.iso(started), "n": delivered}
         new_since = clock.iso(started - timedelta(minutes=self.overlap)).replace(".000Z", "Z")
         return FetchResult(scope=self.scope, items=items, cursor=_dump_state(new_since, seen),
                            meta={"notifications": len(notes)})
@@ -396,20 +402,37 @@ class GitHubNotificationSource:
             found.append(item(f"{kind}:{thread.get('id')}", "opened", thread.get("user"),
                               thread.get("created_at") or before, thread.get("body") or ""))
             comments = _earlier_comments(self.client, repo, number, total, before, exclude)
-        else:
-            comments = [c for c in self.client.paged(f"repos/{repo}/issues/{number}/comments",
-                                                     {"since": entry.get("at")}) if str(c.get("id")) not in exclude
-                        and (c.get("created_at") or "") >= (entry.get("at") or "")][-SINCE_COMMENTS:] if total else []
-            digest = _digest(thread.get("body"))
-            if entry.get("b") and entry["b"] != digest:
-                found.append(item(f"{kind}:{thread.get('id')}", "edit", thread.get("user"),
-                                  thread.get("updated_at") or before, thread.get("body") or "", version=digest,
-                                  route="if_open_task"))
-        for c in comments:
-            edited = c.get("updated_at") if c.get("updated_at") != c.get("created_at") else ""
-            found.append(item(f"comment:{c['id']}", "comment", c.get("user"), c.get("created_at") or before,
-                              c.get("body") or "", version=edited or ""))
+            for c in comments:
+                edited = c.get("updated_at") if c.get("updated_at") != c.get("created_at") else ""
+                found.append(item(f"comment:{c['id']}", "comment", c.get("user"), c.get("created_at") or before,
+                                  c.get("body") or "", version=edited or ""))
+            return found
+        seen_at = clock.parse(entry.get("at"))
+        watermark = clock.iso(seen_at - WATERMARK_OVERLAP).replace(".000Z", "Z") if seen_at else entry.get("at")
+        listed = self.client.paged(f"repos/{repo}/issues/{number}/comments", {"since": watermark}) if total else []
+        delivered = {str(n) for n in entry.get("n", [])}
+        for c in listed:
+            if str(c.get("id")) in exclude:
+                continue
+            created, updated = c.get("created_at") or "", c.get("updated_at") or ""
+            edited = updated if updated != created else ""
+            bot = self._is_bot(c.get("user"))
+            if created >= (watermark or "") and not (str(c.get("id")) in delivered and not edited):
+                found.append(item(f"comment:{c['id']}", "comment", c.get("user"), created or before,
+                                  c.get("body") or "", version=edited, route="context" if bot else "batch"))
+            elif edited:      # an older comment changed since the last view
+                found.append(item(f"comment:{c['id']}", "edit", c.get("user"), updated, c.get("body") or "",
+                                  version=edited, route="context" if bot else "if_open_task"))
+        digest = _digest(thread.get("body"))
+        if entry.get("b") and entry["b"] != digest:
+            found.append(item(f"{kind}:{thread.get('id')}", "edit", thread.get("user"),
+                              thread.get("updated_at") or before, thread.get("body") or "", version=digest,
+                              route="if_open_task"))
         return found
+
+    def _is_bot(self, user: dict[str, Any] | None) -> bool:
+        login = ((user or {}).get("login") or "").lower()
+        return login in self.bots or (user or {}).get("type") == "Bot" or login.endswith("[bot]")
 
     def _get(self, api_url: str, what: str = "", unavailable: list[str] | None = None) -> dict[str, Any] | None:
         """404/410 (deleted or no longer accessible) is ``None`` and noted in ``unavailable``; any
