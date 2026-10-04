@@ -88,12 +88,52 @@ installed Hermes code (105568c155) in an isolated `HERMES_HOME`; all others use 
 | D approval scope over-stated; respawn could repeat an action | Hermes respawns failed runs before our gate pauses them | cards created with `max_retries = 1`; docs state what is enforced vs model-followed | `test_a_crash_after_approval_is_not_respawned_before_the_gate_runs`; *hermes* `test_a_failed_run_parks_the_card_instead_of_a_respawn` | f1c65ea |
 | E discovery/rate-limit fairness, blacklist semantics | discovered scopes read in fixed order; explicit config could be retired by discovery; blacklisted pending batches lingered | least recently read first; explicit config wins; unclaimed batches of retired scopes withdrawn visibly | `test_a_rate_limited_tail_is_read_first_next_time`, `test_an_explicit_conversation_is_read_even_when_discovery_drops_it`, `test_pending_data_of_a_blacklisted_conversation_is_withdrawn_visibly` | 516aff9 |
 
+## Reliability round 2 (baseline 4b2791d)
+
+Same layout. Schema v6 (B01–B05) is additive except the rebuild of `delegation_messages`;
+migration and rollback are in [operations.md](operations.md#upgrading-an-existing-workspace-schema-migrations).
+Doubles named: FakeNotion, FakeKanban, FakeSlack, FakeHttp (Gmail), FakeGitHubApi, FakeSource.
+
+| Item | Root cause | Fix | Tests | Commit |
+|---|---|---|---|---|
+| B01 Notion comment edited A→B→A in one timestamp | a version was `last_edited_time` + content; A's old row was reused, B stayed pending | a persistent revision per comment; each content change supersedes the older pending/claimed rows | `CommentRevisionTests`, `CommentRunTests` | d3a7f0c |
+| B02 managed box / page notes edits piled up | each read appended an interpretation; a revert to our text left the edit pending | revision per box and per notes stream: a new box edit replaces the pending one, a revert withdraws it; a pending note stays while its lines hold, otherwise superseded with the remainder carried over; an edit not yet read defers the claimed interpretation | `BoxRevisionTests`, `NotesRevisionTests`, `EditAfterClaimTests`; migration `test_v5_box_edits_and_comments_get_revisions` | d3a7f0c |
+| B03 accept/revision/resume hit a newer version | the target was resolved when sent (latest delivery / any block) | bound at enqueue to the delivery replied to (or explicit `delivery`, else the latest then) and its review event; a newer version makes it unused (user told), whichever of send and sync runs first; a resume lifts its own pause | `AcceptBindingTests`, `RevisionBindingTests`, `ResumeBindingTests` | 86cc371 |
+| B04 second delegate/message op of one feedback swallowed | identity = feedback id (+ kind) | `op_key = <feedback id>#<op index>` (unique); retries return what they created | `OperationIdentityTests`; migration `test_v5_messages_survive_the_rebuild_in_order` | c1df92e |
+| B05 retried direct request applied twice | no identity: a fresh timestamp per call | `--source-id` required (Matrix event id or `feedback request-id`); reuse with other text refused (`REQUEST_ID_REUSED`); no dedupe by text | `DirectRequestTests`, `DirectRequestCliTests` | c1df92e |
+| B06 status/next_actor half applied | the pair was normalised before user-set fields were protected | pair checked after protection; an inconsistent half is rejected with a reason | `StatePairTests` | 0b3acbf |
+| B07 older Slack threads starved | a page-capped scan was recorded as complete | the pass resumes below the oldest parent reached; the watermark advances only after a complete pass | `ThreadScanProgressTests` (FakeSlack) | db7cc08 |
+| B08 segment tail claimed during new activity | the quiet period did not apply to a split backlog | a mature batch waits while its conversation has an accumulating unforced batch | `QuietSegmentTests` | 66ad8a2 |
+| B09 tail of a long mail lost | body cut to 20000 chars at storage; parts by `attachmentId` skipped | full body stored (2M guard recorded); parts by reference read; transient failure fails the fetch, permanent one is recorded as incomplete; context clips with a `source show` pointer | `GmailBodyTests`, `GmailContextTests` (FakeHttp) | e6e27be |
+| B10 GitHub mail/API copies over-merged or lost | copies matched by matter + actor + time; tracked-repo mail routed away at normalisation | dedupe by event identity (`github_event`); unknown identity is never a copy | `MailApiDuplicateTests`, `TrackedRepoMailTests` (FakeGitHubApi) | 685b42d |
+| B11 notification comments dropped | only the last 10 comments, no edits, no overlap; a bot's last comment hid the request | every comment since the last view (10-minute overlap, repeats dropped by id/version); a person's comment is news | `NotificationContextTests` (FakeGitHubApi) | d78d2eb |
+| B12 sync failures invisible / not alerted | comment, body and Kanban failures and step exceptions only reached the run summary; `notion.problems` was never alerted | channel health in `cursors` (`notion`/`comments`, `bodies`, `dirty`, `home`; `kanban`/`settings`, `messages`, `submit`, `cards`; `gate`/`claims`, `alerts`, `outbox`): a failure counts, the next clean pass clears; a gone page is a page problem; Notion problems kept until the next run and alerted; no feedback or wake | `ChannelHealthTests` | 3b8248b |
+| B13 daily commit source stale after 31 min; alert identity unstable | threshold = 30 min + poll interval for a once-a-day read; alert key hashed the text with digits replaced | the digest stamps `next_due_at` (tomorrow's digest time, wall clock); stale only after it or when a due read fails; alerts keyed by source scope / problem kind | `CommitCadenceTests` (incl. a 25-hour DST day), `AlertIdentityTests` | 3b8248b |
+| B14 export not a consistent snapshot | Markdown, tables and files read live, table by table; all of `runs/` and `deliveries/` copied | online-backup snapshot first, everything from it; only the snapshot's runs and referenced delivery files; kept files sealed (temp copy, hash, rename); history/reference check on export, rebuild, backup check, restore (reported) and import (refused) | `ConsistentSnapshotTests`, `SealedArtifactTests`, `HistoryIntegrityTests` | 6d30093 |
+
+Boundaries checked separately in this round:
+
+| Boundary | Result | Evidence | Commit |
+|---|---|---|---|
+| 1 Context budget | intake over budget even for one conversation: deferred (claims undone, no wake), health + alert; `wake.over_budget = "proceed"` opts in. Feedback: `feedback.max_context_chars` claims the oldest items that fit; one item that cannot fit defers (`feedback.over_budget`) | `IntakeOverBudgetTests`, `FeedbackBudgetTests` | bb8c9a3 |
+| 2 Hermes transitions | check and state function cannot share a transaction (`write_txn` refuses nesting; `complete_task` & co. must not run under an outer transaction); a dashboard action in between is detected from the events and reported as `raced` (user told) | `TransitionRaceTests` (FakeKanban); *hermes* `test_an_answer_unblocking_a_newer_question_is_reported_as_raced`, `test_an_accept_completing_a_newer_version_is_reported_to_the_user` (real bridge, real Hermes calls interleaved by `tests/integration/hermes_race_bridge.py`) | 31a38be |
+| 3 Installed skill and runtime AGENTS.md | nothing installed (no skill, no cron job); runtime AGENTS.md was identical to the template before this round; templates now forbid changing the program, skill, cron jobs, config.toml or Hermes settings and say to stop and report | `SelfModificationRuleTests`; *hermes* prompt scanner test | 7718c03 |
+| 4 Permissions and real model | `allowed_actions`: unknown actions refused, non-user feedback cannot delegate or approve, approvals bound to one delivery and used once. Hermes `review_dispatch` / `auto_decompose` read as true (unchanged; no cards are created while unsafe). Real-model read-only trial: see below | existing `ApprovalTests`, `NonUserFeedbackTests`, `HermesSettingsTests`; `EvidenceRoleFormatTests` | 1822899 |
+
+Real-model read-only trial (2026-10-04): the evaluation sandbox (Notion, Kanban and Matrix
+off) ran one intake gate on real Gmail/Slack/GitHub data read read-only; the rendered context
+(25.9k chars, 10 conversations) plus the skill went to the configured Hermes model one-shot
+with only the `clarify` tool. First answer: refused as a whole (evidence roles not in the
+format, fixed in 1822899). Second answer after the fix: applied in the sandbox, 9 tasks, 1
+project, 29 items ignored, every task with a responsibility sentence. One sample of 10
+conversations: it shows the format works with the real model, not that its judgement holds.
+
 ## Still to verify with real data
 
-1. **Real-sample intake evaluation** (criteria 1–4, 6, 11): run the intake gate against an
-   isolated workspace with the confirmed source scope (read-only), let the model decide, and
-   review created tasks *and* a sample of ignored items for misses. Nothing is written to
-   Notion during this evaluation.
+1. **Real-sample intake evaluation** (criteria 1–4, 6, 11): one sandbox run was decided by the
+   real model (above). Still to do: several runs over the remaining backlog with you reviewing
+   the created tasks *and* a sample of ignored items for misses, and feedback runs (comment
+   classification, criterion 11). Nothing is written to Notion during this evaluation.
 2. **Longer real runs** (criterion 21): Gmail, Slack and GitHub have been fetched read-only for real
    once; incremental cursors, Gmail history expiry and Slack edits/deletions over days are so far
    covered only by recorded-shape tests.

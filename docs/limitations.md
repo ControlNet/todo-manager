@@ -5,28 +5,39 @@ verified and how.
 
 ## Verification
 
-- **Model judgement is not evaluated yet.** Whether intake creates the right tasks (and ignores
-  the right items), and whether feedback is classified correctly, has not been measured on real
-  data. The code enforces structure (full coverage of new items, categories and reasons for
-  ignores, versioned writes), not accuracy.
+- **Model judgement is not evaluated yet.** One real-model intake run (10 real conversations, in
+  the read-only sandbox) was decided and applied; that shows the format works with the real
+  model, not that its choices are right. Accuracy of intake (created *and* ignored items) and of
+  feedback classification has not been measured. The code enforces structure (full coverage of
+  new items, categories and reasons for ignores, versioned writes), not accuracy.
 - **Source adapters are verified for fetching, not for judgement.** Gmail, Slack and GitHub are
   covered by recorded-shape tests (`tests/test_sources.py`, fake HTTP) and have been run read-only
   against real accounts (fetch, batching, name resolution, DM discovery and polling cadence,
-  context rendering); no model decisions were made on that data yet.
+  context rendering); model decisions were made on one sample run only.
 - **Notion writes are tested against a test double.** `tests/fake_notion.py` imitates the
   2026-03-11 API (data sources, property ids, markdown and views endpoints, comments, lost
   responses, 429). The double rounds `last_edited_time` to the minute so tests cover coarse
-  timestamps; the code never assumes any particular precision of the real API (comment versions
-  include a content hash, body edits are found by reading the body). Real-API differences can
+  timestamps; the code never assumes any particular precision of the real API: every comment,
+  managed box and notes stream has its own revision number (content changes, not timestamps),
+  and an interpretation claimed by a run is re-checked against a fresh read before it is
+  applied (an edit made after the claim but not read yet defers it). Real-API differences can
   surface on the first production setup; it is idempotent and can be re-run.
 - **Kanban** is tested both with `FakeKanban` and against the installed Hermes Kanban code in an
   isolated `HERMES_HOME`; the worker is simulated (`tests/integration/hermes_worker_sim.py`),
   not a real model.
 - **Matrix reminders** (`hermes send`) are tested with a fake runner only.
 - **Not verified against real services:** GitHub notification mail and the same event read
-  through the API are de-duplicated only in tests (the test mailbox had no GitHub conversation
-  mail in the last 365 days); real Notion body-edit detection and pending-write echo recognition
-  wait for the first production setup.
+  through the API are de-duplicated by event identity only in tests (the identity is taken from
+  the mail's Message-ID suffix or its "view it on GitHub" link; the test mailbox had no GitHub
+  conversation mail in the last 365 days, so real mail formats are unverified; a mail whose
+  event cannot be identified is kept, never treated as a copy). Real Notion body-edit detection
+  and pending-write echo recognition wait for the first production setup.
+- **Hermes transitions are checked, not atomic.** The bridge checks the Kanban event an answer,
+  acceptance or revision is bound to and then calls the Hermes state function; they cannot share
+  one transaction (Hermes' `write_txn` refuses nesting and `complete_task` & co. must not run
+  under an outer transaction). A dashboard action landing in between (a new question, a new
+  version) is detected afterwards from the events and reported to you as "acted on a newer
+  question/version" (`raced`); it is not undone automatically.
 
 ## Behaviour
 
@@ -41,14 +52,30 @@ verified and how.
 - Unthreaded Slack chat is batched per channel/DM, not per topic.
 - Slack thread replies: a reply in a thread whose parent is older than the re-read window is
   found by a scan of older parents every `slack.thread_scan_minutes` (default 60, so up to an
-  hour later), at most `slack.thread_scan_pages` history pages per scan, and only for threads
-  with activity in the last `slack.thread_watch_days` (30) — at most `slack.thread_index_max`
-  (200) per conversation. Older or less active threads are not watched. A message is reported
-  deleted only when the listing that contained it was read in full in that run.
+  hour later), at most `slack.thread_scan_pages` history pages per run; a pass cut short by that
+  cap resumes below the oldest parent it reached in the next run. Coverage is by **parent**
+  time: only threads whose parent is within `slack.thread_watch_days` (30) are scanned, at most
+  `slack.thread_index_max` (200) indexed per conversation; a reply in an older thread is not
+  found. A message is reported deleted only when the listing that contained it was read in full
+  in that run.
 - Intake context budget: an oversize conversation is processed in segments over several runs
-  (in message order). If the fixed part alone (rules, open tasks, follow-ups, format) exceeds
-  `wake.max_context_chars`, the run still proceeds one conversation at a time and the overrun is
-  reported in the gate output and `health`; nothing is cut silently.
+  (in message order); a segment not yet claimed waits while the conversation is active again.
+  If even one conversation does not fit (the fixed part — rules, open tasks, follow-ups,
+  format — is too large), the run is **deferred**: nothing is claimed, the model is not woken,
+  `health` reports it and a Matrix alert goes out once a day, until you shrink the fixed part,
+  raise `wake.max_context_chars`, or set `wake.over_budget = "proceed"` (then it runs over
+  budget, reported). Nothing is cut silently.
+- Feedback context budget: a run claims the oldest feedback items whose rendered context fits
+  `feedback.max_context_chars` (default 60000); the rest waits for the next run. An item that
+  cannot fit alone defers the run the same way (`feedback.over_budget`).
+- Health alerts are sent at most once per problem and day. A problem is identified by what is
+  wrong (a source scope or channel, a kind of problem), so a changing error text does not
+  re-alert, and a list-type problem (e.g. cancelled delegations not confirmed stopped) that gains
+  an entry the same day is not alerted again until the next day (`todo-manager health` shows it
+  at once). One failed pass of a channel is enough to alert; there is no grace count.
+- A managed box deleted from a page as a whole is not read as an instruction: it is put back at
+  the top on the next push of that task; an earlier edit of the box still pending stays pending
+  for the model to interpret.
 - A Notion property write whose response was lost is recognised as our own echo only while the
   page still shows exactly the values we wrote; if someone changes one of those fields to the
   same value we wrote, that change is indistinguishable from our echo.
@@ -68,14 +95,19 @@ verified and how.
   recently go first in the next run. A scope removed from the configuration
   itself (an email account, an entry of `slack.conversations`, or all Slack discovery turned off)
   keeps its cursor and is reported as stale (one line per source when there are many) until its
-  row is deleted from the `cursors` table; there is no command for that yet.
+  row is deleted from the `cursors` table; there is no command for that yet. The same holds for
+  a gate channel (e.g. `kanban`/`cards`) whose system was turned off while it was failing.
 - Matrix reminders are at-most-once: a send that timed out is not retried, because the outcome
   cannot be looked up. After an import or restore, reminders that may already have gone out are
   dropped (marked dead), not re-sent.
 - Portability: an export carries the database, non-secret config, run context and delivery
   files; credentials never. Card comments and run logs that exist only on the Hermes board stay
   there. Delivery files larger than 100 MB are recorded by hash only; a file that was
-  already gone when the card was synced is recorded as missing.
+  already gone when the card was synced is recorded as missing. The database part is one
+  consistent snapshot; files cannot be snapshotted with it: the run context of a run still in
+  progress at export time may contain files written after the snapshot (such runs' claims are
+  released on import, so they are context only), and a kept delivery file changed by hand later
+  is exported as it is and listed in the manifest's `artifact_problems`.
 - One user, one machine, one SQLite database. There is no multi-user or multi-host mode.
 - The Hermes Kanban switches `review_dispatch` and `auto_decompose` are global in Hermes; a
   human-review board needs both off for all boards. todo-manager only reads them: while either is
@@ -102,6 +134,10 @@ verified and how.
     a crashed, timed-out or stale run parks the card instead of a respawn, and a run that held
     an approval and ended without a result is marked `unknown`, paused and reported to you;
   - the approval record is an audit trail of what you allowed, not proof of what a worker did.
+  Whether your words grant an external action at all (a `delegate` op with `send_email` in
+  `allowed_actions`) is the feedback model's reading of what you wrote; only actions from the
+  known list are accepted and only from your own feedback, but nothing checks the grant against
+  your exact words.
   What relies on the worker model following the card protocol: staying within the allowed
   actions, acting only on an `APPROVED` comment for the delivered version, not repeating an
   action whose outcome it cannot confirm, and reporting `external_actions_done` truthfully.

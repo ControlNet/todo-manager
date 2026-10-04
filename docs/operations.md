@@ -46,12 +46,33 @@ todo-manager hermes status     # launcher, scripts, skill state, jobs
 todo-manager history <task id> # field-level history of one task or project
 ```
 
-Problems (stale sources, given-up writes, quarantined delegations, failed feedback, a gate that
-has not run) also appear in the Notion freshness box and, when `notify.matrix` is enabled, as
-at most one Matrix reminder per problem per day. A source scope is stale after 30 minutes without
-a successful fetch, plus its own polling interval (quiet Slack conversations are read about every
-`slack.quiet_poll_minutes`); when more than three scopes of one source are stale (e.g. an expired
-Slack token with all DMs included) they are reported as one line.
+Problems (stale sources, failing channels, given-up writes, quarantined delegations, failed
+feedback, a gate that has not run, a run deferred over its context budget, Notion pages a run
+could not use) also appear in the Notion freshness box and, when `notify.matrix` is enabled, as
+at most one Matrix reminder per problem per day. A problem is identified by what is wrong (the
+source scope or channel, the kind of problem), not by its text, so a changing error message does
+not send a second reminder.
+
+- A **source scope** is stale after 30 minutes without a successful fetch, plus its own polling
+  interval (quiet Slack conversations are read about every `slack.quiet_poll_minutes`); when more
+  than three scopes of one source are stale (e.g. an expired Slack token with all DMs included)
+  they are reported as one line. Any failed fetch counts at once.
+- A **scheduled scope** (the daily commit digest, `commit`/`commits:<repo>`) carries its next due
+  time (`next_due_at`, tomorrow's `commits.digest_time`): it is stale only 30 minutes after that
+  without a read, or at once when a due read fails — never between two daily reads.
+- A **gate channel** is one of the feedback gate's own steps, kept in the same `cursors` table
+  (`health --json` shows `"channel": true`): `notion`/`comments`, `bodies`, `dirty`, `home`;
+  `kanban`/`settings`, `messages`, `submit`, `cards`; `gate`/`claims`, `alerts`, `outbox`. A pass
+  with a failure (an API error on any page or card, or the step raising) adds a consecutive
+  failure with the first error; the next clean pass clears it. A channel that merely had nothing
+  to do is never stale. A Notion page that is gone is reported as that page's problem, not as a
+  channel failure. None of this creates feedback or wakes the model.
+
+```bash
+todo-manager health --json | python3 -c 'import json,sys; r=json.load(sys.stdin); [print(s["source"], s["scope"], s["failures"], s["error"]) for s in r["sources"] if s["failures"]]'
+```
+
+Expected when all is well: no output. A failing channel prints e.g. `kanban cards 2 snapshot failed: …`.
 
 Model cost: every run that wakes the model is recorded with its reasons; `metrics` adds
 prompt/completion tokens of the two jobs from Hermes' `cron/usage_audit.jsonl`.
@@ -82,13 +103,18 @@ Two different things:
 - **Database snapshot** (`backup` / `restore`): one consistent SQLite file. It is the state of
   this workspace (tasks, history, evidence, rules, feedback, delegations, deliveries, outbox,
   cursors) but not the files next to it (delivery files, run context, config).
-- **Portable workspace** (`export` / `import`): everything needed to continue elsewhere:
-  `data.json` (every table, including source bodies and history), `workspace/config.toml` with
-  secret-looking values redacted (`token_env` / `token_file` names are kept, the secrets
-  themselves stay in your environment), `workspace/AGENTS.md`, `workspace/runs/` (decision files
-  and manifests) and `workspace/deliveries/` (delivery files copied out of the worker's scratch
-  space at sync time, with workspace-relative paths and SHA-256), plus Markdown views and a
-  `manifest.json` with a hash for every file and table. Not included: credentials, `backups/`,
+- **Portable workspace** (`export` / `import`): everything needed to continue elsewhere. The
+  database is first copied with SQLite's online backup (one consistent read, safe while gates and
+  applies run) and everything is written from that copy: `data.json` (every table, including
+  source bodies and history), Markdown views, `workspace/config.toml` with secret-looking values
+  redacted (`token_env` / `token_file` names are kept, the secrets themselves stay in your
+  environment), `workspace/AGENTS.md`, `workspace/runs/<id>` for the runs in the snapshot
+  (decision files and manifests) and the `workspace/deliveries/` files its deliveries refer to
+  (copied out of the worker's scratch space at sync time, sealed under a temporary name and
+  renamed once complete, with workspace-relative paths and SHA-256), plus a `manifest.json` with
+  a hash for every file and table, `artifact_problems` (a kept file missing or changed since it
+  was recorded) and `integrity` (each task's and project's history holds exactly versions
+  1..its version; no dangling reference). Not included: credentials, `backups/`,
   earlier `exports/`, `notes/`, `migration/` working files and `state/hermes/` skill proposals.
   History that exists only on the Hermes board (card comments, run logs) stays in Hermes; what
   todo-manager needs from it (questions, answers, deliveries and their files, failures) is
@@ -96,13 +122,18 @@ Two different things:
 
 ```bash
 todo-manager export            # exports/<stamp>/: data.json, workspace/, tasks/*.md, projects/*.md, rules/, views/, manifest.json
-todo-manager export --verify   # also rebuilds a scratch database from data.json and compares every table
+todo-manager export --verify   # also rebuilds a scratch database from data.json, compares every table, checks history
 todo-manager backup --keep 14  # consistent SQLite copy in backups/, keeps the newest 14
 todo-manager restore backups/todo-<stamp>.sqlite --yes   # integrity-checked; takes both gate locks
 ```
 
+`export` prints `"integrity": []` and `"artifact_problems": []` when all is well and exits 1 when
+the history check fails (`--verify` also fails then). `restore` (and its preview without
+`--yes`) shows `integrity_problems` for the backup; a restore is not refused for them (it is the
+way back), an import is.
+
 Moving to a new directory or machine (the target must be absent or empty; nothing is written
-until the whole bundle has been checked against its manifest):
+until the whole bundle has been checked against its manifest and its history):
 
 ```bash
 todo-manager export
@@ -123,41 +154,57 @@ board as it is.
 
 ## Upgrading an existing workspace (schema migrations)
 
-This version uses schema v5 (v1 is the previous release): v2 binds delegation messages to Kanban
-events, v3 records pending Notion writes, v4 tracks page-body reads, v5 adds exactly-once
-decision application and follow-up checks. Every step is additive: no table or column is
-dropped and existing rows are kept; v5 marks follow-ups that were already surfaced as done so
-they are not shown again. You do not need to delete or rebuild the database.
+This version uses schema v6: v2 binds delegation messages to Kanban events, v3 records pending
+Notion writes, v4 tracks page-body reads, v5 adds exactly-once decision application and
+follow-up checks, v6 adds a revision per Notion comment / managed box / notes stream, the
+`op_key` identity of delegations and messages, and the delivery a message is bound to
+(`target_seq`, `target_message_id`). v2–v5 and most of v6 are additive (columns and indexes;
+the box fingerprint is seeded from the current box so an unchanged box is not re-read as an
+edit). One step rebuilds a table: `delegation_messages` is copied row by row (same ids, same
+order) into a table without its old table-level UNIQUE, then renamed; nothing is deleted. You do
+not need to delete or rebuild the database.
 
 The migration runs when any command first opens the database with the new code. Before it, a
-consistent copy is written to `backups/pre-schema-v5-from-v<old>-<UTC stamp>.sqlite`.
+consistent copy is written to `backups/pre-schema-v6-from-v<old>-<UTC stamp>.sqlite`.
 
 ```bash
 todo-manager hermes pause --yes            # no gate runs during the upgrade
 todo-manager export --verify               # optional: a portable copy as well
 cd ~/src/todo-manager && git pull     # the new code
 todo-manager health                        # opens the database: migrates, then lists problems
-ls ~/.hermes/workspace/todo-manager/backups/pre-schema-v5-*
+ls ~/.hermes/workspace/todo-manager/backups/pre-schema-v6-*
 todo-manager hermes install                # refresh scripts; jobs keep their paused state
 todo-manager hermes resume --yes
 ```
 
-Expected: `health` runs without a traceback and a `pre-schema-v5-from-v1-*.sqlite` file exists.
+Expected: `health` runs without a traceback and a `pre-schema-v6-from-v<old>-*.sqlite` file
+exists.
 
-Rolling back to the previous code (verified on a scratch v1 workspace): the old code refuses a
-newer database ("database schema 5 is newer than this code"), and `restore` with the new code
-would migrate again, so the file is swapped while the jobs are paused. Changes made after the
-upgrade are lost (they stay in the set-aside file and the export).
+Rolling back to the previous code (verified 2026-10-04 on a scratch workspace created by
+4b2791d at schema v5: the v5 code refuses the migrated file with "database schema 6 is newer
+than this code (5)"; after the swap below it reads the pre-migration state; a task created
+after the upgrade stays only in the set-aside file). `restore` with the new code would migrate
+again, so the file is swapped while the jobs are paused. Changes made after the upgrade are lost
+(they stay in the set-aside file and the export).
 
 ```bash
 todo-manager hermes pause --yes
 H=~/.hermes/workspace/todo-manager
-mv "$H/state/todo.sqlite" "$H/backups/todo-v5-set-aside.sqlite"   # keep, do not delete
+mv "$H/state/todo.sqlite" "$H/backups/todo-v6-set-aside.sqlite"   # keep, do not delete
 ls "$H/state"                       # no todo.sqlite-wal / -shm left (all connections closed)
-cp "$H"/backups/pre-schema-v5-from-v1-<stamp>.sqlite "$H/state/todo.sqlite"
+cp "$H"/backups/pre-schema-v6-from-v5-<stamp>.sqlite "$H/state/todo.sqlite"
 cd ~/src/todo-manager && git checkout <previous commit>
 todo-manager health                 # the previous code reads it
 ```
+
+Changes in behaviour you will see after this upgrade:
+
+- Direct requests from chat need an identity: `todo-manager feedback request-id` prints a fresh
+  `req_…` id; pass it as `--source-id` to `feedback apply-direct` / `feedback record` (a Matrix
+  event id works too). Reusing an id for the same text is a retry (applied once); for other text
+  it is refused (`REQUEST_ID_REUSED`). The skill tells Hermes to do this.
+- An intake or feedback run whose context does not fit even with one item is deferred and
+  reported instead of run over budget (see the configuration table).
 
 ## Configuration added in this version
 
@@ -171,6 +218,9 @@ todo-manager health                 # the previous code reads it
 | `slack.thread_scan_pages` | 5 | history pages per scan (the rest waits for the next scan) |
 | `notion.body_reads_per_run` | 10 | page bodies read per feedback run after an edit by someone other than the bot |
 | `kanban.max_retries` | 1 | Hermes per-card failure breaker: a failed run parks the card for you instead of a respawn |
+| `wake.over_budget` | `"defer"` | intake run whose context does not fit even with one conversation: `"defer"` (no model run, health alert) or `"proceed"` (run over budget, reported) |
+| `feedback.max_context_chars` | 60000 | rendered context of one feedback run; the oldest items that fit are claimed, the rest waits |
+| `feedback.over_budget` | `"defer"` | as `wake.over_budget`, for a feedback item that cannot fit alone |
 
 ## Migrating an older Notion todo system
 
@@ -199,3 +249,7 @@ closed; `drop` rows stay only in the old system. Nothing old is modified or dele
 - Feedback that the model claimed but never applied is retried (bounded), then marked failed
   with a reminder.
 - Overlapping runs are prevented by per-gate locks; a restore takes both locks.
+- A message to the board that Hermes applied to a newer question or version than the one you
+  replied to (someone acted on the dashboard at the same moment) is kept as sent, marked
+  `raced` on the message (`todo-manager task show <task>`), and you get a task comment and a
+  Matrix reminder; check the card and send a correction if needed.

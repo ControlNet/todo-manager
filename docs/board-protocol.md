@@ -90,15 +90,19 @@ Your instructions are stored first (`delegation_messages`) and then delivered by
 | Kind | Delivery |
 |---|---|
 | supplement | comment (a running worker receives it as a steer) |
-| answer | comment + unblock — only for the question it answers (`target_block_seq`); an old reply can never unblock a newer question; respecify when the loop breaker parked the card in triage |
-| revision | comment + reopen review |
+| answer | comment + unblock — only for the question it answers (its `blocked` event); an old reply can never unblock a newer question; respecify when the loop breaker parked the card in triage |
+| revision | comment + reopen review — of the version it was written for (bound when queued); a newer recorded version makes it unused and you are told |
 | approval | comment `APPROVED <action> for delivery <id>`; bound to that delivery version — a newer delivery revokes it |
 | pause / resume | comment + block with our marker / unblock of our own pause only |
 | cancel | archive (terminates a running worker) |
-| accept | complete the review card |
+| accept | complete the review card — only while the version you accepted is the one in review (bound when queued) |
 
 Every comment carries `[tm:<message id>]`, so a retry after a lost response does not comment
-twice. External actions (email, public comments, push, PRs, closing issues, publishing) are
+twice. A transition (unblock, reopen review, complete) is checked against its bound event and
+applied in one bridge process, but not in one transaction: Hermes' `write_txn` refuses nesting,
+and `complete_task` & co. must not run under an outer transaction. When a dashboard action lands
+between the check and the call, the card's events show a newer question/version before ours;
+the bridge reports `raced`, the message is kept as sent and marked, and you are told. External actions (email, public comments, push, PRs, closing issues, publishing) are
 allowed only when listed in the delegation's allowed actions or approved by you for the exact
 delivered version; approvals and delegations requested by anyone other than you are refused.
 These rules reach the worker as card text; the worker's tools are not intercepted (see
