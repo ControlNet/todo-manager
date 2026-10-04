@@ -80,6 +80,7 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
                               over_budget=loads(woke["summary"], {}).get("context_over_budget"))
             if woke else None}
     out["delegations_held"] = loads(get_meta(conn, "delegations.hold"), None)
+    out["kanban_settings"] = loads(get_meta(conn, "kanban.settings_problems"), None)
     out["notion_ready"] = bool(get_meta(conn, "notion.tasks_data_source_id") or cfg.get("notion.tasks_data_source_id"))
     out["problems"] = problems(out, cfg)
     return out
@@ -109,6 +110,9 @@ def problems(rep: dict[str, Any], cfg: Config) -> list[str]:
         hold = rep["delegations_held"]
         found.append(f"delegations held since {hold.get('reason')} at {hold.get('at')}: check the Kanban board, then"
                      " `todo-manager delegate release-hold`")
+    if rep.get("kanban_settings"):
+        for problem in rep["kanban_settings"].get("problems", []):
+            found.append(f"Hermes {problem}; new delegations wait, cards already on the board are at risk")
     attention = rep.get("delegation_attention") or {}
     if attention.get("cancel_unconfirmed"):
         found.append(f"cancelled delegations whose worker was not confirmed stopped: "

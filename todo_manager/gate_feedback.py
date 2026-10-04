@@ -98,6 +98,10 @@ def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanba
         _step(summary, problems, "comments", lambda: notion.poll_comments(
             int(cfg.get("notion.cold_comment_pages_per_run", 30))))
     if kanban is not None:
+        on_board = conn.execute("SELECT 1 FROM delegations WHERE card_id IS NOT NULL AND status IN (%s) LIMIT 1"
+                                % ",".join("?" * len(delegation.ACTIVE)), delegation.ACTIVE).fetchone()
+        if on_board:  # cards in flight are exposed to the global switches; re-read them every run
+            _step(summary, problems, "kanban_settings", lambda: delegation.check_settings(conn, kanban))
         _step(summary, problems, "kanban_messages", lambda: delegation.send_messages(conn, cfg, kanban))
         _step(summary, problems, "kanban_submit", lambda: delegation.submit_pending(conn, cfg, kanban))
         _step(summary, problems, "kanban_cards", lambda: delegation.sync_cards(conn, cfg, kanban))

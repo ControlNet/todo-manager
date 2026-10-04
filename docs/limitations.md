@@ -49,7 +49,9 @@ verified and how.
   cannot be looked up.
 - One user, one machine, one SQLite database. There is no multi-user or multi-host mode.
 - The Hermes Kanban switches `review_dispatch` and `auto_decompose` are global in Hermes; a
-  human-review board needs both off for all boards.
+  human-review board needs both off for all boards. todo-manager only reads them: while either is
+  on, new delegations wait and health reports it; turning them off is your decision because it
+  affects every board on that Hermes install.
 - The migration importer knows one legacy schema (`migration.LEGACY`); other legacy databases
   need that mapping adapted.
 - Not supported by design: Zoom transcripts, Notion webhooks, paid Notion features, a model

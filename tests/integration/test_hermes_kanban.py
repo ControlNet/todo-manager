@@ -59,6 +59,18 @@ class HermesKanbanIntegration(WorkspaceCase):
         delegation.submit_pending(self.conn, self.cfg, self.kb)
         delegation.sync_cards(self.conn, self.cfg, self.kb)
 
+    def test_settings_are_read_as_the_installed_dispatcher_reads_them(self):
+        self.assertEqual(self.kb.settings(), {"review_dispatch": False, "auto_decompose": False})
+        defaults = Path(tempfile.mkdtemp(prefix="tm-hermes-defaults-"))
+        try:
+            kb = BridgeKanban(BOARD, str(HERMES_PY), str(HERMES_REPO), str(defaults))
+            self.assertEqual(kb.settings(), {"review_dispatch": True, "auto_decompose": True},
+                             "Hermes defaults are unsafe for a human-review board")
+            self.assertEqual(delegation.check_settings(self.conn, kb)[0].split(";")[0],
+                             "kanban.review_dispatch is true")
+        finally:
+            shutil.rmtree(defaults, ignore_errors=True)
+
     def test_full_draft_cycle_against_real_kanban(self):
         did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草回复", goal="Draft only",
                                 feedback_id="fbk_it_1")

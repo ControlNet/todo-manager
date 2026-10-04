@@ -78,6 +78,7 @@ class Kanban(Protocol):
     def transition(self, card_id: str, action: str, anchor: int | None = None,
                    summary: str | None = None) -> dict[str, Any]: ...
     def counts(self) -> dict[str, int]: ...
+    def settings(self) -> dict[str, bool]: ...
 
 
 class BridgeKanban:
@@ -170,6 +171,10 @@ class BridgeKanban:
     def counts(self) -> dict[str, int]:
         return self.call("counts", mutating=False)
 
+    def settings(self) -> dict[str, bool]:
+        """Effective global ``kanban.review_dispatch`` / ``kanban.auto_decompose`` (read-only)."""
+        return self.call("settings", mutating=False)
+
 
 class FakeKanban:
     """In-memory board mirroring the Hermes semantics this project relies on:
@@ -185,6 +190,7 @@ class FakeKanban:
         self.fail_next: dict[str, Exception] = {}
         self.lose_response: set[str] = set()
         self.terminate_ok = True  # outcome of terminating a running worker on archive
+        self.settings_values = {"review_dispatch": False, "auto_decompose": False}
         self._n = 0
 
     def _event(self, card_id: str, kind: str, payload: dict | None = None, run_id: int | None = None) -> None:
@@ -370,3 +376,7 @@ class FakeKanban:
         for card in self.cards.values():
             result[card["status"]] = result.get(card["status"], 0) + 1
         return result
+
+    def settings(self) -> dict[str, bool]:
+        self._maybe_fail("settings")
+        return dict(self.settings_values)

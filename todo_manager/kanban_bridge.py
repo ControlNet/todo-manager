@@ -86,6 +86,18 @@ def main() -> None:
         return _out({"ok": True, "result": {"missing": [n for n in names if not hasattr(kb, n)],
                                             "board_exists": kb.board_exists(board),
                                             "db_path": str(kb.kanban_db_path(board=board))}})
+    if op == "settings":
+        # Read-only: the global switches the board protocol depends on, resolved the way the
+        # installed dispatcher/gateway resolve them (defaults included).
+        from hermes_cli.config import load_config
+        from hermes_cli.kanban_db_dispatch import review_dispatch_enabled
+        try:
+            from gateway.kanban_watchers_common import _resolve_auto_decompose_settings
+            auto_decompose = _resolve_auto_decompose_settings(load_config)[0]
+        except ImportError:
+            auto_decompose = bool(((load_config() or {}).get("kanban") or {}).get("auto_decompose", True))
+        return _out({"ok": True, "result": {"review_dispatch": bool(review_dispatch_enabled()),
+                                            "auto_decompose": bool(auto_decompose)}})
     if op == "create_board":
         meta = kb.create_board(board, name=req.get("name"), description=req.get("description"))
         return _out({"ok": True, "result": meta})

@@ -258,8 +258,36 @@ def release_hold(conn: sqlite3.Connection) -> dict[str, Any] | None:
     return previous
 
 
+# Global Hermes switches the board protocol needs (docs/board-protocol.md). todo-manager only
+# reads them: with review_dispatch on, an sdlc-review worker takes every review card (the user's
+# review); with auto_decompose on, a card parked in triage is fanned out into new cards.
+REQUIRED_SETTINGS = {"review_dispatch": False, "auto_decompose": False}
+SETTINGS_KEY = "kanban.settings_problems"
+
+
+def check_settings(conn: sqlite3.Connection, kb: Kanban) -> list[str]:
+    """Read the Hermes switches and record what is wrong (shown by ``health``); never changes them.
+    An unreadable value raises KanbanError and counts as not verified."""
+    values = kb.settings()
+    wrong = [f"kanban.{key} is {str(values.get(key, True)).lower()}; the board needs {str(want).lower()}"
+             f" (`hermes config set kanban.{key} {str(want).lower()}`, a global Hermes change you make)"
+             for key, want in REQUIRED_SETTINGS.items() if bool(values.get(key, True)) != want]
+    with tx(conn):
+        if wrong:
+            set_meta(conn, SETTINGS_KEY, dumps({"problems": wrong, "at": clock.iso()}))
+        else:
+            conn.execute("DELETE FROM meta WHERE key=?", (SETTINGS_KEY,))
+    return wrong
+
+
+def settings_problems(conn: sqlite3.Connection) -> list[str]:
+    return (loads(get_meta(conn, SETTINGS_KEY), None) or {}).get("problems", [])
+
+
 def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, int]:
-    stats = {"submitted": 0, "linked": 0, "waiting_capacity": 0, "errors": 0, "quarantined": 0, "held": 0}
+    stats = {"submitted": 0, "linked": 0, "waiting_capacity": 0, "errors": 0, "quarantined": 0, "held": 0,
+             "unsafe_settings": 0}
+    settings_ok: bool | None = None
     if held(conn):
         stats["held"] = conn.execute("SELECT COUNT(*) FROM delegations WHERE status IN ('pending_submit','reconcile')"
                                      ).fetchone()[0]
@@ -306,6 +334,18 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[st
                 continue
             if capacity(conn, cfg, exclude=d["id"]) <= 0:
                 stats["waiting_capacity"] += 1
+                continue
+            if settings_ok is None:
+                try:
+                    settings_ok = not check_settings(conn, kb)
+                except KanbanError as exc:
+                    with tx(conn):
+                        _set(conn, d["id"], last_error=f"Hermes settings not verified: {exc}")
+                    stats["errors"] += 1
+                    settings_ok = False
+                    continue
+            if not settings_ok:
+                stats["unsafe_settings"] += 1
                 continue
             extra = [m["body"] for m in conn.execute(
                 "SELECT body FROM delegation_messages WHERE delegation_id=? AND kind='supplement' AND status='pending'"

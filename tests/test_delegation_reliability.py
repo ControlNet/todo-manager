@@ -8,7 +8,7 @@ reliability review (docs/acceptance.md).
 import contextlib
 import io
 
-from todo_manager import cli, delegation, health, store
+from todo_manager import cli, delegation, gate_feedback, health, store
 from todo_manager.kanban import FakeKanban
 from tests.helpers import WorkspaceCase
 
@@ -376,3 +376,39 @@ class DeliveryRunTests(Base):
         self.tick()
         self.assertIn(f"APPROVED send_email for delivery {v2}", self.kb.comments[-1]["body"])
         self.assertEqual(self.conn.execute("SELECT delivery_id FROM approvals WHERE id=?", (aid,)).fetchone()[0], v2)
+
+
+class HermesSettingsTests(Base):
+    """Gap B: the board protocol needs ``kanban.review_dispatch`` and ``kanban.auto_decompose`` off.
+    Both are global Hermes switches: a wrong value is reported and new cards wait; the settings
+    are never changed by todo-manager. ``FakeKanban.settings_values`` stands in for the Hermes config."""
+
+    def problems(self):
+        return health.report(self.conn, self.cfg)["problems"]
+
+    def test_no_card_is_created_while_review_dispatch_is_on(self):
+        self.kb.settings_values["review_dispatch"] = True
+        did = self.delegate()
+        stats = delegation.submit_pending(self.conn, self.cfg, self.kb)
+        self.assertEqual(self.kb.cards, {}, "an sdlc-review worker would take the review from the user")
+        self.assertEqual((stats["unsafe_settings"], self.d(did)["status"]), (1, "pending_submit"))
+        [problem] = [p for p in self.problems() if "review_dispatch" in p]
+        self.assertIn("hermes config set kanban.review_dispatch false", problem)
+        self.assertEqual(self.kb.settings_values["review_dispatch"], True, "the global switch is not touched")
+        self.kb.settings_values["review_dispatch"] = False          # the user changed it
+        self.tick()
+        self.assertEqual(len(self.kb.cards), 1)
+        self.assertFalse([p for p in self.problems() if "review_dispatch" in p])
+
+    def test_cards_already_on_the_board_are_reported(self):
+        did, card = self.delivered()
+        self.kb.settings_values["auto_decompose"] = True
+        gate_feedback.run_gate(self.conn, self.cfg, notion=None, kanban=self.kb, notifier=None)
+        self.assertTrue([p for p in self.problems() if "auto_decompose" in p], "re-read while cards are in flight")
+        self.assertEqual(self.d(did)["status"], "review", "existing work is not cancelled")
+
+    def test_unknown_settings_do_not_create_cards(self):
+        self.kb.fail_next["settings"] = delegation.KanbanError("bridge returned no result")
+        self.delegate()
+        stats = delegation.submit_pending(self.conn, self.cfg, self.kb)
+        self.assertEqual((self.kb.cards, stats["errors"]), ({}, 1))

@@ -14,6 +14,18 @@ Hermes dispatcher runs the worker; the model is only woken for your feedback.
 | `kanban.auto_subscribe_on_create` | no change | Cards are created through the bridge without a chat session, so nothing is subscribed. |
 | board `todo-manager` | create once | `hermes kanban boards create todo-manager --name "Todo Manager" --description "Delegations from Todo Manager"` |
 
+todo-manager reads both switches (read-only, bridge `settings` op, resolved like the installed
+dispatcher: unset means `true`) before it creates a card and on every feedback-gate run while cards
+are in flight. If either is on, **no new card is created** (delegations stay `pending_submit`) and
+`todo-manager health` shows the exact `hermes config set ...` command; cards already on the board
+are not cancelled but are exposed (an sdlc-review worker can complete or send back a review card).
+todo-manager never changes the Hermes config itself. Check them with:
+
+```bash
+hermes config get kanban.review_dispatch
+hermes config get kanban.auto_decompose
+```
+
 `kanban.assignee` (empty = board default) picks the Hermes profile that executes delegations;
 `kanban.max_running` (default 1) limits how many delegations execute at once — further ones
 wait locally as `queued` and are submitted when capacity frees up.
