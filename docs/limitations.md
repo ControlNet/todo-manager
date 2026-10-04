@@ -11,8 +11,8 @@ verified and how.
   ignores, versioned writes), not accuracy.
 - **Source adapters are verified for fetching, not for judgement.** Gmail, Slack and GitHub are
   covered by recorded-shape tests (`tests/test_sources.py`, fake HTTP) and have been run read-only
-  against real accounts (fetch, batching, name resolution and context rendering); no model
-  decisions were made on that data yet.
+  against real accounts (fetch, batching, name resolution, DM discovery and polling cadence,
+  context rendering); no model decisions were made on that data yet.
 - **Notion writes are tested against a test double.** `tests/fake_notion.py` imitates the
   2026-03-11 API (data sources, property ids, markdown and views endpoints, comments, minute-
   precision `last_edited_time`, lost responses, 429). Real-API differences can surface on the
@@ -33,6 +33,12 @@ verified and how.
 - Supported languages: English and Simplified Chinese. Adding one means adding a catalog in
   `todo_manager/locales/` and registering it in `i18n.LANGUAGES`.
 - Unthreaded Slack chat is batched per channel/DM, not per topic.
+- Slack channels are read only when listed in `slack.conversations`; DMs and group DMs can be
+  included wholesale (`direct_messages`, `group_direct_messages`). The Slackbot DM is skipped:
+  the API does not return its history.
+- A source scope that is no longer configured (a removed account or channel, or DMs turned off)
+  keeps its cursor and is reported as stale (one line per source when there are many) until its
+  row is deleted from the `cursors` table; there is no command for that yet.
 - Matrix reminders are at-most-once: a send that timed out is not retried, because the outcome
   cannot be looked up.
 - One user, one machine, one SQLite database. There is no multi-user or multi-host mode.

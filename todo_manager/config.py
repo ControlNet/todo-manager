@@ -55,6 +55,10 @@ DEFAULTS: dict[str, Any] = {
         "token_env": "SLACK_USER_TOKEN",
         "token_file": "",  # alternative to token_env: a private file holding only the token
         "conversations": [],  # channel / DM IDs confirmed in scope
+        "direct_messages": False,  # also read every 1:1 DM of the user (discovered each run)
+        "group_direct_messages": False,  # also read every group DM (mpim) of the user
+        "active_hours": 168,  # PROPOSED: a conversation with a message this recent is read every run
+        "quiet_poll_minutes": 30,  # PROPOSED: other conversations are read at most this often (staggered)
         "quiet_minutes": 30,  # agreed: >= 30 minutes after the last relevant message
         "page_size": 200,
     },

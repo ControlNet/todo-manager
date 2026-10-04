@@ -507,6 +507,8 @@ enabled = false
 token_env = "SLACK_USER_TOKEN"   # or token_file = "~/.hermes/credentials/<file>" (only the token, mode 0600)
 team = ""                        # workspace id (T...)
 conversations = []               # channel / DM ids (C..., G..., D...)
+direct_messages = false          # true: also read every 1:1 DM of yours, new ones included
+group_direct_messages = false    # true: also read every group DM of yours
 
 [github]
 enabled = false

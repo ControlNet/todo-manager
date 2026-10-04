@@ -17,6 +17,7 @@ A ``forced`` batch (explicit "process this now") matures immediately.
 
 from __future__ import annotations
 
+import itertools
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -118,9 +119,20 @@ def plan_intake_wake(conn: sqlite3.Connection, cfg: Config, extra_reasons: list[
     else:
         plan.deferred = {source: len(v) for source, v in gated.items()}
     if plan.batch_ids:
-        plan.batch_ids = _limit_batches(conn, plan.batch_ids, int(cfg.get("wake.max_items_per_run", 60)),
+        source_of = {row["id"]: row["source"] for row in rows}
+        plan.batch_ids = _limit_batches(conn, _round_robin(plan.batch_ids, source_of),
+                                        int(cfg.get("wake.max_items_per_run", 60)),
                                         int(cfg.get("wake.max_context_chars", 60000)))
     return plan
+
+
+def _round_robin(batch_ids: list[str], source_of: dict[str, str]) -> list[str]:
+    """Alternate between sources (each in its own order), so that a backlog of one source
+    (e.g. the first email backfill) cannot crowd chat out of every run's budget."""
+    groups: dict[str, list[str]] = {}
+    for batch_id in batch_ids:
+        groups.setdefault(source_of[batch_id], []).append(batch_id)
+    return [b for row in itertools.zip_longest(*groups.values()) for b in row if b is not None]
 
 
 ITEM_OVERHEAD = 200     # header, recipients and subject lines per rendered item

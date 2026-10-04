@@ -15,7 +15,22 @@ from .config import Config
 from .db import get_meta, loads
 
 STALE_SOURCE_MINUTES = 30
+GROUP_STALE_SCOPES = 3   # more stale scopes than this of one source are reported as one line
 ENTRIES = ("intake", "feedback")
+
+
+def stale_sources(conn: sqlite3.Connection, sources: tuple[str, ...] | None = None) -> dict[str, list[dict[str, Any]]]:
+    """Failing or stale source scopes, grouped by source. A scope may go ``STALE_SOURCE_MINUTES``
+    plus its own polling interval (cursor meta ``poll_interval_minutes``) without a success."""
+    found: dict[str, list[dict[str, Any]]] = {}
+    for r in conn.execute("SELECT * FROM cursors ORDER BY source, scope"):
+        if sources is not None and r["source"] not in sources:
+            continue
+        age = clock.minutes_since(r["last_success_at"])
+        allowed = STALE_SOURCE_MINUTES + int(loads(r["meta"], {}).get("poll_interval_minutes") or 0)
+        if r["consecutive_failures"] or age is None or age > allowed:
+            found.setdefault(r["source"], []).append(dict(r))
+    return found
 
 
 def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
@@ -25,6 +40,11 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
                        "minutes_since_success": round(clock.minutes_since(r["last_success_at"]) or -1),
                        "failures": r["consecutive_failures"], "error": (r["last_error"] or "")[:200]}
                       for r in conn.execute("SELECT * FROM cursors ORDER BY source, scope")]
+    stale = {(r["source"], r["scope"]) for rows in stale_sources(conn).values() for r in rows}
+    out["stale_sources"] = {}
+    for s in out["sources"]:
+        if (s["source"], s["scope"]) in stale:
+            out["stale_sources"].setdefault(s["source"], []).append(s)
     out["outbox"] = {r["status"]: r["n"] for r in conn.execute(
         "SELECT status, COUNT(*) n FROM outbox GROUP BY status")}
     out["outbox_dead"] = [{"id": r["id"], "op": f"{r['target']}/{r['op']}", "entity": r["entity_id"],
@@ -52,9 +72,14 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
 
 def problems(rep: dict[str, Any], cfg: Config) -> list[str]:
     found = []
-    for s in rep["sources"]:
-        if s["failures"] or s["minutes_since_success"] < 0 or s["minutes_since_success"] > STALE_SOURCE_MINUTES:
-            found.append(f"source {s['source']}:{s['scope']} stale ({s['minutes_since_success']} min, "
+    for source, scopes in rep["stale_sources"].items():
+        s = scopes[0]
+        if len(scopes) > GROUP_STALE_SCOPES:
+            found.append(f"source {source}: {len(scopes)} scopes stale, e.g. {s['scope']} ({s['minutes_since_success']} min, "
+                         f"{s['failures']} failures) {s['error']}".strip())
+            continue
+        for s in scopes:
+            found.append(f"source {source}:{s['scope']} stale ({s['minutes_since_success']} min, "
                          f"{s['failures']} failures) {s['error']}".strip())
     if rep["outbox_dead"]:
         found.append(f"{len(rep['outbox_dead'])} outbox effects gave up")

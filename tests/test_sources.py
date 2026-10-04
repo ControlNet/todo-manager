@@ -1,18 +1,19 @@
 """Source adapters against recorded-shape API responses.
 
 TEST DOUBLES: ``FakeHttp`` / ``FakeGitHub`` return hand-written payloads shaped like the Gmail,
-Slack and GitHub REST responses; they are not the real services. Real read-only runs are done
-separately in a sandbox workspace.
+Slack and GitHub REST responses, and ``StubAdapter`` is a minimal adapter for ``fetch_all``; they
+are not the real services. Real read-only runs are done separately in a sandbox workspace.
 """
 
 import base64
 import json
 
-from todo_manager import clock
+from todo_manager import clock, gate_intake
 from todo_manager.net import HttpError
+from todo_manager.sources.base import FetchResult, SourceError, get_cursor
 from todo_manager.sources.github import GitHubNotificationSource
 from todo_manager.sources.gmail import GmailSource
-from todo_manager.sources.slack import SlackSource
+from todo_manager.sources.slack import SlackDirectory, SlackSource
 from tests.helpers import WorkspaceCase
 
 
@@ -204,7 +205,6 @@ class SlackAdapterTests(WorkspaceCase):
 class SlackRegistryTests(WorkspaceCase):
     def test_token_can_come_from_a_private_file(self):
         from todo_manager.sources import registry
-        from todo_manager.sources.base import SourceError
         token_file = self.tmp / "slack_user_token"
         token_file.write_text("xoxp-test-token\n", encoding="utf-8")
         self.cfg.data["slack"].update(enabled=True, token_file=str(token_file), conversations=["C1"], team="T1")
@@ -214,3 +214,137 @@ class SlackRegistryTests(WorkspaceCase):
         with self.assertRaises(SourceError) as ctx:
             src.token()
         self.assertNotIn("xoxp", str(ctx.exception))
+
+    def test_direct_messages_add_a_discovery_scope(self):
+        from todo_manager.sources import registry
+        self.cfg.data["slack"].update(enabled=True, team="T1", conversations=["C1"], direct_messages=True)
+        slack = [s for s in registry.conversation_sources(self.cfg) if s.name == "slack"]
+        self.assertEqual([s.scope for s in slack], ["conversation:C1", "directory"])
+        self.assertEqual(slack[1].types, ["im"])
+        self.cfg.data["slack"].update(direct_messages=False, group_direct_messages=False)
+        self.assertEqual([s.scope for s in registry.conversation_sources(self.cfg) if s.name == "slack"],
+                         ["conversation:C1"])
+
+
+class SlackDirectMessageTests(WorkspaceCase):
+    def make(self, http):
+        def make(conversation, peer=None, title=None):
+            return SlackSource(token=lambda: "t", team="T1", conversation=conversation, my_user_ids=["UME"],
+                               http=http, peer=peer, title=title, quiet_poll_minutes=30, active_hours=168)
+        return make
+
+    def test_all_dms_and_group_dms_are_discovered_including_new_ones(self):
+        pages = {None: {"ok": True, "channels": [{"id": "D1", "is_im": True, "user": "U2"},
+                                                 {"id": "D2", "is_im": True, "user": "UME"},
+                                                 {"id": "D3", "is_im": True, "user": "USLACKBOT"}],
+                        "response_metadata": {"next_cursor": "p2"}},
+                 "p2": {"ok": True, "channels": [{"id": "G1", "is_mpim": True, "name": "mpdm-alice--bob--me-1"}]}}
+        http = FakeHttp([("users.conversations", lambda p: pages[p.get("cursor")])])
+        directory = SlackDirectory(token=lambda: "t", types=["im", "mpim"], make=self.make(http), http=http,
+                                   page_size=2)
+        result = directory.fetch(None)
+        self.assertEqual(result.items, [])
+        self.assertEqual({(c[2]["types"], c[2]["exclude_archived"]) for c in http.calls}, {("im,mpim", "true")})
+        sources = directory.expand(result.cursor)
+        self.assertEqual([s.scope for s in sources], ["conversation:D1", "conversation:D2", "conversation:G1"],
+                         "the Slackbot DM is not readable through the API")
+        self.assertEqual(directory.expand(None), [])
+
+    def test_dm_items_say_who_the_conversation_is_with(self):
+        now = clock.now().timestamp()
+        users = {"U2": {"ok": True, "user": {"id": "U2", "real_name": "Alice Chen"}}}
+        http = FakeHttp([
+            ("conversations.history", {"ok": True, "messages": [{"ts": f"{now - 60:.6f}", "user": "U2", "text": "hi"}]}),
+            ("users.info", lambda p: users.get(p["user"], {"ok": False, "error": "user_not_found"})),
+        ])
+        make = self.make(http)
+        [dm] = make("D1", peer="U2").fetch(None).items
+        self.assertEqual(dm.title, "DM with Alice Chen")
+        [own] = make("D2", peer="UME").fetch(None).items
+        self.assertEqual(own.title, "DM with yourself")
+        [group] = make("G1", title="group DM (mpdm-alice--bob--me-1)").fetch(None).items
+        self.assertEqual(group.title, "group DM (mpdm-alice--bob--me-1)")
+
+    def test_quiet_conversations_are_read_once_per_interval_active_ones_every_run(self):
+        now = clock.now().timestamp()
+        http = FakeHttp([("conversations.history", {"ok": True, "messages": [
+            {"ts": f"{now - 3600:.6f}", "user": "U2", "text": "hello"}]}), SlackAdapterTests.NO_USERS])
+        src = self.make(http)("D1", peer=None)
+        self.assertTrue(src.due(None), "never read -> due")
+        state = json.loads(src.fetch(None).cursor)
+        self.assertEqual(state["last_message"], float(f"{now - 3600:.6f}"))
+        self.assertTrue(src.due({"cursor": json.dumps(state), "last_success_at": clock.iso()}),
+                        "a message within active_hours -> read every run")
+        quiet = {"cursor": json.dumps({"newest": now - 10 * 86400, "last_message": now - 10 * 86400}),
+                 "last_success_at": clock.iso()}
+        reads = 0
+        for _ in range(13):   # 5-minute runs over 60 minutes
+            if src.due(quiet):
+                reads += 1
+                quiet["last_success_at"] = clock.iso()
+            clock.advance(minutes=5)
+        self.assertEqual(reads, 2)
+
+    def test_quiet_reads_are_spread_over_the_interval(self):
+        make = self.make(FakeHttp([]))
+        state = {"cursor": json.dumps({"newest": 1.0, "last_message": 1.0}), "last_success_at": clock.iso()}
+        clock.advance(minutes=5)
+        due_now = [make(f"D{i}").due(state) for i in range(40)]
+        self.assertTrue(0 < sum(due_now) < 40, "not every quiet conversation in the same run")
+
+
+class StubAdapter:
+    """TEST DOUBLE: a source scope with optional cadence and discovery."""
+
+    def __init__(self, name, scope, *, error=None, due=True, children=None):
+        self.name, self.scope = name, scope
+        self.error, self._due, self.children = error, due, children
+        self.calls = 0
+
+    def due(self, cursor_row):
+        return self._due
+
+    def fetch(self, cursor, last_success_at=None):
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return FetchResult(scope=self.scope, items=[],
+                           cursor=json.dumps(self.children) if self.children is not None else "c")
+
+
+class DiscoveringStub(StubAdapter):
+    def __init__(self, *args, registry, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.registry = registry
+
+    def expand(self, cursor):
+        return [self.registry[scope] for scope in json.loads(cursor or "[]")]
+
+
+class FetchAllTests(WorkspaceCase):
+    def test_discovered_scopes_are_read_once_and_survive_a_failed_listing(self):
+        c1, d1 = StubAdapter("slack", "conversation:C1"), StubAdapter("slack", "conversation:D1")
+        registry = {"conversation:C1": c1, "conversation:D1": d1}
+        directory = DiscoveringStub("slack", "directory", children=["conversation:C1", "conversation:D1"],
+                                    registry=registry)
+        report = gate_intake.fetch_all(self.conn, [c1, directory])
+        self.assertEqual((c1.calls, d1.calls), (1, 1), "an explicitly listed DM is not read twice")
+        self.assertIn("slack:conversation:D1", report)
+        directory.error = SourceError("slack users.conversations: ratelimited")
+        gate_intake.fetch_all(self.conn, [directory])
+        self.assertEqual(d1.calls, 2, "the last known list is still read")
+
+    def test_rate_limit_defers_the_rest_of_that_source_only(self):
+        a = StubAdapter("slack", "conversation:A", error=SourceError("HTTP 429", retry_after=30))
+        b, mail = StubAdapter("slack", "conversation:B"), StubAdapter("gmail", "mailbox:x")
+        report = gate_intake.fetch_all(self.conn, [a, b, mail])
+        self.assertEqual(report["slack:conversation:B"], {"skipped": "rate limited"})
+        self.assertIsNone(get_cursor(self.conn, "slack", "conversation:B"), "deferred, not a failure")
+        self.assertEqual(get_cursor(self.conn, "slack", "conversation:A")["consecutive_failures"], 1)
+        self.assertEqual(mail.calls, 1)
+
+    def test_scope_that_is_not_due_is_not_touched(self):
+        quiet = StubAdapter("slack", "conversation:Q", due=False)
+        report = gate_intake.fetch_all(self.conn, [quiet])
+        self.assertEqual((quiet.calls, report["slack:conversation:Q"]), (0, {"skipped": "not due"}))
+        self.assertIsNone(get_cursor(self.conn, "slack", "conversation:Q"))

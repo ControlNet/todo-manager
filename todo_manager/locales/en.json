@@ -87,6 +87,8 @@
   "home.section.waiting": "⏳ Waiting on others",
   "home.source_stale": "⚠️ {label} ({scope})",
   "home.source_stale_detail": "last success {when}; {n} consecutive failures",
+  "home.sources_stale": "⚠️ {label} ({n} scopes)",
+  "home.sources_stale_detail": "e.g. {scope}: {detail}",
   "home.status": "Status",
   "label.delegation.blocked": "Needs my answer",
   "label.delegation.cancelled": "Cancelled",

@@ -25,27 +25,53 @@ STALE_CLAIM_MINUTES = 90
 
 
 def fetch_all(conn: sqlite3.Connection, adapters: list[Any], budget: float = FETCH_BUDGET_SECONDS) -> dict[str, Any]:
+    """Fetch each source scope once. Optional adapter hooks:
+
+    * ``due(cursor_row)`` returning False: not read in this run (the adapter's own cadence);
+    * ``expand(cursor)``: more scopes to read (e.g. discovered Slack DMs), from this run's
+      cursor, or the previous one when this run's fetch failed.
+
+    After a rate-limit error the remaining scopes of that source wait for the next run."""
     started = time.monotonic()
     report: dict[str, Any] = {}
-    for adapter in adapters:
+    queue = list(adapters)
+    throttled: set[str] = set()
+    while queue:
+        adapter = queue.pop(0)
         key = f"{adapter.name}:{adapter.scope}"
+        if key in report:
+            continue
         if time.monotonic() - started > budget:
             report[key] = {"skipped": "time budget"}
             continue
-        cursor = get_cursor(conn, adapter.name, adapter.scope) or {}
+        if adapter.name in throttled:
+            report[key] = {"skipped": "rate limited"}
+            continue
+        row = get_cursor(conn, adapter.name, adapter.scope)
+        due = getattr(adapter, "due", None)
+        if due is not None and not due(row):
+            report[key] = {"skipped": "not due"}
+            continue
+        cursor = (row or {}).get("cursor")
         try:
-            result = adapter.fetch(cursor.get("cursor"), cursor.get("last_success_at"))
+            result = adapter.fetch(cursor, (row or {}).get("last_success_at"))
         except SourceError as exc:
             record_fetch_error(conn, adapter.name, adapter.scope, str(exc))
             report[key] = {"error": str(exc)[:200]}
-            continue
+            if exc.retry_after:
+                throttled.add(adapter.name)
         except Exception as exc:  # noqa: BLE001 - adapter bug must not stop other sources
             record_fetch_error(conn, adapter.name, adapter.scope, f"{type(exc).__name__}: {exc}")
             report[key] = {"error": f"{type(exc).__name__}"}
-            continue
-        report[key] = persist_fetch(conn, adapter.name, result)
-        if not result.complete:
-            report[key]["more_pending"] = True
+        else:
+            report[key] = persist_fetch(conn, adapter.name, result)
+            if not result.complete:
+                report[key]["more_pending"] = True
+            if result.cursor is not None:
+                cursor = result.cursor
+        expand = getattr(adapter, "expand", None)
+        if expand is not None:
+            queue.extend(expand(cursor))
     return report
 
 

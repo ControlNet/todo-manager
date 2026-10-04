@@ -87,6 +87,8 @@
   "home.section.waiting": "⏳ 等待别人",
   "home.source_stale": "⚠️ {label}（{scope}）",
   "home.source_stale_detail": "上次成功 {when}；连续失败 {n} 次",
+  "home.sources_stale": "⚠️ {label}（{n} 个范围）",
+  "home.sources_stale_detail": "例如 {scope}：{detail}",
   "home.status": "状态",
   "label.delegation.blocked": "等我回答",
   "label.delegation.cancelled": "已取消",

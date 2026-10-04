@@ -48,7 +48,10 @@ todo-manager history <task id> # field-level history of one task or project
 
 Problems (stale sources, given-up writes, quarantined delegations, failed feedback, a gate that
 has not run) also appear in the Notion freshness box and, when `notify.matrix` is enabled, as
-at most one Matrix reminder per problem per day.
+at most one Matrix reminder per problem per day. A source scope is stale after 30 minutes without
+a successful fetch, plus its own polling interval (quiet Slack conversations are read about every
+`slack.quiet_poll_minutes`); when more than three scopes of one source are stale (e.g. an expired
+Slack token with all DMs included) they are reported as one line.
 
 Model cost: every run that wakes the model is recorded with its reasons; `metrics` adds
 prompt/completion tokens of the two jobs from Hermes' `cron/usage_audit.jsonl`.

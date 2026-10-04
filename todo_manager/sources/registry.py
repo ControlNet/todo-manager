@@ -36,7 +36,7 @@ def conversation_sources(cfg: Config) -> list[Any]:
                                                      overlap_minutes=int(gh.get("overlap_minutes", 30))))
     slack = cfg.section("slack")
     if slack.get("enabled"):
-        from .slack import SlackSource
+        from .slack import SlackDirectory, SlackSource
         token_env = slack.get("token_env", "SLACK_USER_TOKEN")
         token_file = slack.get("token_file") or ""
         env_file = cfg.get("notion.env_file")
@@ -58,10 +58,20 @@ def conversation_sources(cfg: Config) -> list[Any]:
             return value
 
         names: dict[str, str | None] = {}   # one users.info lookup per member per gate run
+
+        def make(conversation: str, peer: str | None = None, title: str | None = None) -> SlackSource:
+            return SlackSource(token=token, team=slack.get("team", ""), conversation=conversation,
+                               my_user_ids=ident.get("slack_user_ids", []), page_size=int(slack.get("page_size", 200)),
+                               user_names=names, peer=peer, title=title,
+                               active_hours=int(slack.get("active_hours", 168)),
+                               quiet_poll_minutes=int(slack.get("quiet_poll_minutes", 30)))
+
         for conv in slack.get("conversations", []):
-            adapters.append(SlackSource(token=token, team=slack.get("team", ""), conversation=conv,
-                                        my_user_ids=ident.get("slack_user_ids", []),
-                                        page_size=int(slack.get("page_size", 200)), user_names=names))
+            adapters.append(make(conv))
+        types = [kind for kind, key in (("im", "direct_messages"), ("mpim", "group_direct_messages")) if slack.get(key)]
+        if types:   # every DM / group DM of the user, discovered each run (explicit ids above are not read twice)
+            adapters.append(SlackDirectory(token=token, types=types, make=make,
+                                           page_size=int(slack.get("page_size", 200))))
     return adapters
 
 

@@ -24,7 +24,6 @@ from .db import tx
 from .notion import schema
 
 Step = Callable[[], Any]
-FRESH_MINUTES = 30
 SOURCE_SCOPES = ("gmail", "slack", "github", "commit", "notion")
 
 
@@ -62,14 +61,17 @@ def freshness_sections(conn: sqlite3.Connection, cfg: Config, lang: str | None =
 
     local = clock.local_dt(cfg.tz)
     lines: list[tuple[str, str]] = []
-    marks = ",".join("?" for _ in SOURCE_SCOPES)
-    for r in conn.execute(f"SELECT * FROM cursors WHERE source IN ({marks}) ORDER BY source, scope", SOURCE_SCOPES):
-        age = clock.minutes_since(r["last_success_at"])
-        if r["consecutive_failures"] or age is None or age > FRESH_MINUTES:
+    for source, scopes in health.stale_sources(conn, SOURCE_SCOPES).items():
+        label = schema.label("source", source, lang)
+        for r in scopes:
             when = (f"{clock.local_dt(cfg.tz, clock.parse(r['last_success_at'])):%m-%d %H:%M}"
                     if r["last_success_at"] else t("home.never_succeeded"))
-            lines.append((t("home.source_stale", label=schema.label("source", r["source"], lang), scope=r["scope"]),
-                          t("home.source_stale_detail", when=when, n=r["consecutive_failures"])))
+            detail = t("home.source_stale_detail", when=when, n=r["consecutive_failures"])
+            if len(scopes) > health.GROUP_STALE_SCOPES:
+                lines.append((t("home.sources_stale", label=label, n=len(scopes)),
+                              t("home.sources_stale_detail", scope=r["scope"], detail=detail)))
+                break
+            lines.append((t("home.source_stale", label=label, scope=r["scope"]), detail))
     dead = conn.execute("SELECT COUNT(*) FROM outbox WHERE status='dead'").fetchone()[0]
     if dead:
         lines.append((t("home.dead_writes"), t("home.dead_writes_detail", n=dead)))
