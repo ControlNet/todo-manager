@@ -99,6 +99,37 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(len(list((self.home / "backups").glob("pre-schema-v6-from-v5-*.sqlite"))), 1,
                          "the rollback point is the pre-migration copy")
 
+    def test_v5_messages_survive_the_rebuild_in_order(self):
+        """B04 (v6): delegation_messages is rebuilt without its table-level UNIQUE."""
+        make_v1(self.path)
+        conn = sqlite3.connect(str(self.path), isolation_level=None)
+        for version in range(2, 6):
+            for statement in db._split_sql(db.MIGRATIONS[version]):
+                conn.execute(statement)
+        conn.execute("UPDATE meta SET value='5' WHERE key='schema_version'")
+        conn.execute("INSERT INTO delegations(id, task_id, title, goal, allowed_actions, requirement_version, status,"
+                     " board, idem_key, created_at, updated_at) VALUES ('dlg_1', 'tsk_1', 't', 'g', '[]', 2, 'blocked',"
+                     " 'b', 'k', 'x', 'x')")
+        for n, (kind, fb) in enumerate([("requirement", None), ("answer", "fbk_1"), ("supplement", "fbk_1")]):
+            conn.execute("INSERT INTO delegation_messages(id, delegation_id, kind, feedback_id, body, requirement_version,"
+                         " status, created_at, target_event_id, approval_id, cause) VALUES (?, 'dlg_1', ?, ?, ?, 1,"
+                         " 'pending', 'same', ?, NULL, 'c')", (f"m{n}", kind, fb, f"body {n}", 40 + n))
+        conn.close()
+        conn = db.connect(self.path)
+        try:
+            rows = [(r["id"], r["kind"], r["target_event_id"], r["cause"], r["op_key"])
+                    for r in conn.execute("SELECT * FROM delegation_messages ORDER BY created_at, rowid")]
+            self.assertEqual(rows, [("m0", "requirement", 40, "c", None), ("m1", "answer", 41, "c", None),
+                                    ("m2", "supplement", 42, "c", None)])
+            conn.execute("INSERT INTO delegation_messages(id, delegation_id, kind, feedback_id, body, requirement_version,"
+                         " created_at, op_key) VALUES ('m3', 'dlg_1', 'supplement', 'fbk_1', 'b', 3, 'x', 'fbk_1#1')")
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute("INSERT INTO delegation_messages(id, delegation_id, kind, feedback_id, body,"
+                             " requirement_version, created_at) VALUES ('m4', 'dlg_1', 'supplement', 'fbk_1', 'b', 3, 'x')")
+            self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        finally:
+            conn.close()
+
     def test_fresh_database_takes_no_backup(self):
         db.connect(self.path).close()
         self.assertFalse((self.home / "backups").exists())

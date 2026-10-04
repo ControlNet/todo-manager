@@ -137,7 +137,7 @@ class UnconfirmedWriteTests(GateCase):
         self.push(self.task)
         self.assertEqual(self.fake.prop(self.page, "下一步"), "A：先问导师")
         # 2. The user corrects it to B through Matrix (main agent, direct path).
-        feedback_flow.apply_direct(self.conn, self.cfg, origin="matrix", text="下一步改成 B", ops=[
+        feedback_flow.apply_direct(self.conn, self.cfg, origin="matrix", text="下一步改成 B", source_id="$evt_b", ops=[
             {"op": "update_task", "task": self.task, "based_on_version": store.get_task(self.conn, self.task)["version"],
              "set": {"next_step": "B：直接回复 Bob"}}])
         # 3. The next pull sees A on the page: our own write, not a human edit.

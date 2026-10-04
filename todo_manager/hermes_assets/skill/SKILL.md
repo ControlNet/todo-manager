@@ -75,12 +75,17 @@ The job context names a run id. Then:
 
 - Look things up: `todo-manager task list`, `todo-manager task show <id>`,
   `todo-manager project list`, `todo-manager delegate list`, `todo-manager health`.
+- Every request needs an identity (`--source-id`): the Matrix event id of the user's message
+  when you have it, otherwise run `todo-manager feedback request-id` ONCE for this request and
+  keep the printed id. If a call fails or times out, retry it with the SAME id (it is applied
+  once); a new request, even with the same words, gets a new id.
 - To act on what the user just asked, apply it directly and record their words:
-  `todo-manager feedback apply-direct --origin matrix --text "<the user's words>" --scope task:<id> --file <ops.json>`
-  (`--source-id <message id>` when you know it). `todo-manager feedback format` prints the ops.
+  `todo-manager feedback apply-direct --origin matrix --source-id <id> --text "<the user's words>" --scope task:<id> --file <ops.json>`.
+  `todo-manager feedback format` prints the ops. For `accept`/`revision` of a delegation, put the
+  delivery id the user means in the op's `delivery` (listed by `todo-manager task show <task id>`).
   Then answer the user in the chat.
 - If the request needs more context than you have, store it for the next feedback run:
-  `todo-manager feedback record --origin matrix --text "<the user's words>" --scope task:<id>`.
+  `todo-manager feedback record --origin matrix --source-id <id> --text "<the user's words>" --scope task:<id>`.
 - Delegating work to an agent is a `delegate` op; keep the goal concrete and the allowed actions
   minimal (read, analyze, draft unless the user explicitly allows more).
 

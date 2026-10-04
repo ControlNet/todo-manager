@@ -490,14 +490,49 @@ INSERT OR IGNORE INTO followup_checks(task_id, due, state, run_id, attempts, cla
     # within one timestamp), and a run that claimed an older revision cannot apply it.
     # Additive; the box's last seen fingerprint is seeded from a pending box edit, else from what we wrote.
     # Also: accept/revision messages bound to the delivery (result seq + its review event) they
-    # were written for, and resume bound to the pause message it lifts.
+    # were written for, resume bound to the pause message it lifts, and delegations/messages
+    # identified by feedback item + op (``<feedback id>#<op index>``). delegation_messages is
+    # rebuilt (rows copied in order) because its table-level UNIQUE(delegation, feedback, kind)
+    # swallowed a second op of the same kind; that uniqueness now holds only without an op key.
+    # Rollback: restore the automatic pre-schema backup with the previous code version.
     6: """
 ALTER TABLE notion_comments ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE notion_pages ADD COLUMN box_revision INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE notion_pages ADD COLUMN box_seen_hash TEXT;
 ALTER TABLE notion_pages ADD COLUMN notes_revision INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE delegation_messages ADD COLUMN target_seq INTEGER;
-ALTER TABLE delegation_messages ADD COLUMN target_message_id TEXT;
+ALTER TABLE delegations ADD COLUMN op_key TEXT;
+CREATE UNIQUE INDEX delegations_op_key ON delegations(op_key) WHERE op_key IS NOT NULL;
+CREATE TABLE delegation_messages_v6 (
+  id TEXT PRIMARY KEY,
+  delegation_id TEXT NOT NULL REFERENCES delegations(id),
+  kind TEXT NOT NULL CHECK (kind IN ('requirement','supplement','answer','revision','pause','resume','cancel','accept','approval')),
+  feedback_id TEXT,
+  body TEXT NOT NULL,
+  requirement_version INTEGER NOT NULL,
+  target_block_seq INTEGER,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','sending','sent','superseded','failed','waiting_capacity')),
+  card_comment_id TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  sent_at TEXT,
+  target_event_id INTEGER,
+  approval_id TEXT,
+  cause TEXT,
+  target_seq INTEGER,
+  target_message_id TEXT,
+  op_key TEXT
+);
+INSERT INTO delegation_messages_v6(id, delegation_id, kind, feedback_id, body, requirement_version, target_block_seq,
+  status, card_comment_id, error, created_at, sent_at, target_event_id, approval_id, cause)
+  SELECT id, delegation_id, kind, feedback_id, body, requirement_version, target_block_seq, status, card_comment_id,
+    error, created_at, sent_at, target_event_id, approval_id, cause FROM delegation_messages ORDER BY rowid;
+DROP TABLE delegation_messages;
+ALTER TABLE delegation_messages_v6 RENAME TO delegation_messages;
+CREATE INDEX delegation_messages_approval ON delegation_messages(approval_id);
+CREATE UNIQUE INDEX delegation_messages_feedback_kind ON delegation_messages(delegation_id, feedback_id, kind)
+  WHERE op_key IS NULL;
+CREATE UNIQUE INDEX delegation_messages_op_key ON delegation_messages(op_key) WHERE op_key IS NOT NULL;
 UPDATE notion_pages SET box_seen_hash = COALESCE((
   SELECT substr(f.source_version, 6) FROM feedback f
   WHERE f.origin = 'notion_page' AND f.kind = 'body_edit' AND f.source_id = notion_pages.page_id

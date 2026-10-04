@@ -122,7 +122,10 @@ def card_body(d: dict[str, Any], task: dict[str, Any], notion_url: str | None, e
 
 def create(conn: sqlite3.Connection, cfg: Config, *, task_id: str, title: str, goal: str, context: str | None = None,
            constraints: str | None = None, deliverable: str | None = None, done_criteria: str | None = None,
-           allowed_actions: list[str] | None = None, feedback_id: str | None = None, actor: str = "human") -> str:
+           allowed_actions: list[str] | None = None, feedback_id: str | None = None, actor: str = "human",
+           op_key: str | None = None) -> str:
+    """``op_key`` (feedback id + op index) identifies the request: applying the same op again
+    returns the same delegation, another op of the same feedback creates its own."""
     task = store.get_task(conn, task_id)
     if task is None:
         raise DelegationError(f"task {task_id} not found")
@@ -134,20 +137,24 @@ def create(conn: sqlite3.Connection, cfg: Config, *, task_id: str, title: str, g
     unknown = action_names(allowed) - KNOWN_ACTIONS
     if unknown:
         raise DelegationError(f"unknown actions {sorted(unknown)}; known: {sorted(KNOWN_ACTIONS)}")
-    if feedback_id:
+    if op_key:
+        existing = conn.execute("SELECT id FROM delegations WHERE op_key=?", (op_key,)).fetchone()
+    elif feedback_id:
         existing = conn.execute("SELECT id FROM delegations WHERE from_feedback_id=?", (feedback_id,)).fetchone()
-        if existing:
-            return existing["id"]
+    else:
+        existing = None
+    if existing:
+        return existing["id"]
     did = ids.new_id("delegation")
     now = clock.iso()
     with tx(conn):
         conn.execute(
             "INSERT INTO delegations(id, task_id, title, goal, context, constraints, deliverable, done_criteria,"
             " allowed_actions, assignee, requirement_version, status, board, idem_key, from_feedback_id,"
-            " base_task_version, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,1,'pending_submit',?,?,?,?,?,?)",
+            " base_task_version, created_at, updated_at, op_key) VALUES (?,?,?,?,?,?,?,?,?,?,1,'pending_submit',?,?,?,?,?,?,?)",
             (did, task_id, title.strip(), goal.strip(), context, constraints, deliverable, done_criteria,
              dumps(allowed), cfg.get("kanban.assignee") or None, cfg.get("kanban.board", "todo-manager"),
-             ids.delegation_idempotency_key(did), feedback_id, task["version"], now, now))
+             ids.delegation_idempotency_key(did), feedback_id, task["version"], now, now, op_key))
         conn.execute(
             "INSERT INTO delegation_messages(id, delegation_id, kind, feedback_id, body, requirement_version, status,"
             " created_at, sent_at) VALUES (?,?,?,?,?,1,'sent',?,?)",
@@ -627,10 +634,12 @@ def received_requirement_version(conn: sqlite3.Connection, d: dict[str, Any]) ->
 
 def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: str,
                 feedback_id: str | None = None, approval_id: str | None = None, cause: str | None = None,
-                delivery_id: str | None = None) -> str:
+                delivery_id: str | None = None, op_key: str | None = None) -> str:
     """Queue a message. Its target is fixed here and kept for every retry: an answer binds to
     the open question, accept/revision to ``delivery_id`` (the version the user replied to) or
-    else the latest delivered version, resume to the latest pause."""
+    else the latest delivered version, resume to the latest pause. ``op_key`` (feedback id + op
+    index) makes a retried op return its message while a second op of the same kind in the
+    same feedback gets its own; without it, one message per feedback item and kind."""
     if kind not in MESSAGE_KINDS:
         raise DelegationError(f"invalid message kind {kind!r}")
     d = get(conn, delegation_id)
@@ -639,11 +648,15 @@ def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: s
     if d["status"] in ("ended", "cancelled") and kind not in ("supplement",):
         raise DelegationError(f"delegation is {d['status']}; create a new linked delegation for new work")
     with tx(conn):
-        if feedback_id:
+        if op_key:
+            existing = conn.execute("SELECT id FROM delegation_messages WHERE op_key=?", (op_key,)).fetchone()
+        elif feedback_id:
             existing = conn.execute("SELECT id FROM delegation_messages WHERE delegation_id=? AND feedback_id=? AND kind=?",
                                     (delegation_id, feedback_id, kind)).fetchone()
-            if existing:
-                return existing["id"]
+        else:
+            existing = None
+        if existing:
+            return existing["id"]
         mid = ids.new_id("event")
         changes_requirement = kind in ("supplement", "revision", "answer")
         requirement_version = d["requirement_version"] + (1 if changes_requirement else 0)
@@ -661,11 +674,11 @@ def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: s
             target_message = pause["id"] if pause else None
         conn.execute(
             "INSERT INTO delegation_messages(id, delegation_id, kind, feedback_id, body, requirement_version,"
-            " target_block_seq, target_event_id, target_seq, target_message_id, approval_id, cause, status, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)",
+            " target_block_seq, target_event_id, target_seq, target_message_id, approval_id, cause, status, created_at,"
+            " op_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)",
             (mid, delegation_id, kind, feedback_id, body, requirement_version,
              d["block_seq"] if answering else None, target_event, target_seq, target_message,
-             approval_id, cause, clock.iso()))
+             approval_id, cause, clock.iso(), op_key))
         if changes_requirement:
             _set(conn, delegation_id, requirement_version=requirement_version)
             # A substantive change voids approvals that have not gone out yet.

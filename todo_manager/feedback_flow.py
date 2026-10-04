@@ -24,12 +24,11 @@ Ops (one item may carry several):
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from datetime import timedelta
 from typing import Any
 
-from . import clock, delegation, effects, feedback, i18n, prompts, rules, runs, store
+from . import clock, delegation, effects, feedback, i18n, ids, prompts, rules, runs, store
 from .config import Config
 from .sources.base import quote
 from .db import dumps, get_meta, loads, rules_version, tx
@@ -368,8 +367,9 @@ def _replied_delivery(fb: dict[str, Any], op: dict[str, Any]) -> str | None:
 def apply_ops(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any], ops: list[dict[str, Any]]) -> dict[str, Any]:
     origin = {"notion_comment": "notion", "notion_property": "notion", "notion_page": "notion"}.get(fb["origin"], fb["origin"])
     report: dict[str, Any] = {"ops": []}
-    for op in ops:
+    for n, op in enumerate(ops):
         kind = op["op"]
+        op_key = f"{fb['id']}#{n}"    # identity of this request: a retry finds it, a sibling op does not
         entry: dict[str, Any] = {"op": kind}
         if kind == "update_task":
             result = _human_update_task(conn, op, fb["id"], origin)
@@ -396,11 +396,12 @@ def apply_ops(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any], ops: li
             did = delegation.create(conn, cfg, task_id=op["task"], title=op["title"], goal=op["goal"],
                                     context=op.get("context"), constraints=op.get("constraints"),
                                     deliverable=op.get("deliverable"), done_criteria=op.get("done_criteria"),
-                                    allowed_actions=op.get("allowed_actions"), feedback_id=fb["id"], actor="human")
+                                    allowed_actions=op.get("allowed_actions"), feedback_id=fb["id"], actor="human",
+                                    op_key=op_key)
             entry["delegation"] = did
         elif kind == "message":
             entry["message"] = delegation.add_message(conn, op["delegation"], op["kind"], op["body"], feedback_id=fb["id"],
-                                                      delivery_id=_replied_delivery(fb, op))
+                                                      delivery_id=_replied_delivery(fb, op), op_key=op_key)
         elif kind == "approve":
             entry["approval"] = delegation.record_approval(conn, op["delegation"], op["delivery"], op["action"],
                                                            op.get("detail") or "", fb["id"])
@@ -517,17 +518,35 @@ def apply_decisions(conn: sqlite3.Connection, cfg: Config, run_id: str, decision
     return report
 
 
+def new_request_id() -> str:
+    """Identity of one direct request when no chat message id is at hand: minted once per
+    request and passed again when the same call is retried."""
+    return "req_" + ids.new_id("event").split("_", 1)[1]
+
+
+def require_request_id(source_id: str | None) -> str:
+    if not (source_id or "").strip():
+        raise FeedbackDecisionError("INVALID", [
+            "--source-id is required: the Matrix event id of the user's message, or a request id from"
+            " `todo-manager feedback request-id` (one per request; reuse it when retrying the same call)"])
+    return source_id.strip()
+
+
 def apply_direct(conn: sqlite3.Connection, cfg: Config, *, origin: str, text: str, ops: list[dict[str, Any]],
                  scope_type: str = "global", scope_id: str | None = None, source_id: str | None = None,
                  outcome: str = "applied", reason: str | None = None) -> dict[str, Any]:
     """Main-agent path (Matrix/CLI): persist what the user said, then apply the ops atomically."""
     if origin not in ("matrix", "cli"):
         raise FeedbackDecisionError("INVALID", ["direct feedback origin must be matrix or cli"])
-    sid = source_id or f"{origin}:{clock.iso()}:{hashlib.sha1(text.encode()).hexdigest()[:10]}"
+    sid = require_request_id(source_id)
     with tx(conn):
         fid, created = feedback.record(conn, origin=origin, source_id=sid, text=text, scope_type=scope_type,
                                        scope_id=scope_id, kind="direct", author="user", author_is_user=True)
         fb = feedback.get(conn, fid)
+        if not created and (fb["text"] or "").strip() != text.strip():
+            raise FeedbackDecisionError("REQUEST_ID_REUSED", [
+                f"{sid} already identifies another request ({fb['id']}); mint a new one with"
+                " `todo-manager feedback request-id` for a new request"])
         if not created and fb["status"] != "pending":
             return {"feedback": fid, "duplicate": True, "result": fb["result"]}
         errors = _validate_ops(conn, fb, ops, "ops")

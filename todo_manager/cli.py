@@ -170,9 +170,15 @@ def cmd_feedback(args: argparse.Namespace) -> int:
             return _fail(exc.code, exc.errors)
         _print(result)
         return 0
+    if args.action == "request-id":
+        _print({"request_id": feedback_flow.new_request_id()})
+        return 0
     if args.action == "record":
         scope_type, _, scope_id = (args.scope or "global").partition(":")
-        sid = args.source_id or f"{args.origin}:{clock.iso()}"
+        try:
+            sid = feedback_flow.require_request_id(args.source_id)
+        except feedback_flow.FeedbackDecisionError as exc:
+            return _fail(exc.code, exc.errors)
         fid, created = feedback.record(conn, origin=args.origin, source_id=sid, text=args.text, scope_type=scope_type,
                                        scope_id=scope_id or None, kind="direct", author="user", author_is_user=True)
         _print({"feedback": fid, "created": created, "note": "gate B will interpret it within ~5 minutes"})
@@ -206,6 +212,9 @@ def cmd_task(args: argparse.Namespace) -> int:
         t["evidence"] = [{k: e[k] for k in ("role", "source", "title", "url", "occurred_at", "id")}
                          for e in store.evidence_for(conn, "task", args.id)]
         t["delegations"] = [delegation.summary_line(d) for d in delegation.for_task(conn, args.id)]
+        t["deliveries"] = [{"delegation": d["id"], "delivery": v["id"], "kind": v["kind"], "seq": v["seq"],
+                            "received_at": v["received_at"], "summary": (v["summary"] or "")[:160]}
+                           for d in delegation.for_task(conn, args.id) for v in delegation.deliveries(conn, d["id"])]
         t["field_meta"] = loads(t["field_meta"], {})
         t["notion_url"] = delegation._notion_url(conn, t)
         _print(t)
@@ -581,14 +590,16 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--text", required=True, help="the user's words")
     x.add_argument("--file", help="ops JSON list")
     x.add_argument("--scope", help="task:<id> | project:<id> | global")
-    x.add_argument("--source-id", help="e.g. the Matrix event id (makes the call idempotent)")
+    x.add_argument("--source-id", help="the Matrix event id, or a request id from `feedback request-id`"
+                                       " (required; reuse it when retrying the same call)")
     x.add_argument("--outcome", default="applied", choices=feedback_flow.OUTCOMES)
     x.add_argument("--reason")
     x = fs.add_parser("record", help="store feedback for gate B to interpret later")
     x.add_argument("--origin", choices=("matrix", "cli"), required=True)
     x.add_argument("--text", required=True)
     x.add_argument("--scope")
-    x.add_argument("--source-id")
+    x.add_argument("--source-id", help="as for apply-direct (required)")
+    fs.add_parser("request-id", help="mint the identity of one direct request (reuse it on retry)")
     x = fs.add_parser("list")
     x.add_argument("--status", default="pending", choices=("pending", *feedback.FINAL))
     x.add_argument("--limit", type=int, default=30)

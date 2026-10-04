@@ -92,7 +92,9 @@ class CliTests(CliCase):
         self.assertEqual(out.strip(), '{"wakeAgent": false}')
         _, out = self.tm("task", "create", "--title", "回复 Carol")
         tid = json.loads(out)["task"]
-        self.tm("feedback", "record", "--origin", "cli", "--text", "这个周五前要做完", "--scope", f"task:{tid}")
+        _, out = self.tm("feedback", "request-id")
+        self.tm("feedback", "record", "--origin", "cli", "--text", "这个周五前要做完", "--scope", f"task:{tid}",
+                "--source-id", json.loads(out)["request_id"])
         code, out = self.tm("gate", "feedback")
         lines = out.strip().splitlines()
         self.assertEqual(lines[-1], '{"wakeAgent": true}')

@@ -6,7 +6,7 @@ out makes it unused (the user is told), whichever of send and sync runs first. K
 ``FakeKanban`` (test double); the same transitions run against Hermes in tests/integration.
 """
 
-from todo_manager import delegation, feedback_flow
+from todo_manager import delegation, feedback_flow, store
 from tests.test_delegation_reliability import Base
 
 
@@ -144,3 +144,51 @@ class ResumeBindingTests(BindingBase):
         self.tick()
         self.assertEqual(self.kb.cards[card]["status"], "blocked", "the open question still waits for an answer")
         self.assertEqual(self.msg(r)["status"], "sent")
+
+
+class OperationIdentityTests(BindingBase):
+    """B04: a delegation or message is identified by its feedback item AND the op within it."""
+
+    def fb(self, fid="fbk_multi"):
+        return {"id": fid, "origin": "matrix", "author_is_user": 1, "payload": {}}
+
+    def test_two_supplements_in_one_feedback_are_both_sent(self):
+        did, card = self.running()
+        report = feedback_flow.apply_ops(self.conn, self.cfg, self.fb(), [
+            {"op": "message", "delegation": did, "kind": "supplement", "body": "抄送 Bob"},
+            {"op": "message", "delegation": did, "kind": "supplement", "body": "附上数据集链接"}])
+        mids = [e["message"] for e in report["ops"]]
+        self.assertEqual(len(set(mids)), 2, "a second op of the same kind is not swallowed")
+        self.tick()
+        bodies = [c["body"] for c in self.kb.comments if c["task_id"] == card]
+        self.assertTrue(any("抄送 Bob" in b for b in bodies) and any("数据集链接" in b for b in bodies))
+
+    def test_two_delegations_from_one_feedback_are_both_created(self):
+        other = store.create_task(self.conn, "整理数据集说明", origin="intake")
+        report = feedback_flow.apply_ops(self.conn, self.cfg, self.fb(), [
+            {"op": "delegate", "task": self.task, "title": "起草回复", "goal": "Draft a reply"},
+            {"op": "delegate", "task": other, "title": "整理说明", "goal": "Summarise the dataset card"}])
+        dids = [e["delegation"] for e in report["ops"]]
+        self.assertEqual(len(set(dids)), 2)
+        self.assertEqual({self.d(d)["task_id"] for d in dids}, {self.task, other})
+
+    def test_retrying_the_same_ops_creates_nothing_twice(self):
+        did, _ = self.running()
+        ops = [{"op": "message", "delegation": did, "kind": "supplement", "body": "抄送 Bob"},
+               {"op": "delegate", "task": self.task, "title": "并行：查日程", "goal": "Check calendar", "parallel": True}]
+        first = feedback_flow.apply_ops(self.conn, self.cfg, self.fb(), ops)
+        second = feedback_flow.apply_ops(self.conn, self.cfg, self.fb(), ops)
+        self.assertEqual(first["ops"], second["ops"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM delegation_messages WHERE kind='supplement'")
+                         .fetchone()[0], 1)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM delegations").fetchone()[0], 2)
+
+    def test_closing_the_task_does_not_add_a_second_cancel_to_an_explicit_one(self):
+        did, card = self.running()
+        task = store.get_task(self.conn, self.task)
+        feedback_flow.apply_ops(self.conn, self.cfg, self.fb(), [
+            {"op": "message", "delegation": did, "kind": "cancel", "body": "不用了"},
+            {"op": "update_task", "task": self.task, "based_on_version": task["version"],
+             "set": {"status": "cancelled"}}])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM delegation_messages WHERE kind='cancel'")
+                         .fetchone()[0], 1)
