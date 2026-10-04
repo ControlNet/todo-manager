@@ -10,7 +10,7 @@ import json
 
 from todo_manager import clock, gate_intake
 from todo_manager.net import HttpError
-from todo_manager.sources.base import FetchResult, SourceError, get_cursor
+from todo_manager.sources.base import FetchResult, SourceError, get_cursor, record_fetch_error
 from todo_manager.sources.github import GitHubNotificationSource
 from todo_manager.sources.gmail import GmailSource
 from todo_manager.sources.slack import SlackDirectory, SlackSource
@@ -221,7 +221,11 @@ class SlackRegistryTests(WorkspaceCase):
         slack = [s for s in registry.conversation_sources(self.cfg) if s.name == "slack"]
         self.assertEqual([s.scope for s in slack], ["conversation:C1", "directory"])
         self.assertEqual(slack[1].types, ["im"])
-        self.cfg.data["slack"].update(direct_messages=False, group_direct_messages=False)
+        self.cfg.data["slack"].update(channels=True, exclude=["paper-feed-*"])
+        [directory] = [s for s in registry.conversation_sources(self.cfg) if s.scope == "directory"]
+        self.assertEqual((directory.types, directory.exclude),
+                         (["im", "public_channel", "private_channel"], ["paper-feed-*"]))
+        self.cfg.data["slack"].update(direct_messages=False, group_direct_messages=False, channels=False)
         self.assertEqual([s.scope for s in registry.conversation_sources(self.cfg) if s.name == "slack"],
                          ["conversation:C1"])
 
@@ -249,6 +253,23 @@ class SlackDirectMessageTests(WorkspaceCase):
         self.assertEqual([s.scope for s in sources], ["conversation:D1", "conversation:D2", "conversation:G1"],
                          "the Slackbot DM is not readable through the API")
         self.assertEqual(directory.expand(None), [])
+
+    def test_member_channels_are_discovered_and_the_blacklist_applies(self):
+        channels = {"ok": True, "channels": [
+            {"id": "C1", "name": "lab-group", "is_channel": True},
+            {"id": "C2", "name": "paper-feed-phd", "is_channel": True, "is_private": True},
+            {"id": "C3", "name": "Paper-Feed-Postdoc", "is_channel": True},
+            {"id": "C4", "name": "bot-dev", "is_channel": True},
+            {"id": "D1", "is_im": True, "user": "U2"},
+            {"id": "D2", "is_im": True, "user": "UBOT"}]}
+        http = FakeHttp([("users.conversations", channels)])
+        directory = SlackDirectory(token=lambda: "t", types=["im", "public_channel", "private_channel"],
+                                   make=self.make(http), http=http,
+                                   exclude=["#paper-feed-*", "C4", "UBOT"])
+        sources = directory.expand(directory.fetch(None).cursor)
+        self.assertEqual([(s.scope, s.title) for s in sources],
+                         [("conversation:C1", "#lab-group"), ("conversation:D1", None)])
+        self.assertEqual(http.calls[0][2]["types"], "im,public_channel,private_channel")
 
     def test_dm_items_say_who_the_conversation_is_with(self):
         now = clock.now().timestamp()
@@ -284,6 +305,16 @@ class SlackDirectMessageTests(WorkspaceCase):
                 quiet["last_success_at"] = clock.iso()
             clock.advance(minutes=5)
         self.assertEqual(reads, 2)
+
+    def test_bot_traffic_does_not_make_a_conversation_active(self):
+        now = clock.now().timestamp()
+        http = FakeHttp([("conversations.history", {"ok": True, "messages": [
+            {"ts": f"{now - 60:.6f}", "bot_id": "B1", "bot_profile": {"name": "PaperBot"}, "text": "new papers"}]})])
+        src = self.make(http)("C9")
+        state = json.loads(src.fetch(None).cursor)
+        self.assertIsNone(state["last_message"])
+        quiet_reads = [src.due({"cursor": json.dumps(state), "last_success_at": clock.iso()})]
+        self.assertEqual(quiet_reads, [False], "read again only in the next quiet slot")
 
     def test_quiet_reads_are_spread_over_the_interval(self):
         make = self.make(FakeHttp([]))
@@ -333,6 +364,27 @@ class FetchAllTests(WorkspaceCase):
         directory.error = SourceError("slack users.conversations: ratelimited")
         gate_intake.fetch_all(self.conn, [directory])
         self.assertEqual(d1.calls, 2, "the last known list is still read")
+
+    def test_scopes_dropped_from_a_listing_are_retired_not_stale(self):
+        from todo_manager import health
+        c1, c2 = StubAdapter("slack", "conversation:C1"), StubAdapter("slack", "conversation:C2")
+        registry = {"conversation:C1": c1, "conversation:C2": c2}
+        directory = DiscoveringStub("slack", "directory", children=["conversation:C1", "conversation:C2"],
+                                    registry=registry)
+        gate_intake.fetch_all(self.conn, [directory])
+        directory.children = ["conversation:C1"]          # e.g. C2 was blacklisted
+        clock.advance(minutes=5)
+        gate_intake.fetch_all(self.conn, [directory])
+        clock.advance(hours=3)
+        record_fetch_error(self.conn, "slack", "directory", "HTTP 503")   # keep one real problem visible
+        stale = health.stale_sources(self.conn)["slack"]
+        self.assertNotIn("conversation:C2", [r["scope"] for r in stale])
+        self.assertIn("conversation:C1", [r["scope"] for r in stale])
+        directory.children = ["conversation:C1", "conversation:C2"]   # re-included: read and watched again
+        directory.error = None
+        gate_intake.fetch_all(self.conn, [directory])
+        self.assertEqual(c2.calls, 2)
+        self.assertNotIn("retired", get_cursor(self.conn, "slack", "conversation:C2")["meta"])
 
     def test_rate_limit_defers_the_rest_of_that_source_only(self):
         a = StubAdapter("slack", "conversation:A", error=SourceError("HTTP 429", retry_after=30))

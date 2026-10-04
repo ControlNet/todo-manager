@@ -509,6 +509,8 @@ team = ""                        # workspace id (T...)
 conversations = []               # channel / DM ids (C..., G..., D...)
 direct_messages = false          # true: also read every 1:1 DM of yours, new ones included
 group_direct_messages = false    # true: also read every group DM of yours
+channels = false                 # true: also read every channel you are a member of
+exclude = []                     # blacklist for the above: ids or name globs, e.g. ["#alerts-*", "C0123"]
 
 [github]
 enabled = false

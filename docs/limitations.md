@@ -33,10 +33,13 @@ verified and how.
 - Supported languages: English and Simplified Chinese. Adding one means adding a catalog in
   `todo_manager/locales/` and registering it in `i18n.LANGUAGES`.
 - Unthreaded Slack chat is batched per channel/DM, not per topic.
-- Slack channels are read only when listed in `slack.conversations`; DMs and group DMs can be
-  included wholesale (`direct_messages`, `group_direct_messages`). The Slackbot DM is skipped:
-  the API does not return its history.
-- A source scope that is no longer configured (a removed account or channel, or DMs turned off)
+- Slack: only conversations the token's user is a member of can be discovered. Bot channels are
+  not detected automatically; they are blacklisted with `slack.exclude` (an unlisted one costs only
+  API reads: bot messages are context only, never analysed, and do not make a channel "active").
+  The Slackbot DM is skipped: the API does not return its history.
+- A discovered Slack conversation that leaves the list (blacklisted, left, or its kind turned
+  off while discovery stays on) is retired automatically. A scope removed from the configuration
+  itself (an email account, an entry of `slack.conversations`, or all Slack discovery turned off)
   keeps its cursor and is reported as stale (one line per source when there are many) until its
   row is deleted from the `cursors` table; there is no command for that yet.
 - Matrix reminders are at-most-once: a send that timed out is not retried, because the outcome

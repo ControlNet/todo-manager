@@ -18,7 +18,7 @@ from typing import Any
 from . import batching, clock, runs
 from .config import Config
 from .db import tx
-from .sources.base import SourceError, get_cursor, persist_fetch, record_fetch_error
+from .sources.base import SourceError, get_cursor, persist_fetch, record_fetch_error, retire_scopes
 
 FETCH_BUDGET_SECONDS = 200
 STALE_CLAIM_MINUTES = 90
@@ -29,7 +29,8 @@ def fetch_all(conn: sqlite3.Connection, adapters: list[Any], budget: float = FET
 
     * ``due(cursor_row)`` returning False: not read in this run (the adapter's own cadence);
     * ``expand(cursor)``: more scopes to read (e.g. discovered Slack DMs), from this run's
-      cursor, or the previous one when this run's fetch failed.
+      cursor, or the previous one when this run's fetch failed. Scopes that left the list are
+      retired (no longer reported as stale).
 
     After a rate-limit error the remaining scopes of that source wait for the next run."""
     started = time.monotonic()
@@ -52,7 +53,7 @@ def fetch_all(conn: sqlite3.Connection, adapters: list[Any], budget: float = FET
         if due is not None and not due(row):
             report[key] = {"skipped": "not due"}
             continue
-        cursor = (row or {}).get("cursor")
+        cursor = previous = (row or {}).get("cursor")
         try:
             result = adapter.fetch(cursor, (row or {}).get("last_success_at"))
         except SourceError as exc:
@@ -71,7 +72,11 @@ def fetch_all(conn: sqlite3.Connection, adapters: list[Any], budget: float = FET
                 cursor = result.cursor
         expand = getattr(adapter, "expand", None)
         if expand is not None:
-            queue.extend(expand(cursor))
+            current = expand(cursor)
+            queue.extend(current)
+            if cursor != previous:
+                dropped = {a.scope for a in expand(previous)} - {a.scope for a in current}
+                retire_scopes(conn, adapter.name, dropped)
     return report
 
 

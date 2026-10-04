@@ -21,13 +21,15 @@ ENTRIES = ("intake", "feedback")
 
 def stale_sources(conn: sqlite3.Connection, sources: tuple[str, ...] | None = None) -> dict[str, list[dict[str, Any]]]:
     """Failing or stale source scopes, grouped by source. A scope may go ``STALE_SOURCE_MINUTES``
-    plus its own polling interval (cursor meta ``poll_interval_minutes``) without a success."""
+    plus its own polling interval (cursor meta ``poll_interval_minutes``) without a success;
+    retired scopes (dropped from a discovered list) are left out."""
     found: dict[str, list[dict[str, Any]]] = {}
     for r in conn.execute("SELECT * FROM cursors ORDER BY source, scope"):
-        if sources is not None and r["source"] not in sources:
+        meta = loads(r["meta"], {})
+        if (sources is not None and r["source"] not in sources) or meta.get("retired"):
             continue
         age = clock.minutes_since(r["last_success_at"])
-        allowed = STALE_SOURCE_MINUTES + int(loads(r["meta"], {}).get("poll_interval_minutes") or 0)
+        allowed = STALE_SOURCE_MINUTES + int(meta.get("poll_interval_minutes") or 0)
         if r["consecutive_failures"] or age is None or age > allowed:
             found.setdefault(r["source"], []).append(dict(r))
     return found

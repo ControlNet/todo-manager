@@ -1,16 +1,17 @@
 """Slack adapter (Web API, read-only) with a user/bot token from a private file or an environment variable.
 
 * Read scope: the conversations listed in ``slack.conversations``, plus - when
-  ``slack.direct_messages`` / ``slack.group_direct_messages`` is on - every DM / group DM of the
-  user, discovered each run by ``SlackDirectory`` (so new DMs are included without config changes).
+  ``slack.direct_messages`` / ``group_direct_messages`` / ``channels`` is on - every DM, group DM
+  or channel the user is a member of, discovered each run by ``SlackDirectory`` (new ones are
+  included without config changes) minus the ``slack.exclude`` blacklist.
 * Threaded replies are keyed by thread (``slack:<channel>:<thread_ts>``); unthreaded chat is
   keyed by the whole channel/DM (no guessing of topic boundaries in v1).
 * Each read re-reads an overlap window so edits (new ``edited.ts`` version) and deletions
   (a stored message missing from the window) become versioned items. Reactions and other
   non-semantic changes produce nothing.
-* Cadence: a conversation with a message in the last ``active_hours`` is read every run; a
-  quiet one at most once per ``quiet_poll_minutes`` (staggered per conversation), which keeps
-  dozens of DMs within Slack's rate limits.
+* Cadence: a conversation with a human (non-bot) message in the last ``active_hours`` is read
+  every run; a quiet one at most once per ``quiet_poll_minutes`` (staggered per conversation),
+  which keeps dozens of conversations within Slack's rate limits.
 * The batch quiet window (>= 30 min) is applied by ``batching`` on message time.
 """
 
@@ -19,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import zlib
+from fnmatch import fnmatchcase
 from datetime import datetime, timedelta, timezone
 from functools import cached_property
 from typing import Any, Callable
@@ -67,8 +69,11 @@ class SlackApi:
 
 
 class SlackDirectory(SlackApi):
-    """Lists the user's DMs (``im``) and group DMs (``mpim``) so that all of them are read.
+    """Lists the user's DMs (``im``), group DMs (``mpim``) and member channels
+    (``public_channel``, ``private_channel``) so that all of them are read.
 
+    ``exclude`` is a blacklist; an entry matches a conversation id, a DM partner's user id, or a
+    channel / group DM name (glob, case-insensitive, optional leading ``#``).
     The list is the cursor: when listing fails, the last known conversations are still read.
     ``expand`` turns it into one ``SlackSource`` per conversation (built by ``make``)."""
 
@@ -76,23 +81,36 @@ class SlackDirectory(SlackApi):
     scope = "directory"
 
     def __init__(self, *, token: Callable[[], str], types: list[str], make: Callable[..., "SlackSource"],
-                 page_size: int = 200, http: Callable[..., Any] = request_json):
+                 exclude: list[str] | None = None, page_size: int = 200, http: Callable[..., Any] = request_json):
         self.token = token
         self.types = list(types)
         self.make = make
+        self.exclude = list(exclude or [])
         self.page_size = page_size
         self.http = http
+
+    def excluded(self, conv: dict[str, Any]) -> bool:
+        keys = {conv["id"], conv.get("user") or ""}
+        name = (conv.get("name") or "").lower()
+        for entry in self.exclude:
+            if entry in keys or (name and fnmatchcase(name, entry.lower().lstrip("#"))):
+                return True
+        return False
 
     def fetch(self, cursor: str | None, last_success_at: str | None = None) -> FetchResult:
         found = []
         for conv in self._paged("users.conversations", {"types": ",".join(self.types), "exclude_archived": "true"},
                                 key="channels"):
+            if self.excluded(conv):
+                continue
             if conv.get("is_im"):
                 if conv.get("user") == SLACKBOT:
                     continue
                 found.append({"id": conv["id"], "peer": conv.get("user")})
-            else:
+            elif conv.get("is_mpim"):
                 found.append({"id": conv["id"], "title": f"group DM ({conv.get('name') or conv['id']})"})
+            else:
+                found.append({"id": conv["id"], "title": f"#{conv.get('name') or conv['id']}"})
         return FetchResult(scope=self.scope, items=[], cursor=json.dumps({"conversations": found}),
                            meta={"conversations": len(found)})
 
@@ -130,7 +148,7 @@ class SlackSource(SlackApi):
 
     def due(self, cursor_row: dict[str, Any] | None) -> bool:
         """Read in this run? Always without a quiet interval, when never read successfully, or
-        with a message in the last ``active_hours``; otherwise once per ``quiet_poll_minutes``
+        with a human message in the last ``active_hours``; otherwise once per ``quiet_poll_minutes``
         slot, offset per conversation so quiet conversations are not all read in one burst."""
         if not self.quiet_poll or not cursor_row or not cursor_row.get("cursor") \
                 or not cursor_row.get("last_success_at"):
@@ -215,8 +233,9 @@ class SlackSource(SlackApi):
                                   kind="deletion", conversation_key=f"slack:{self.channel}",
                                   thread_key=f"slack:{self.channel}", occurred_at=clock.iso(started),
                                   title="(message deleted)", body="", meta={"deleted": True}))
+        # Last human message: bot traffic alone does not make a conversation active.
         last_message = max([float(state.get("last_message") or 0)]
-                           + [float(i.meta["ts"]) for i in items if i.kind != "deletion"])
+                           + [float(i.meta["ts"]) for i in items if i.kind != "deletion" and i.route == "batch"])
         new_state = {"newest": max_ts, "last_message": last_message or None,
                      "window_ids": sorted(i for i in seen_ids if float(i.split(":")[1]) >= max_ts - self.overlap * 60)}
         meta: dict[str, Any] = {"messages": len(items), "threads": len(threads)}

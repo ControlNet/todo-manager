@@ -68,9 +68,11 @@ def conversation_sources(cfg: Config) -> list[Any]:
 
         for conv in slack.get("conversations", []):
             adapters.append(make(conv))
-        types = [kind for kind, key in (("im", "direct_messages"), ("mpim", "group_direct_messages")) if slack.get(key)]
-        if types:   # every DM / group DM of the user, discovered each run (explicit ids above are not read twice)
-            adapters.append(SlackDirectory(token=token, types=types, make=make,
+        types = [kind for kind, key in (("im", "direct_messages"), ("mpim", "group_direct_messages"),
+                                        ("public_channel", "channels"), ("private_channel", "channels"))
+                 if slack.get(key)]
+        if types:   # every DM / group DM / member channel, discovered each run (explicit ids above are not read twice)
+            adapters.append(SlackDirectory(token=token, types=types, make=make, exclude=slack.get("exclude", []),
                                            page_size=int(slack.get("page_size", 200))))
     return adapters
 

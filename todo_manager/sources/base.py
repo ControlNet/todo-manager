@@ -82,8 +82,18 @@ def record_fetch_error(conn: sqlite3.Connection, source: str, scope: str, error:
         conn.execute(
             "INSERT INTO cursors(source, scope, last_attempt_at, last_error, consecutive_failures)"
             " VALUES (?,?,?,?,1) ON CONFLICT(source, scope) DO UPDATE SET last_attempt_at=excluded.last_attempt_at,"
-            " last_error=excluded.last_error, consecutive_failures=cursors.consecutive_failures+1",
+            " last_error=excluded.last_error, consecutive_failures=cursors.consecutive_failures+1,"
+            " meta=json_remove(COALESCE(cursors.meta, '{}'), '$.retired')",
             (source, scope, now, error[:1000]))
+
+
+def retire_scopes(conn: sqlite3.Connection, source: str, scopes: set[str]) -> None:
+    """Scopes that left a discovered list (e.g. a blacklisted channel): keep the cursor, stop
+    reporting it as stale. Reading the scope again clears the mark (``persist_fetch`` replaces meta)."""
+    with tx(conn):
+        for scope in sorted(scopes):
+            conn.execute("UPDATE cursors SET meta=json_set(COALESCE(meta, '{}'), '$.retired', json('true'))"
+                         " WHERE source=? AND scope=?", (source, scope))
 
 
 def persist_fetch(conn: sqlite3.Connection, source: str, result: FetchResult) -> dict[str, int]:
