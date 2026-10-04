@@ -63,6 +63,13 @@ DEFAULTS: dict[str, Any] = {
         "quiet_poll_minutes": 30,  # agreed: other conversations are read at most this often (staggered)
         "quiet_minutes": 30,  # agreed: >= 30 minutes after the last relevant message
         "page_size": 200,
+        # Replies in threads older than the re-read window (PROPOSED values): threads active in the
+        # last thread_watch_days are watched (at most thread_index_max per conversation); older
+        # parents are scanned every thread_scan_minutes, at most thread_scan_pages history pages.
+        "thread_watch_days": 30,
+        "thread_index_max": 200,
+        "thread_scan_minutes": 60,
+        "thread_scan_pages": 5,
     },
     "github": {
         "enabled": False,

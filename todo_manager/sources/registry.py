@@ -64,7 +64,11 @@ def conversation_sources(cfg: Config) -> list[Any]:
                                my_user_ids=ident.get("slack_user_ids", []), page_size=int(slack.get("page_size", 200)),
                                user_names=names, peer=peer, title=title,
                                active_hours=int(slack.get("active_hours", 168)),
-                               quiet_poll_minutes=int(slack.get("quiet_poll_minutes", 30)))
+                               quiet_poll_minutes=int(slack.get("quiet_poll_minutes", 30)),
+                               thread_watch_days=int(slack.get("thread_watch_days", 30)),
+                               thread_index_max=int(slack.get("thread_index_max", 200)),
+                               thread_scan_minutes=int(slack.get("thread_scan_minutes", 60)),
+                               thread_scan_pages=int(slack.get("thread_scan_pages", 5)))
 
         for conv in slack.get("conversations", []):
             adapters.append(make(conv))
