@@ -181,3 +181,42 @@ class BudgetTests(Base):
         rest = {i["id"] for i in intake.run_new_items(self.conn, run_id_of(out))}
         self.assertFalse(rest & set(first))
         self.assertEqual(self.states("slack:C1:T1").count("processed"), 0, "a failed segment is not processed")
+
+
+class QuietSegmentTests(Base):
+    """B08: the unprocessed tail of a segmented conversation is still subject to the quiet
+    window: new activity in that conversation holds every unclaimed segment until it is quiet
+    again (>= 30 minutes for Slack). A segment already claimed by a run is finished by that run;
+    the new messages follow in a later run, after the quiet window."""
+
+    def slack_sources(self, out):
+        return [i for i in intake.run_new_items(self.conn, run_id_of(out)) if i["source"] == "slack"]
+
+    def test_new_activity_holds_the_unclaimed_tail_until_quiet(self):
+        self.huge_thread()
+        out = self.gate()
+        self.assertTrue(self.slack_sources(out))
+        self.finish(out)
+        self.slack.push(slack("500.0", "C1", "wait, one more thing about the data", thread="T1"))
+        for _ in range(2):                                 # the conversation is active again
+            out = self.gate()
+            self.assertFalse(wake_of(out) and bool(self.slack_sources(out)),
+                             "the tail is not processed while the conversation is active")
+            clock.advance(minutes=5)
+        clock.advance(minutes=31)
+        out = self.gate()
+        self.assertTrue(wake_of(out))
+        self.assertTrue(bool(self.slack_sources(out)), "quiet again: the tail goes first")
+        newest = self.conn.execute("SELECT id FROM source_items WHERE external_id='C1:500.0'").fetchone()[0]
+        self.assertNotIn(newest, [i["id"] for i in self.slack_sources(out)], "message order is kept")
+
+    def test_a_claimed_segment_is_finished_by_its_run(self):
+        self.huge_thread()
+        out = self.gate()
+        claimed = sorted(i["id"] for i in self.slack_sources(out))
+        self.slack.push(slack("500.0", "C1", "new message while the run works", thread="T1"))
+        self.gate()
+        self.finish(out)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM source_items WHERE id IN (%s) AND state='processed'" % ",".join("?" * len(claimed)),
+            claimed).fetchone()[0], len(claimed))

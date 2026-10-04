@@ -19,7 +19,10 @@ Budget: ``wake.max_context_chars`` bounds the whole rendered context and
 rules, open tasks, follow-ups, digest, format - leaves). A conversation larger than one run is
 split into segments in message order; the later segment is a separate mature batch that waits
 while an earlier segment of the same conversation is in flight, and is never marked processed
-before it was rendered and decided.
+before it was rendered and decided. A segment not yet claimed is still under the quiet window:
+new activity in its conversation (an accumulating, unforced batch) holds it until that batch
+matures, so the backlog of an active chat is not analysed mid-conversation. A segment already
+claimed is finished by its run; the new messages follow in message order.
 """
 
 from __future__ import annotations
@@ -108,10 +111,12 @@ def plan_intake_wake(conn: sqlite3.Connection, cfg: Config, extra_reasons: list[
     is the size of the context without evidence."""
     plan = WakePlan(wake=False, reasons=list(extra_reasons or []))
     budget = evidence_budget(cfg, base_chars)
-    # A later segment of a conversation waits while an earlier one is in flight (message order).
+    # A later segment of a conversation waits while an earlier one is in flight (message order),
+    # and every unclaimed segment waits while the conversation is active again (quiet window).
     rows = conn.execute(
         "SELECT id, source FROM batches b WHERE state='mature' AND NOT EXISTS (SELECT 1 FROM batches o"
-        " WHERE o.source=b.source AND o.conversation_key=b.conversation_key AND o.state='claimed')"
+        " WHERE o.source=b.source AND o.conversation_key=b.conversation_key AND (o.state='claimed'"
+        " OR (o.state='accumulating' AND o.forced=0 AND b.forced=0)))"
         " ORDER BY matured_at, first_item_at").fetchall()
     by_source: dict[str, list[str]] = {}
     for row in rows:
