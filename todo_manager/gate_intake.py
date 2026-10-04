@@ -155,7 +155,7 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[
             f"Wake reasons: {', '.join(plan.reasons)}",
             f"Conversations claimed: {len(claimed)}; follow-ups due: {len(followups)};"
             f" commit digest: {'yes' if digest else 'no'}",
-            f"Do: load skill todo-manager, run `tm intake show {run_id}`, decide, then `tm intake apply {run_id} --file <decisions.json>`.",
+            f"Do: load skill todo-manager, run `todo-manager intake show {run_id}`, decide, then `todo-manager intake apply {run_id} --file <decisions.json>`.",
             '{"wakeAgent": true}',
         ]
         return "\n".join(lines), True

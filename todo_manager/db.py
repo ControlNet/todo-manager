@@ -208,7 +208,7 @@ CREATE TABLE feedback (
   payload TEXT NOT NULL DEFAULT '{}',
   scope_type TEXT NOT NULL CHECK (scope_type IN ('task','project','delegation','global')),
   scope_id TEXT,
-  kind TEXT,
+  kind TEXT,                    -- comment | property_edit | new_task | delegate_request | body_edit | ...
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending','applied','clarify','ignored','superseded','failed')),
   result TEXT,
@@ -405,13 +405,15 @@ CREATE TABLE notion_pages (
   page_id TEXT PRIMARY KEY,
   entity_type TEXT NOT NULL CHECK (entity_type IN ('task','project','home')),
   entity_id TEXT,
+  url TEXT,
   last_edited_time TEXT,
-  last_seen_props TEXT NOT NULL DEFAULT '{}',
-  last_pushed_hash TEXT,
-  managed_block_id TEXT,
-  managed_hash TEXT,
+  last_edited_by TEXT,
+  last_seen_props TEXT NOT NULL DEFAULT '{}',  -- normalised values as last read or written
+  rendered_hash TEXT,                          -- hash of the managed region we last rendered
+  managed_hash TEXT,                           -- fingerprint of that region as Notion stores it
+  trashed INTEGER NOT NULL DEFAULT 0,
   comments_checked_at TEXT,
-  hot_until TEXT,
+  last_comment_at TEXT,
   UNIQUE (entity_type, entity_id)
 );
 CREATE TABLE notion_comments (
@@ -420,11 +422,13 @@ CREATE TABLE notion_comments (
   discussion_id TEXT,
   author_id TEXT,
   is_bot INTEGER NOT NULL DEFAULT 0,
+  ref TEXT,                                    -- for our own comments: the logical key (e.g. dlv:<id>)
   last_edited_time TEXT,
   content_hash TEXT NOT NULL,
   feedback_id TEXT,
   seen_at TEXT NOT NULL
 );
+CREATE INDEX notion_comments_discussion ON notion_comments(discussion_id);
 """,
 }
 

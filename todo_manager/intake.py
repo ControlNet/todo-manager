@@ -50,7 +50,7 @@ def _clip(text: str, limit: int) -> str:
     text = text.strip()
     if len(text) <= limit:
         return text
-    return text[:limit] + f"\n[... {len(text) - limit} more chars; `tm source show <id>` for full text]"
+    return text[:limit] + f"\n[... {len(text) - limit} more chars; `todo-manager source show <id>` for full text]"
 
 
 # --------------------------------------------------------------------------- manifest helpers
@@ -208,7 +208,7 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, manifest:
 
     out.append("\n## Output")
     out.append(f"Write the decisions JSON (see skill 'todo-manager', section Intake decisions) with run_id={run_id}"
-               f" and rules_version={rv}, then run: tm intake apply {run_id} --file <path>")
+               f" and rules_version={rv}, then run: todo-manager intake apply {run_id} --file <path>")
     return "\n".join(out)
 
 
