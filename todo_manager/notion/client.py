@@ -72,8 +72,10 @@ class NotionClient:
         return request_json(method, API + path, headers=headers, params=params, body=body, timeout=self.timeout,
                             limiter=self.limiter, max_429_retries=0)
 
-    def request(self, method: str, path: str, *, params: dict[str, Any] | None = None, body: Any = None) -> Any:
-        idempotent = method in ("GET", "DELETE")
+    def request(self, method: str, path: str, *, params: dict[str, Any] | None = None, body: Any = None,
+                read_only: bool = False) -> Any:
+        """``read_only`` marks a POST that only reads (data source queries): safe to retry."""
+        idempotent = read_only or method in ("GET", "DELETE")
         attempt = 0
         while True:
             self.requests += 1
@@ -132,7 +134,7 @@ class NotionClient:
                 b = dict(body or {}, page_size=100)
                 if cursor:
                     b["start_cursor"] = cursor
-                data = self.request(method, path, body=b)
+                data = self.request(method, path, body=b, read_only=True)
             yield from data.get("results", [])
             if not data.get("has_more"):
                 return

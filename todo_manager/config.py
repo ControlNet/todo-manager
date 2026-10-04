@@ -1,7 +1,9 @@
 """Runtime configuration.
 
 The workspace (``TODO_HOME``, default ``~/.hermes/workspace/todo-manager``) holds a
-``config.toml`` that overrides the defaults below. Secrets are never stored here;
+``config.toml`` that overrides the defaults below, plus ALL runtime data (database, run
+manifests, locks, exports, backups). It must lie outside the source tree, which is
+meant to be publishable as is. Secrets are never stored here;
 connectors reference environment variable names (optionally loaded from an env file
 such as ``~/.hermes/.env``).
 
@@ -67,14 +69,16 @@ DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "token_env": "NOTION_API_KEY",
         "env_file": "~/.hermes/.env",
-        "api_version": "2025-09-03",
+        "api_version": "2026-03-11",  # markdown + views endpoints need this version
         "tasks_data_source_id": "",
         "projects_data_source_id": "",
         "home_page_id": "",
         "bot_user_id": "",
         "min_request_interval_seconds": 0.4,
         "active_poll_minutes": 5,
-        "history_poll_hours": 24,  # PROPOSED low-frequency sweep of inactive pages
+        "cold_comment_poll_minutes": 60,  # PROPOSED: open tasks without recent activity
+        "cold_comment_pages_per_run": 30,  # PROPOSED: round-robin budget per gate run
+        "history_poll_hours": 24,  # PROPOSED low-frequency sweep of recently closed pages
     },
     "kanban": {
         "enabled": False,
@@ -85,7 +89,14 @@ DEFAULTS: dict[str, Any] = {
     },
     "notify": {
         "matrix": False,  # short link reminders only for important deliveries/blocks/failures
+        "matrix_target": "",  # `hermes send -t` target, e.g. "matrix:<dm name>" (confirm with the user)
+        "hermes_bin": "hermes",
         "failure_alert_after_minutes": 60,
+    },
+    "feedback": {
+        "max_items_per_run": 20,
+        "stale_claim_minutes": 60,
+        "max_attempts": 3,
     },
     "wake": {
         # Upper bound on items rendered into one model context; the rest wait for next run.
@@ -130,11 +141,25 @@ class Config:
         return self.home / "state" / "todo.sqlite"
 
 
+# The checkout/installation this code runs from. Runtime data never lives under it.
+SOURCE_ROOT = Path(__file__).resolve().parent.parent
+
+
+class ConfigError(ValueError):
+    pass
+
+
 def resolve_home(home: str | os.PathLike[str] | None = None) -> Path:
     if home:
-        return Path(home).expanduser()
-    env = os.environ.get("TODO_HOME")
-    return Path(env).expanduser() if env else DEFAULT_HOME
+        path = Path(home).expanduser()
+    else:
+        env = os.environ.get("TODO_HOME")
+        path = Path(env).expanduser() if env else DEFAULT_HOME
+    resolved = path.resolve()
+    if resolved == SOURCE_ROOT or SOURCE_ROOT in resolved.parents:
+        raise ConfigError(f"TODO_HOME {path} is inside the source tree {SOURCE_ROOT}; runtime data belongs in the"
+                          f" Hermes workspace (default {DEFAULT_HOME})")
+    return path
 
 
 def load(home: str | os.PathLike[str] | None = None, overrides: dict[str, Any] | None = None) -> Config:

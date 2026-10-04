@@ -367,12 +367,8 @@ class NotionSync:
         notes: list[str] = []
         active = delegation.for_task(self.conn, after["id"], active_only=True)
         if "status" in changed and after["status"] in store.CLOSED_STATUSES:
-            for d in active:
-                kind = "accept" if d["status"] == "review" and after["status"] == "done" else "cancel"
-                delegation.add_message(self.conn, d["id"], kind, f"用户在 Notion 将事项标为{schema.TASK_STATUS_LABELS[after['status']]}",
-                                       feedback_id=fid)
-                notes.append(f"{kind}:{d['id']}")
-            return notes
+            return delegation.on_task_closed(self.conn, after["id"], after["status"],
+                                             f"用户在 Notion 将事项标为{schema.TASK_STATUS_LABELS[after['status']]}", fid)
         if "next_actor" in changed and after["next_actor"] == "agent" and before["next_actor"] != "agent" and not active:
             feedback.record(self.conn, origin="notion_property", source_id=after["id"],
                             source_version=f"delegate:{fid}", text="用户把“下一步由谁”设为 Agent",
@@ -422,8 +418,7 @@ class NotionSync:
                 store.update_task(self.conn, task["id"], {"status": "cancelled"}, actor="human", origin="notion",
                                   cause_ref=fid)
                 store.set_closed_reason(self.conn, task["id"], TRASH_REASON)
-                for d in delegation.for_task(self.conn, task["id"], active_only=True):
-                    delegation.add_message(self.conn, d["id"], "cancel", TRASH_REASON, feedback_id=fid)
+                delegation.on_task_closed(self.conn, task["id"], "cancelled", TRASH_REASON, fid)
 
     def _page_restored(self, kind: str, row: dict[str, Any], page: dict[str, Any]) -> None:
         with tx(self.conn):
@@ -764,6 +759,31 @@ class NotionSync:
                 self.conn.execute("UPDATE notion_pages SET last_comment_at=? WHERE page_id=?",
                                   (clock.iso(), target["page_id"]))
         return "edited" if prev is not None else "new"
+
+    # ================================================================== home page
+
+    def sync_home(self, sections: dict[str, Any]) -> str:
+        """Rewrite the freshness callout on the home page when its content changed."""
+        home = self.state.home_page_id
+        if not home:
+            return "no home page"
+        rendered = body.render(sections, marker=HOME_MARKER)
+        if get_meta(self.conn, "notion.home_hash") == _h(rendered):
+            return "unchanged"
+        doc = self.client.page_markdown(home)
+        region = body.extract(doc.get("markdown") or "", HOME_MARKER)
+        if region is not None and body.content_fingerprint(region) == body.content_fingerprint(rendered):
+            command = None
+        elif region is not None:
+            command = {"type": "update_content",
+                       "update_content": {"content_updates": [{"old_str": region, "new_str": rendered}]}}
+        else:
+            command = {"type": "insert_content", "insert_content": {"content": rendered, "position": {"type": "start"}}}
+        if command:
+            self.client.update_markdown(home, command)
+        with tx(self.conn):
+            set_meta(self.conn, "notion.home_hash", _h(rendered))
+        return "updated" if command else "already current"
 
     # ================================================================== dirty scan
 

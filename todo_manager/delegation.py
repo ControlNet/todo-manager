@@ -233,8 +233,11 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[st
 
 
 def _notion_url(conn: sqlite3.Connection, task: dict[str, Any]) -> str | None:
-    page = task.get("notion_page_id")
-    return f"https://www.notion.so/{page.replace('-', '')}" if page else None
+    row = conn.execute("SELECT page_id, url FROM notion_pages WHERE entity_type='task' AND entity_id=?",
+                       (task["id"],)).fetchone()
+    if row is None:
+        return None
+    return row["url"] or f"https://www.notion.so/{row['page_id'].replace('-', '')}"
 
 
 def _status_from_card(card_status: str, d: dict[str, Any]) -> str:
@@ -303,7 +306,7 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
                 text = (f"❓ Agent 需要你补充（{d['title']}）：{reason}" if delivery_kind == "question"
                         else f"⚠️ Agent 执行失败（{d['title']}），需要你决定重试或取消。")
                 effects.task_comment(conn, d["task_id"], f"dlv:{dlv}", text)
-                effects.notify(conn, cfg, f"dlv:{dlv}", text)
+                effects.notify(conn, cfg, f"dlv:{dlv}", text, task_id=d["task_id"])
         elif kind in ("crashed", "timed_out", "spawn_failed"):
             _set(conn, d["id"], last_error=f"{kind}: {payload.get('error') or payload.get('reason') or ''}"[:500])
         elif kind == "gave_up":
@@ -316,7 +319,7 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
                 stats["failures"] += 1
                 text = f"⚠️ Agent 执行失败（{d['title']}）：{block_reason}。回复“重试”或“取消”。"
                 effects.task_comment(conn, d["task_id"], f"dlv:{dlv}", text)
-                effects.notify(conn, cfg, f"dlv:{dlv}", text)
+                effects.notify(conn, cfg, f"dlv:{dlv}", text, task_id=d["task_id"])
         elif kind == "completed" and _accepted_by_us(conn, d["id"]):
             continue
         elif kind in ("review_requested", "completed"):
@@ -336,7 +339,7 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
                              " AND consumed_at IS NULL AND revoked_at IS NULL", (clock.iso(), d["id"], dlv))
                 text = f"📦 Agent 交付 v{seq}（{d['title']}）：{summary[:300]}"
                 effects.task_comment(conn, d["task_id"], f"dlv:{dlv}", text)
-                effects.notify(conn, cfg, f"dlv:{dlv}", text)
+                effects.notify(conn, cfg, f"dlv:{dlv}", text, task_id=d["task_id"])
     card_status = snap["task"]["status"]
     new_status = _status_from_card(card_status, {**d, "status": d["status"]})
     if card_status == "done" and d["status"] != "ended":
@@ -416,6 +419,17 @@ def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: s
         elif kind == "resume":
             _set(conn, delegation_id, pause_requested=0)
     return mid
+
+
+def on_task_closed(conn: sqlite3.Connection, task_id: str, status: str, reason: str,
+                   feedback_id: str | None) -> list[str]:
+    """The user closed the task: accept a delivered delegation (done) and cancel the others."""
+    notes = []
+    for d in for_task(conn, task_id, active_only=True):
+        kind = "accept" if d["status"] == "review" and status == "done" else "cancel"
+        add_message(conn, d["id"], kind, reason, feedback_id=feedback_id)
+        notes.append(f"{kind}:{d['id']}")
+    return notes
 
 
 def record_approval(conn: sqlite3.Connection, delegation_id: str, delivery_id: str, action: str, detail: str,
