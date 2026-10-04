@@ -1,0 +1,135 @@
+"""Integration tests against the INSTALLED Hermes Kanban code in an isolated HERMES_HOME.
+
+Production boards/config are never touched: a temporary HERMES_HOME with
+``kanban.review_dispatch: false`` and ``kanban.auto_decompose: false`` is created per test
+class. Skipped when the Hermes interpreter is not available.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+from todo_manager import delegation, store
+from todo_manager.kanban import BridgeKanban
+from tests.helpers import WorkspaceCase
+
+HERMES_PY = Path(os.environ.get("TM_HERMES_PYTHON", "~/.hermes/hermes-agent/venv/bin/python")).expanduser()
+HERMES_REPO = Path(os.environ.get("TM_HERMES_REPO", "~/.hermes/hermes-agent")).expanduser()
+SIM = Path(__file__).with_name("hermes_worker_sim.py")
+BOARD = "tm-integration"
+
+
+@unittest.skipUnless(HERMES_PY.exists() and HERMES_REPO.exists(), "Hermes interpreter not available")
+class HermesKanbanIntegration(WorkspaceCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.hermes_home = Path(tempfile.mkdtemp(prefix="tm-hermes-home-"))
+        (cls.hermes_home / "config.yaml").write_text(
+            "kanban:\n  review_dispatch: false\n  auto_decompose: false\n", encoding="utf-8")
+        BridgeKanban(BOARD, str(HERMES_PY), str(HERMES_REPO), str(cls.hermes_home)).create_board("it", "integration")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.hermes_home, ignore_errors=True)
+
+    def setUp(self):
+        super().setUp()
+        self.kb = BridgeKanban(BOARD, str(HERMES_PY), str(HERMES_REPO), str(self.hermes_home))
+        self.cfg.data["kanban"]["assignee"] = "default"
+        self.task = store.create_task(self.conn, "回复评审邮件", origin="cli", actor="human")
+
+    def sim(self, op, **args):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("HERMES_KANBAN_")}
+        env["HERMES_HOME"] = str(self.hermes_home)
+        proc = subprocess.run([str(HERMES_PY), str(SIM)], input=json.dumps({"op": op, "board": BOARD,
+                              "hermes_repo": str(HERMES_REPO), **args}), capture_output=True, text=True, env=env,
+                              timeout=90, check=False)
+        lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("@@SIM@@")]
+        self.assertTrue(lines, proc.stderr[-1500:])
+        return json.loads(lines[-1][7:])
+
+    def tick(self):
+        delegation.send_messages(self.conn, self.cfg, self.kb)
+        delegation.submit_pending(self.conn, self.cfg, self.kb)
+        delegation.sync_cards(self.conn, self.cfg, self.kb)
+
+    def test_full_draft_cycle_against_real_kanban(self):
+        did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草回复", goal="Draft only",
+                                feedback_id="fbk_it_1")
+        self.tick()
+        d = delegation.get(self.conn, did)
+        card = d["card_id"]
+        self.assertTrue(card)
+        # Idempotent re-submission through the real create path returns the same card.
+        self.assertEqual(self.kb.create(title="x", body="y", idem_key=d["idem_key"], assignee="default",
+                                        tenant="todo-manager"), card)
+        self.assertEqual(len(self.kb.find(d["idem_key"], f"todo-manager-delegation: {did}")), 1)
+
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.assertTrue(self.sim("block", task_id=card, reason="收件人是谁？", kind="needs_input"))
+        self.tick()
+        self.assertEqual(delegation.get(self.conn, did)["status"], "blocked")
+        # Sticky: recompute + dispatcher do not resume a human-blocked card.
+        self.sim("recompute")
+        self.assertNotIn(card, self.sim("dispatch_dry")["spawned"])
+        self.assertEqual(self.sim("status", task_id=card)["status"], "blocked")
+
+        delegation.add_message(self.conn, did, "answer", "发给 Alice", feedback_id="fbk_it_2")
+        self.tick()
+        self.assertEqual(self.sim("status", task_id=card)["status"], "ready")
+
+        # Second question: the real loop breaker routes to triage; we still treat it as waiting.
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.assertTrue(self.sim("block", task_id=card, reason="要不要抄送 Bob？", kind="needs_input"))
+        self.tick()
+        self.assertEqual(self.sim("status", task_id=card)["status"], "triage")
+        self.assertEqual(delegation.get(self.conn, did)["status"], "blocked")
+        self.assertNotIn(card, self.sim("dispatch_dry")["spawned"])
+        delegation.add_message(self.conn, did, "answer", "不用抄送", feedback_id="fbk_it_3")
+        self.tick()
+        self.assertEqual(self.sim("status", task_id=card)["status"], "ready",
+                         "specify_triage_task moved it back without the LLM specifier")
+
+        # Delivery -> review waits for the human (review_dispatch false).
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.assertTrue(self.sim("review", task_id=card, summary="草稿完成",
+                                 metadata={"deliverable_markdown": "Dear Alice, ..."}))
+        self.tick()
+        self.assertEqual(delegation.get(self.conn, did)["status"], "review")
+        dispatch = self.sim("dispatch_dry")
+        self.assertFalse(dispatch["review_gate"])
+        self.assertNotIn(card, dispatch["spawned"])
+        dl = delegation.deliveries(self.conn, did)
+        self.assertEqual(dl[-1]["body"], "Dear Alice, ...")
+
+        # Revision goes back to the same card.
+        delegation.add_message(self.conn, did, "revision", "语气更委婉", feedback_id="fbk_it_4")
+        self.tick()
+        self.assertEqual(self.sim("status", task_id=card)["status"], "ready")
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.assertTrue(self.sim("review", task_id=card, summary="草稿 v2",
+                                 metadata={"deliverable_markdown": "Dear Alice (v2)"}))
+        self.tick()
+        delegation.add_message(self.conn, did, "accept", "可以了", feedback_id="fbk_it_5")
+        self.tick()
+        self.tick()
+        self.assertEqual(self.sim("status", task_id=card)["status"], "done")
+        self.assertEqual(delegation.get(self.conn, did)["status"], "ended")
+        self.assertEqual(len([x for x in delegation.deliveries(self.conn, did) if x["kind"] == "result"]), 2)
+        self.assertNotIn(store.get_task(self.conn, self.task)["status"], ("done", "cancelled"))
+        # Exactly one card for this delegation on the real board.
+        self.assertEqual(len(self.kb.find(d["idem_key"], f"todo-manager-delegation: {did}")), 1)
+
+    def test_archived_card_found_by_lookup(self):
+        did = delegation.create(self.conn, self.cfg, task_id=self.task, title="调查", goal="Investigate")
+        self.tick()
+        d = delegation.get(self.conn, did)
+        self.assertTrue(self.kb.archive(d["card_id"]))
+        matches = self.kb.find(d["idem_key"], f"todo-manager-delegation: {did}")
+        self.assertEqual([m["status"] for m in matches], ["archived"])

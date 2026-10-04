@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+# Never commit local runtime config or data if a workspace is pointed here by mistake
+/config.toml
+/state/
+/runs/
+/cache/
+/exports/
+/backups/
