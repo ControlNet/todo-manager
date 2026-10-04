@@ -796,6 +796,8 @@ class NotionSync:
             row = self.entity_row("task", t["id"])
             if row and row["trashed"]:
                 continue
+            if row is None and t["origin"] == "migration" and t["status"] in store.CLOSED_STATUSES:
+                continue  # migrated history: kept locally only, never shown in Notion
             task = dict(t)
             target = schema.comparable("task", self.task_values(task))
             stale_body = row is not None and row["rendered_hash"] != _h(body.render(self.task_sections(task)))

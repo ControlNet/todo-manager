@@ -228,6 +228,20 @@ class GmailSource:
         meta.update({"threads": len(batch), "queued": len(rest)})
         return FetchResult(scope=self.scope, items=items, cursor=json.dumps(new_state), complete=not rest, meta=meta)
 
+    def thread_key_for(self, gmail_id: str) -> str | None:
+        """Thread key for a message id (or a thread id), or None when this mailbox has neither."""
+        for path in (f"messages/{gmail_id}", f"threads/{gmail_id}"):
+            try:
+                data = self._get(path, {"format": "minimal"})
+            except SourceError as exc:
+                if "HTTP 404" in str(exc) or "HTTP 400" in str(exc):
+                    continue
+                raise
+            thread = data.get("threadId") or data.get("id")
+            if thread:
+                return f"gmail:{self.account}:{thread}"
+        return None
+
     def _thread_items(self, thread_id: str) -> list[Item]:
         try:
             data = self._get(f"threads/{thread_id}", {"format": "full"})

@@ -409,6 +409,40 @@ def cmd_restore(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_migrate(args: argparse.Namespace) -> int:
+    from . import migration
+    cfg, conn = _open(args)
+    if args.action == "fetch":
+        from .notion.client import NotionClient
+        root = migration.fetch_old(NotionClient.from_config(cfg), cfg, args.tasks_ds, args.projects_ds)
+        _print({"fetched": str(root), "next": f"todo-manager migrate propose {root}"})
+        return 0
+    root = Path(args.dir).expanduser()
+    if args.action == "propose":
+        _print({**migration.propose(root, cfg, set(args.bot_id or [])), "review": str(root / "summary.md")})
+        return 0
+    resolver = None
+    if args.resolve_threads:
+        from .sources.registry import conversation_sources
+        mailboxes = [a for a in conversation_sources(cfg) if a.name == "gmail"]
+
+        def resolver(old_id: str) -> str | None:
+            for box in mailboxes:
+                key = box.thread_key_for(old_id)
+                if key:
+                    return key
+            return None
+    try:
+        if not args.yes:
+            _print({"preview": migration.preview(conn, cfg, root, resolve_thread=resolver),
+                    "note": "nothing was written; re-run with --yes to import into the local database"})
+            return 0
+        _print(migration.apply(conn, cfg, root, dry_run=False, resolve_thread=resolver))
+    except ValueError as exc:
+        return _fail("INVALID", str(exc))
+    return 0
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     cfg = config.load(args.home)
     for sub in ("state", "runs", "exports", "backups", "notes"):
@@ -628,6 +662,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("file")
     s.add_argument("--yes", action="store_true")
     s.set_defaults(fn=cmd_restore)
+
+    s = sub.add_parser("migrate", help="proposal-based migration from the old Notion Todo Manager")
+    ms = s.add_subparsers(dest="action", required=True)
+    x = ms.add_parser("fetch", help="read-only copy of the old data sources into TODO_HOME/migration/")
+    x.add_argument("--tasks-ds", required=True)
+    x.add_argument("--projects-ds", required=True)
+    x = ms.add_parser("propose", help="classify old pages; writes summary.md, tasks.csv, projects.csv")
+    x.add_argument("dir")
+    x.add_argument("--bot-id", action="append", help="old automation's Notion bot user id (if not in meta.json)")
+    x = ms.add_parser("apply", help="import the reviewed proposal (preview unless --yes)")
+    x.add_argument("dir")
+    x.add_argument("--yes", action="store_true")
+    x.add_argument("--resolve-threads", action="store_true", help="look up Gmail thread ids (read-only)")
+    s.set_defaults(fn=cmd_migrate)
 
     from . import hermes_install
     hermes_install.add_parser(sub)
