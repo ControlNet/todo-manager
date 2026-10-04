@@ -42,8 +42,10 @@ are raised to 30.)
   message counts as yours only when it matches.
 - **Reminder target** (`notify.matrix`, `notify.matrix_target`): whether and where short Matrix
   reminders go (important deliveries, questions, failures).
-- **Hermes Kanban settings** (`review_dispatch`, `auto_decompose`): global switches, see
-  [board-protocol.md](board-protocol.md).
+- **Hermes Kanban settings** (`review_dispatch`, `auto_decompose`): global switches, both
+  `true` on this machine (checked 2026-10-04). Delegations stay local until you turn them off;
+  see [board-protocol.md](board-protocol.md). Also decide `kanban.max_retries` (default 1: a
+  failed worker run waits for you instead of an automatic retry).
 - **Model** for the two cron jobs (`hermes cron edit <id> --model … --provider …`); the jobs use
   the Hermes default unless set.
 - **Notion home page** and **migration** of an older system: both are production writes that

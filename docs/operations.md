@@ -77,12 +77,100 @@ Roll back completely:
 
 ## Export, backup, restore
 
+Two different things:
+
+- **Database snapshot** (`backup` / `restore`): one consistent SQLite file. It is the state of
+  this workspace (tasks, history, evidence, rules, feedback, delegations, deliveries, outbox,
+  cursors) but not the files next to it (delivery files, run context, config).
+- **Portable workspace** (`export` / `import`): everything needed to continue elsewhere:
+  `data.json` (every table, including source bodies and history), `workspace/config.toml` with
+  secret-looking values redacted (`token_env` / `token_file` names are kept, the secrets
+  themselves stay in your environment), `workspace/AGENTS.md`, `workspace/runs/` (decision files
+  and manifests) and `workspace/deliveries/` (delivery files copied out of the worker's scratch
+  space at sync time, with workspace-relative paths and SHA-256), plus Markdown views and a
+  `manifest.json` with a hash for every file and table. Not included: credentials, `backups/`,
+  earlier `exports/`, `notes/`, `migration/` working files and `state/hermes/` skill proposals.
+  History that exists only on the Hermes board (card comments, run logs) stays in Hermes; what
+  todo-manager needs from it (questions, answers, deliveries and their files, failures) is
+  already copied into its own tables when the card is synced.
+
 ```bash
-todo-manager export            # exports/<stamp>/: tasks/*.md, projects/*.md, rules/, views/home.md, data.json, manifest.json
+todo-manager export            # exports/<stamp>/: data.json, workspace/, tasks/*.md, projects/*.md, rules/, views/, manifest.json
 todo-manager export --verify   # also rebuilds a scratch database from data.json and compares every table
 todo-manager backup --keep 14  # consistent SQLite copy in backups/, keeps the newest 14
 todo-manager restore backups/todo-<stamp>.sqlite --yes   # integrity-checked; takes both gate locks
 ```
+
+Moving to a new directory or machine (the target must be absent or empty; nothing is written
+until the whole bundle has been checked against its manifest):
+
+```bash
+todo-manager export
+todo-manager import ~/.hermes/workspace/todo-manager/exports/<stamp> --into /path/to/new/todo-manager
+export NOTION_API_KEY=...        # secrets come from your environment again, never from the bundle
+todo-manager --home /path/to/new/todo-manager health
+todo-manager --home /path/to/new/todo-manager delegate list
+todo-manager --home /path/to/new/todo-manager delegate release-hold   # after checking the board
+```
+
+**No replay after an import or restore.** Claims of runs that no longer exist are released;
+Matrix reminders and Notion comments that may already have gone out are marked dead instead of
+being sent again (idempotent Notion state pushes stay queued); card submissions and messages to
+the board are held. `health` shows "delegations held since …" until you have compared the board
+(`hermes kanban --board todo-manager list --tenant todo-manager`) with `todo-manager delegate list` and run
+`delegate release-hold`. Old workers are never restarted by todo-manager; the next sync reads the
+board as it is.
+
+## Upgrading an existing workspace (schema migrations)
+
+This version uses schema v5 (v1 is the previous release): v2 binds delegation messages to Kanban
+events, v3 records pending Notion writes, v4 tracks page-body reads, v5 adds exactly-once
+decision application and follow-up checks. Every step is additive: no table or column is
+dropped and existing rows are kept; v5 marks follow-ups that were already surfaced as done so
+they are not shown again. You do not need to delete or rebuild the database.
+
+The migration runs when any command first opens the database with the new code. Before it, a
+consistent copy is written to `backups/pre-schema-v5-from-v<old>-<UTC stamp>.sqlite`.
+
+```bash
+todo-manager hermes pause --yes            # no gate runs during the upgrade
+todo-manager export --verify               # optional: a portable copy as well
+cd ~/src/todo-manager && git pull     # the new code
+todo-manager health                        # opens the database: migrates, then lists problems
+ls ~/.hermes/workspace/todo-manager/backups/pre-schema-v5-*
+todo-manager hermes install                # refresh scripts; jobs keep their paused state
+todo-manager hermes resume --yes
+```
+
+Expected: `health` runs without a traceback and a `pre-schema-v5-from-v1-*.sqlite` file exists.
+
+Rolling back to the previous code (verified on a scratch v1 workspace): the old code refuses a
+newer database ("database schema 5 is newer than this code"), and `restore` with the new code
+would migrate again, so the file is swapped while the jobs are paused. Changes made after the
+upgrade are lost (they stay in the set-aside file and the export).
+
+```bash
+todo-manager hermes pause --yes
+H=~/.hermes/workspace/todo-manager
+mv "$H/state/todo.sqlite" "$H/backups/todo-v5-set-aside.sqlite"   # keep, do not delete
+ls "$H/state"                       # no todo.sqlite-wal / -shm left (all connections closed)
+cp "$H"/backups/pre-schema-v5-from-v1-<stamp>.sqlite "$H/state/todo.sqlite"
+cd ~/src/todo-manager && git checkout <previous commit>
+todo-manager health                 # the previous code reads it
+```
+
+## Configuration added in this version
+
+| Key | Default | Meaning |
+|---|---|---|
+| `wake.max_evidence_chars` | 40000 | share of `wake.max_context_chars` for new evidence; the rest is rules, open tasks, follow-ups, format |
+| `wake.max_questions_per_run` | 3 | at most this many `ask` decisions (questions to you) per intake run |
+| `slack.thread_watch_days` | 30 | threads with a reply this recent are watched for new replies |
+| `slack.thread_index_max` | 200 | at most this many watched threads per conversation |
+| `slack.thread_scan_minutes` | 60 | how often older thread parents are scanned |
+| `slack.thread_scan_pages` | 5 | history pages per scan (the rest waits for the next scan) |
+| `notion.body_reads_per_run` | 10 | page bodies read per feedback run after an edit by someone other than the bot |
+| `kanban.max_retries` | 1 | Hermes per-card failure breaker: a failed run parks the card for you instead of a respawn |
 
 ## Migrating an older Notion todo system
 
