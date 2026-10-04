@@ -102,7 +102,7 @@ class EnglishSetupTests(NotionCase):
 
     def test_structure_is_created_in_english_and_round_trips(self):
         names = set(self.fake.data_sources[self.tasks_ds]["properties"])
-        self.assertTrue({"Task", "Status", "Next by", "Project", "TM ID", "Agent"} <= names, names)
+        self.assertTrue({"Task", "Status", "Next by", "Project", "TM ID", "Agent work"} <= names, names)
         options = [o["name"] for o in self.fake.data_sources[self.tasks_ds]["properties"]["Status"]["select"]["options"]]
         self.assertEqual(options, ["To do", "In progress", "Waiting", "To decide", "To review", "Done", "Cancelled"])
         self.assertEqual(self.sync.state.language, "en")
@@ -157,6 +157,11 @@ class InitLanguageTests(unittest.TestCase):
             self.assertEqual(cli.main(["--home", str(tmp), "init", "--language", "zh_CN"]), 0)
         self.assertIn('language = "zh-CN"', (tmp / "config.toml").read_text(encoding="utf-8"))
         self.assertEqual(config.load(tmp).language, "zh-CN")
+        self.assertIn("todo-manager", (tmp / "AGENTS.md").read_text(encoding="utf-8"))
+        (tmp / "AGENTS.md").write_text("local edits", encoding="utf-8")
+        with mock.patch("sys.stdout"):
+            cli.main(["--home", str(tmp), "init"])
+        self.assertEqual((tmp / "AGENTS.md").read_text(encoding="utf-8"), "local edits", "never overwritten")
 
 
 if __name__ == "__main__":

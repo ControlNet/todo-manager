@@ -447,13 +447,19 @@ def cmd_init(args: argparse.Namespace) -> int:
     cfg = config.load(args.home)
     for sub in ("state", "runs", "exports", "backups", "notes"):
         (cfg.home / sub).mkdir(parents=True, exist_ok=True)
+    agents = cfg.home / "AGENTS.md"
+    if not agents.exists():   # the workspace guide may be edited locally: never overwritten
+        from importlib import resources
+        agents.write_text(resources.files("todo_manager.hermes_assets").joinpath("workspace/AGENTS.md")
+                          .read_text(encoding="utf-8"), encoding="utf-8")
     target = cfg.home / "config.toml"
     created = False
     language = i18n.normalize(args.language) if args.language else i18n.from_environment()
     if args.language and not language:
         raise SystemExit(f"unsupported language {args.language!r}; choose one of {', '.join(i18n.LANGUAGES)}")
     if not target.exists():
-        target.write_text(CONFIG_TEMPLATE.replace('language = "en"', f'language = "{language}"'), encoding="utf-8")
+        target.write_text(CONFIG_TEMPLATE.replace('language = "en"', f'language = "{language}"')
+                          .replace('timezone = "UTC"', f'timezone = "{config.local_timezone()}"'), encoding="utf-8")
         created = True
     else:
         language = config.load(args.home).language   # an existing config is never rewritten
@@ -466,7 +472,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 CONFIG_TEMPLATE = """\
 # Todo Manager runtime configuration. Secrets are NOT stored here: connectors name
 # environment variables (optionally loaded from notion.env_file).
-timezone = "Pacific/Auckland"
+timezone = "UTC"     # IANA name; `init` fills in the system time zone
 # Language of what you read in Notion, replies and reminders: en, zh-CN.
 # Notion property/option names keep the language used at `notion setup`.
 language = "en"

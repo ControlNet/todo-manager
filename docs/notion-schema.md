@@ -1,0 +1,154 @@
+# Notion structure and mapping
+
+Todo Manager keeps its own SQLite database as the source of truth. Notion is the place where
+you read and edit: a home page with seven sections, a **Projects** database and a **Tasks**
+database. `todo-manager notion plan` prints exactly what `notion setup` will create.
+
+Names below are shown in English and Simplified Chinese. The language is chosen once at
+`notion setup` (from `language` in `config.toml`) and stored in the local state, so changing
+the configured language later does not rename anything in Notion; option names of every
+supported language are understood when reading your edits.
+
+## Setup
+
+Notion internal integrations cannot create top-level workspace pages, so either:
+
+- create an empty page yourself, share it with the integration and run
+  `todo-manager notion setup --home-page <page id> --yes` (the page is adopted: a freshness box
+  and the seven section headings are inserted at the top; existing content stays below), or
+- `todo-manager notion setup --parent <page id> --yes` to create a new "Todo Manager" page
+  under a page that is already shared with the integration.
+
+Re-running setup only creates what is missing. Property ids, data source ids, view ids, the
+bot user id and the structure language are recorded in the `meta` table, so renaming a
+column or a view in Notion does not break the sync.
+
+## Tasks
+
+| Field | Type | Edited by | en | zh-CN |
+|---|---|---|---|---|
+| `title` | title | you | Task | 任务 |
+| `status` | select | you | Status | 状态 |
+| `next_actor` | select | you | Next by | 下一步由谁 |
+| `project_id` | relation → Projects | you | Project | 项目 |
+| `next_step` | text | you | Next step | 下一步 |
+| `waiting_on` | text | you | Waiting on | 等待对象 |
+| `due_date` | date | you | Due | 截止日期 |
+| `follow_up_date` | date | you | Follow up | 跟进日期 |
+| `snooze_until` | date | you | Snoozed until | 暂缓至 |
+| `focus` | checkbox | you | Focus | 精选 |
+| `change_note` | text | you | What changed | 变化 |
+| `delegation` | select | Todo Manager | Agent work | 委派 |
+| `source` | select | Todo Manager | Source | 来源 |
+| `tm_id` | text | Todo Manager | TM ID | TM ID |
+| `updated` | last edited time | Notion | Updated | 更新于 |
+
+"Edited by you" fields are imported back as your edits (they win over later agent
+judgements, see below). Fields owned by Todo Manager are rewritten from local state; a manual
+edit to them is reverted on the next push.
+
+### Status and next actor
+
+| Local value | en | zh-CN | Meaning |
+|---|---|---|---|
+| `todo` | To do | 待办 | Open, nobody working on it yet |
+| `in_progress` | In progress | 进行中 | Being worked on (by you or an agent) |
+| `waiting` | Waiting | 等待 | Someone else acts next; `waiting_on` + `follow_up_date` |
+| `decision` | To decide | 需要决定 | A real choice only you can make |
+| `review` | To review | 待我验收 | An agent delivered, or asks for your input |
+| `done` | Done | 完成 | Closed: fulfilled |
+| `cancelled` | Cancelled | 取消 | Closed: not needed |
+
+Next actor: `me` Me / 我, `agent` Agent / Agent, `external` Others / 外部.
+
+The pair is normalised so it can never contradict itself: `waiting` always means next actor
+`external` (and choosing "Others" makes the task `waiting`); `decision`, `review`, `done` and
+`cancelled` mean `me`; `todo` / `in_progress` go with `me` or `agent`. Snoozing (`snooze_until`)
+is independent of the status. A real external deadline (`due_date`, with its basis recorded in
+the page body) is separate from a suggested follow-up date; deadlines are never invented.
+
+Setting "Next by" to Agent on a task without active agent work asks the model (once) to turn
+it into a delegation or ask a question. Closing a task stops its agent work deterministically:
+a delivered result waiting for review is accepted, anything else is cancelled. Moving a task
+to the trash cancels it; restoring it reopens it with its previous status.
+
+### Agent work and source
+
+Agent work (`delegation`): `queued` Queued / 排队中, `running` Running / 执行中, `blocked` Needs my
+answer / 等我回答, `review` To review / 待我验收, `paused` Paused / 已暂停, `quarantined` Problem /
+异常. Ended and cancelled delegations clear the column.
+
+Source: Email / 邮件, Slack, GitHub (issues, PRs and the commit digest), Notion, Matrix, Manual /
+手动, Migrated / 迁移.
+
+## Projects
+
+| Field | Type | Edited by | en | zh-CN |
+|---|---|---|---|---|
+| `title` | title | you | Project | 项目 |
+| `status` | select | you | Status | 状态 |
+| `domain` | select (free options) | you | Area | 领域 |
+| `goal` | text | you | Goal | 目标 |
+| `next_step` | text | you | Next step | 下一步 |
+| `blockers` | text | you | Blockers | 阻碍 |
+| `recent_activity` | text | you | Recent progress | 近期进展 |
+| `repos` | text (comma separated) | you | Repositories | 仓库 |
+| `recent_activity_at` | date | Todo Manager | Progress date | 进展时间 |
+| `tm_id` | text | Todo Manager | TM ID | TM ID |
+| `updated` | last edited time | Notion | Updated | 更新于 |
+
+Project status: `active` Active / 进行中, `paused` Paused / 暂停, `done` Done / 完成, `archived`
+Archived / 归档. The task relation adds a back-relation column "Tasks" / "任务" to Projects.
+
+## Home page
+
+| Section (en / zh-CN) | Linked view | Filter |
+|---|---|---|
+| ⭐ Focus / 精选待办 | table | open (to do, in progress), next by me, not snoozed, and focus or due within a week |
+| 📁 Active projects / 活跃项目 | table | project status active |
+| ⏳ Waiting on others / 等待别人 | table | waiting, not snoozed; sorted by follow-up date |
+| 🤔 To decide / 需要决定 | list | status to decide |
+| 🤖 Agent queue / working / Agent 排队／处理中 | board by agent work | queued, running, paused, problem |
+| ✅ To review / answer / 待我验收／待我补充 | table | status to review |
+| 🕘 Recently done and notable changes / 最近完成与重要变化 | table | edited in the last week and closed, or with a change note |
+
+At the top, a small **data freshness** callout ("Data freshness (maintained by Todo Manager)" /
+"数据新鲜度（由 Todo Manager 维护）") shows "all sources are syncing normally" or a short list of
+problems (stale sources, given-up writes, quarantined agent work, failed feedback) plus the
+hour of the last check. It is rewritten only when its content changes; logs never go to Notion.
+
+`todo-manager export` writes the same sections, computed locally, to `views/home.md`.
+
+## Task page body
+
+Each task page has ONE callout maintained by Todo Manager, marked "Current brief (maintained by
+Todo Manager; write your own notes outside this box)" / "当前说明（由 Todo Manager 维护；手写笔记请
+写在此框外）". It holds why the task is yours, done criteria, background, due-date basis, why it
+is in focus, sources (links), agent work and the latest delivery (collapsed). Everything outside
+the callout is yours and never touched.
+
+The callout is replaced with a search-and-replace of the exact text read just before, so
+concurrent edits elsewhere survive. If you edit text inside the callout, the edit is held and
+handed to the model as feedback instead of being overwritten; afterwards the box is regenerated.
+If you delete the callout, it is re-inserted at the top.
+
+## Comments
+
+Your comments on task pages are feedback: supplements, answers to agent questions, revision
+requests, approvals, corrections or rules. Replies from Todo Manager go into the same
+discussion. Comments by the integration itself are never treated as feedback, and comments
+by other people are information, not instructions.
+
+## Sync rules
+
+- Import runs every 5 minutes (feedback gate). Pages are queried by last edited time with an
+  overlap window; each page's editable values are compared with what Todo Manager last wrote
+  or saw, so only real human edits are imported (our own writes never echo back).
+- Push is read-before-write: unseen human edits are imported first, then only the differing
+  properties are patched. A page create whose response was lost is reconciled by looking up
+  the `TM ID` before any retry.
+- Unknown option names (for example a status you typed yourself) are reported in
+  `todo-manager health`, not imported.
+- Agent/program writes carry the version they were based on; a field you changed after that
+  version is never overwritten. A task you closed is never reopened automatically; genuinely
+  new responsibility becomes a linked follow-up task.

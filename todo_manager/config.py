@@ -19,13 +19,14 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import i18n
 
 DEFAULT_HOME = Path("~/.hermes/workspace/todo-manager").expanduser()
 
 DEFAULTS: dict[str, Any] = {
-    "timezone": "Pacific/Auckland",
+    "timezone": "UTC",   # `init` writes the system time zone into config.toml
     # Language of everything the user reads (Notion, replies, reminders); see i18n.
     # TODO_MANAGER_LANG overrides it for one process.
     "language": i18n.DEFAULT,
@@ -67,7 +68,7 @@ DEFAULTS: dict[str, Any] = {
     "commits": {
         "enabled": False,
         "repos": [],  # "owner/name" or local paths
-        "digest_time": "21:00",  # PROPOSED local time (Pacific/Auckland)
+        "digest_time": "21:00",  # PROPOSED local time
         "max_attempts_per_day": 2,  # model attempts budget for one day's digest
     },
     "notion": {
@@ -109,6 +110,28 @@ DEFAULTS: dict[str, Any] = {
         "max_context_chars": 60000,
     },
 }
+
+
+def local_timezone() -> str:
+    """IANA name of the system time zone (TZ, /etc/timezone or the /etc/localtime link), else UTC."""
+    candidates = [os.environ.get("TZ", "").lstrip(":")]
+    try:
+        candidates.append(Path("/etc/timezone").read_text(encoding="utf-8").strip())
+    except OSError:
+        pass
+    link = Path("/etc/localtime")
+    if link.is_symlink():
+        target = str(link.resolve())
+        if "zoneinfo/" in target:
+            candidates.append(target.split("zoneinfo/", 1)[1])
+    for name in candidates:
+        if name and "/" in name:
+            try:
+                ZoneInfo(name)
+                return name
+            except (ZoneInfoNotFoundError, ValueError):
+                continue
+    return "UTC"
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

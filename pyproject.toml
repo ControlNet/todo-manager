@@ -19,4 +19,5 @@ todo-manager = "todo_manager.cli:main"
 include = ["todo_manager*"]
 
 [tool.setuptools.package-data]
-todo_manager = ["prompts/*.md", "locales/*.json", "hermes_assets/skill/*.md", "hermes_assets/cron/*.md"]
+todo_manager = ["prompts/*.md", "locales/*.json", "hermes_assets/skill/*.md", "hermes_assets/cron/*.md",
+                "hermes_assets/workspace/*.md"]

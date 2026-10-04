@@ -1,5 +1,4 @@
-"""Slack adapter (Web API, read-only). Not yet connected: no Slack token exists on this
-server (inventory 2026-10-04). Behaviour is covered by fixture tests.
+"""Slack adapter (Web API, read-only) with a bot/user token from an environment variable.
 
 * Only conversations listed in ``slack.conversations`` are read.
 * Threaded replies are keyed by thread (``slack:<channel>:<thread_ts>``); unthreaded chat is
