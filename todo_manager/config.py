@@ -122,10 +122,13 @@ DEFAULTS: dict[str, Any] = {
     "wake": {
         # Upper bounds for one intake model run; the rest waits for the next run. The whole
         # rendered context is checked against max_context_chars before the model is woken;
-        # new evidence gets at most max_evidence_chars of it (PROPOSED values).
+        # new evidence gets at most max_evidence_chars of it (PROPOSED values). An ambiguity that
+        # could cost the user if missed becomes a question (a `decision` task); at most
+        # max_questions_per_run of them, everything else low-value or unclear is ignored.
         "max_items_per_run": 60,
         "max_context_chars": 60000,
         "max_evidence_chars": 40000,
+        "max_questions_per_run": 3,
     },
 }
 

@@ -11,7 +11,7 @@ repository and paper titles as written in the source.
 Ops:
 - `create_task` {ref?, title, responsibility, evidence: [{item, role, note?}], project?, status?, next_actor?,
   next_step?, done_criteria?, summary?, due_date?, due_basis?, follow_up_date?, waiting_on?, focus?, focus_reason?,
-  follow_up_of?, rationale}
+  follow_up_of?, ask?, rationale}
   - `responsibility`: one sentence on why this is the user's own commitment (asked directly, promised,
     owner/reviewer/assignee, deadline addressed to them). No responsibility, no task.
   - `project`: an existing project id or `@ref` of a `create_project` in this file.
@@ -21,6 +21,8 @@ Ops:
     implied, and say where it came from in `due_basis`. `follow_up_date` is when to check on someone else.
   - `focus` only for genuinely important or time-critical work; say why in `focus_reason`.
   - `follow_up_of`: the task id this continues (use it instead of reopening a task the user closed).
+  - `ask`: one question for the user, only for an important ambiguity (see below); requires
+    `status: "decision"` and `next_actor: "me"`. At most {max_questions} per run.
 - `update_task` {task, based_on_version, set: {field: value}, note?, evidence?, override_human?, closed_reason?, rationale}
   - `based_on_version` is the version shown for the task. Fields the user set later are kept automatically.
   - Changing a field the user set requires `override_human: true` plus evidence; prefer not to.
@@ -40,8 +42,13 @@ Ops:
   `follow_up_of`, or `followup_reviewed`.
 
 One task per commitment, not per message. A thread that adds information to an existing task is `link` or
-`update_task`, never a duplicate. When unsure whether something is the user's, prefer `ignore` with
-category `fyi_no_action` and a rationale over inventing a task.
+`update_task`, never a duplicate.
+When unsure whether something is the user's: if it is low-value or the evidence points nowhere in particular
+(mass mail, FYI, someone else's thread, a vague mention), `ignore` it with a rationale. Ask only when missing
+it could cost the user (a direct request from a real person, a stated deadline, money/grants, reviews, hiring,
+a role assigned to them) and the evidence cannot settle who owns it or what is wanted: then `create_task` with
+`ask` (the one question the user answers to settle it) and say in `rationale` what is unclear. Questions are
+few by design, not a review queue for everything uncertain.
 On error the command prints `{"error": CODE, "details": [...]}` and applies nothing: fix the file and re-run.
 `STALE_RULES` means rules changed: re-read them (`todo-manager rule list`) and re-check your decisions.
 A repeated apply of the same file (e.g. after a lost response) prints the first report with `"duplicate": true`;

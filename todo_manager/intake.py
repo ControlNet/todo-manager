@@ -252,7 +252,8 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, manifest:
 
     out.append("\n## Output")
     out.append(f"run_id={run_id} rules_version={rv}")
-    out.append(prompts.load("intake_decisions.md"))
+    out.append(prompts.load("intake_decisions.md").replace(
+        "{max_questions}", str(int(cfg.get("wake.max_questions_per_run", 3)))))
     return "\n".join(out)
 
 
@@ -261,7 +262,8 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, manifest:
 TASK_SET_FIELDS = set(store.TASK_FIELDS)
 
 
-def _validate(conn: sqlite3.Connection, run_id: str, decisions: dict[str, Any], manifest: dict[str, Any]) -> list[str]:
+def _validate(conn: sqlite3.Connection, run_id: str, decisions: dict[str, Any], manifest: dict[str, Any],
+              max_questions: int = 3) -> list[str]:
     errors: list[str] = []
     if decisions.get("run_id") != run_id:
         errors.append(f"run_id must be {run_id}")
@@ -274,6 +276,7 @@ def _validate(conn: sqlite3.Connection, run_id: str, decisions: dict[str, Any], 
     project_refs: set[str] = set()
     reviewed: set[str] = set()
     seen_ops: dict[str, int] = {}
+    questions = 0
     for n, op in enumerate(items):
         kind = op.get("op")
         where = f"items[{n}] ({kind})"
@@ -301,6 +304,12 @@ def _validate(conn: sqlite3.Connection, run_id: str, decisions: dict[str, Any], 
                 errors.append(f"{where}: responsibility (why this is the user's) required")
             if not evidence and not op.get("follow_up_of"):
                 errors.append(f"{where}: evidence required")
+            if "ask" in op:
+                questions += 1
+                if not isinstance(op["ask"], str) or not op["ask"].strip():
+                    errors.append(f"{where}: ask must be the one question for the user")
+                if (op.get("status"), op.get("next_actor", "me")) != ("decision", "me"):
+                    errors.append(f"{where}: ask requires status 'decision' and next_actor 'me'")
             try:
                 store.normalize_state(op.get("status", "todo"), op.get("next_actor", "me"))
             except store.StoreError as exc:
@@ -357,6 +366,9 @@ def _validate(conn: sqlite3.Connection, run_id: str, decisions: dict[str, Any], 
                 errors.append(f"{where}: unknown task")
         else:
             errors.append(f"{where}: unknown op")
+    if questions > max_questions:
+        errors.append(f"{questions} questions (ask); at most {max_questions} questions per run: ignore what is"
+                      " low-impact or unclear, ask only what could cost the user if missed")
     for n, op in enumerate(items):
         project = op.get("project")
         if op.get("op") == "create_task" and isinstance(project, str) and project.startswith("@") \
@@ -417,7 +429,8 @@ def apply_decisions(conn: sqlite3.Connection, cfg: Config, run_id: str, decision
         stale = _ownership_problems(conn, run_id, manifest)
         if stale:
             raise DecisionError("STALE_RUN", stale)
-        errors = _validate(conn, run_id, decisions, manifest)
+        errors = _validate(conn, run_id, decisions, manifest,
+                           max_questions=int(cfg.get("wake.max_questions_per_run", 3)))
         if errors:
             raise DecisionError("INVALID", errors)
         report = _apply(conn, run_id, decisions, manifest, current_rv)
@@ -427,8 +440,8 @@ def apply_decisions(conn: sqlite3.Connection, cfg: Config, run_id: str, decision
 
 def _apply(conn: sqlite3.Connection, run_id: str, decisions: dict[str, Any], manifest: dict[str, Any],
            current_rv: int) -> dict[str, Any]:
-    report: dict[str, Any] = {"created_tasks": [], "updated_tasks": [], "rejected_fields": [], "ignored": 0,
-                              "created_projects": [], "updated_projects": [], "suggested_rules": []}
+    report: dict[str, Any] = {"created_tasks": [], "questions": [], "updated_tasks": [], "rejected_fields": [],
+                              "ignored": 0, "created_projects": [], "updated_projects": [], "suggested_rules": []}
     touched_tasks: set[str] = set()
     touched_projects: set[str] = set()
     project_map: dict[str, str] = {}
@@ -459,6 +472,8 @@ def _apply(conn: sqlite3.Connection, run_id: str, decisions: dict[str, Any], man
             fields = {k: op.get(k) for k in ("waiting_on", "responsibility", "next_step", "done_criteria", "summary",
                                              "due_date", "due_basis", "follow_up_date", "focus", "focus_reason")
                       if op.get(k) is not None}
+            if op.get("ask"):
+                fields["next_step"] = op["ask"].strip()
             did = store.record_decision(conn, run_id=run_id, op="create_task", target_type="task", target_id=None,
                                         source_item_ids=source_ids, rationale=op.get("rationale"),
                                         rules_version=current_rv)
@@ -473,6 +488,8 @@ def _apply(conn: sqlite3.Connection, run_id: str, decisions: dict[str, Any], man
             if op.get("ref"):
                 task_refs[op["ref"]] = tid
             report["created_tasks"].append(tid)
+            if op.get("ask"):
+                report["questions"].append(tid)
             touched_tasks.add(tid)
         elif kind in ("update_task", "link"):
             tid = op["task"]

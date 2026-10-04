@@ -153,3 +153,46 @@ class FollowupTests(Base):
                           actor="human", origin="notion")
         clock.advance(days=1)
         self.assertIn("followups_due:1", self.gate())
+
+
+class AmbiguityTests(Base):
+    """Gap A: noise is ignored; a few high-impact ambiguities become one question each."""
+
+    def woke_with_mail(self, n):
+        self.add_items(*[mail(f"m{i}", f"t{i}", f"Are you able to chair session {i}?") for i in range(n)])
+        clock.advance(minutes=61)
+        return self.woken(self.gate())
+
+    def ask(self, i):
+        return {"op": "create_task", "title": f"是否主持第 {i} 场？", "responsibility": "对方直接询问我",
+                "status": "decision", "next_actor": "me", "ask": f"要答应主持第 {i} 场吗？",
+                "evidence": [{"item": self.item_id(f"m{i}"), "role": "origin"}], "rationale": "deadline unclear"}
+
+    def test_a_question_becomes_a_decision_for_the_user(self):
+        run_id, manifest = self.woke_with_mail(1)
+        report = self.apply(run_id, manifest, [self.ask(0)])
+        [tid] = report["questions"]
+        task = store.get_task(self.conn, tid)
+        self.assertEqual((task["status"], task["next_actor"], task["next_step"]),
+                         ("decision", "me", "要答应主持第 0 场吗？"))
+
+    def test_questions_are_bounded_per_run(self):
+        run_id, manifest = self.woke_with_mail(4)
+        with self.assertRaises(intake.DecisionError) as ctx:
+            self.apply(run_id, manifest, [self.ask(i) for i in range(4)])
+        self.assertIn("at most 3 questions", str(ctx.exception))
+
+    def test_a_question_is_a_decision_for_the_user_only(self):
+        run_id, manifest = self.woke_with_mail(1)
+        op = {**self.ask(0), "status": "todo"}
+        with self.assertRaises(intake.DecisionError) as ctx:
+            self.apply(run_id, manifest, [op])
+        self.assertIn("ask", str(ctx.exception))
+
+    def test_the_prompt_bounds_questions_and_ignores_noise(self):
+        self.cfg.data["wake"]["max_questions_per_run"] = 2
+        run_id, manifest = self.woke_with_mail(1)
+        context = intake.render_context(self.conn, self.cfg, run_id, manifest)
+        self.assertIn("At most 2 per run", context)
+        self.assertNotIn("{max_questions}", context)
+        self.assertIn("not a review queue", context)
