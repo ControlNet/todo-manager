@@ -169,10 +169,11 @@ class GitHubNotificationSource:
     name = "github"
 
     def __init__(self, client: GitHubClient, tracked_repos: set[str], my_logins: list[str],
-                 overlap_minutes: int = 30, lookback_days: int = 14):
+                 bot_logins: list[str] | None = None, overlap_minutes: int = 30, lookback_days: int = 14):
         self.client = client
         self.tracked = {r.lower() for r in tracked_repos}
         self.me = {m.lower() for m in my_logins}
+        self.bots = {b.lower() for b in bot_logins or []}
         self.overlap = overlap_minutes
         self.lookback_days = lookback_days
 
@@ -194,24 +195,41 @@ class GitHubNotificationSource:
                 number = int(url.rstrip("/").rsplit("/", 1)[-1])
             if number is None:
                 continue
-            body = ""
-            latest = subject.get("latest_comment_url")
-            if latest:
-                try:
-                    comment = self.client.get(latest.replace(API + "/", ""))
-                    body = (comment or {}).get("body") or ""
-                except SourceError:
-                    body = ""
+            # The thread itself (opener, state) and its latest activity (author, text): without them
+            # the model cannot tell "my own PR was merged" from "someone needs me".
+            thread = self._get(url)
+            latest_url = subject.get("latest_comment_url")
+            latest = thread if not latest_url or latest_url == url else self._get(latest_url)
+            opener = ((thread or {}).get("user") or {}).get("login") or "?"
+            state = (thread or {}).get("state") or "?"
+            if (thread or {}).get("merged"):
+                state = "merged"
+            actor = (latest or {}).get("user") or {}
+            login = actor.get("login") or ""
+            is_bot = login.lower() in self.bots or actor.get("type") == "Bot" or login.lower().endswith("[bot]")
+            body = (latest or {}).get("body") or ""
             key = f"github:{repo}#{number}"
             html_url = f"https://github.com/{repo}/{'pull' if '/pulls/' in url else 'issues'}/{number}"
             items.append(Item(source="github", account=repo, external_id=f"notification:{note['id']}",
                               version=note.get("updated_at", ""), kind="notification", conversation_key=key,
                               thread_key=key, occurred_at=_gh_time(note.get("updated_at", clock.iso())),
-                              author=None, title=f"{subject.get('type')} {repo}#{number}: {subject.get('title')}",
-                              url=html_url, body=f"[reason: {note.get('reason')}]\n{body}",
-                              meta={"reason": note.get("reason"), "number": number}))
+                              author=login or None, author_is_me=login.lower() in self.me,
+                              title=f"{subject.get('type')} {repo}#{number}: {subject.get('title')}",
+                              url=html_url, route="context" if is_bot else "batch",
+                              body=f"[reason: {note.get('reason')}; state: {state}; opened by {opener}]\n{body}",
+                              meta={"reason": note.get("reason"), "number": number, "state": state,
+                                    "opener": opener}))
         new_cursor = clock.iso(started - timedelta(minutes=self.overlap)).replace(".000Z", "Z")
         return FetchResult(scope=self.scope, items=items, cursor=new_cursor, meta={"notifications": len(notes)})
+
+    def _get(self, api_url: str) -> dict[str, Any] | None:
+        try:
+            data = self.client.get(api_url.replace(API + "/", ""))
+        except SourceError as exc:
+            if "HTTP 404" in str(exc) or "HTTP 410" in str(exc):
+                return None   # deleted or no longer accessible
+            raise
+        return data if isinstance(data, dict) else None
 
 
 class CommitSource:

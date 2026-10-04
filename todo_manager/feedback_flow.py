@@ -30,6 +30,7 @@ from typing import Any
 
 from . import clock, delegation, effects, feedback, i18n, prompts, rules, store
 from .config import Config
+from .sources.base import quote
 from .db import dumps, loads, rules_version, tx
 
 OUTCOMES = ("applied", "clarify", "ignored")
@@ -121,9 +122,9 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, items: li
             out.append(f"Property edit already applied: {dumps(p.get('changes'))}")
         elif fb["kind"] == "body_edit":
             out.append("The user edited text INSIDE the Todo-Manager-maintained box of the page. Current box text:")
-            out.append(_clip(p.get("region"), 3000))
+            out.append(quote(_clip(p.get("region"), 3000)))
             out.append("What we would have written instead:")
-            out.append(_clip(p.get("would_render"), 3000))
+            out.append(quote(_clip(p.get("would_render"), 3000)))
             out.append("Carry any substantive change into task fields (update_task); outcome applied lets the box be"
                        " regenerated.")
         elif fb["kind"] == "new_task":
@@ -136,7 +137,7 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, items: li
             out.append("The user moved the task away from Agent while a delegation is active: pause, cancel or keep"
                        " (ask only if unclear).")
         if fb.get("text") and fb["kind"] not in ("body_edit",):
-            out.append(f"Text: {fb['text']}")
+            out.append("Text:\n" + quote(fb["text"]))
         if p.get("delegation_id"):
             out.append(f"In reply to our {p.get('delivery_kind')} (delivery {p.get('delivery_id')}, v{p.get('delivery_seq')})"
                        f" of delegation {p['delegation_id']}")

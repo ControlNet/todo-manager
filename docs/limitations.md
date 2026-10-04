@@ -9,9 +9,10 @@ verified and how.
   the right items), and whether feedback is classified correctly, has not been measured on real
   data. The code enforces structure (full coverage of new items, categories and reasons for
   ignores, versioned writes), not accuracy.
-- **Source adapters have not run against real accounts.** Gmail, Slack and GitHub adapters are
-  implemented against the documented APIs but have no adapter-level tests; intake is tested
-  with synthetic items.
+- **Slack has not run against a real workspace.** The adapter is covered by recorded-shape tests
+  (`tests/test_sources.py`, fake HTTP) only. Gmail and GitHub adapters are covered by the same kind
+  of tests and have been run read-only against real accounts (fetch, batching and context
+  rendering; no model decisions).
 - **Notion writes are tested against a test double.** `tests/fake_notion.py` imitates the
   2026-03-11 API (data sources, property ids, markdown and views endpoints, comments, minute-
   precision `last_edited_time`, lost responses, 429). Real-API differences can surface on the

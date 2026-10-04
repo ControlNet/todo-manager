@@ -18,6 +18,7 @@ are raised to 30.)
 | `notion.cold_comment_poll_minutes` | 60 | Comment polling interval for open tasks without recent activity (active pages: every run) |
 | `notion.cold_comment_pages_per_run` | 30 | Round-robin budget of cold pages per run |
 | `notion.history_poll_hours` | 24 | Sweep of recently closed pages for late comments |
+| `wake.max_context_chars` / `max_items_per_run` | 60000 / 60 | Evidence rendered into one intake run; the rest waits for the next run. When more than one run's worth is waiting, the email/GitHub wake interval is skipped so a backlog drains every 5 minutes |
 | `feedback.max_items_per_run` | 20 | Feedback items per model run |
 | `feedback.max_attempts` | 3 | Model runs before an unapplied feedback item is marked failed (with a reminder) |
 | `kanban.max_running` | 1 | Delegations executing at once |

@@ -21,11 +21,12 @@ from typing import Any
 from . import clock, prompts, rules, store
 from .config import Config
 from .db import dumps, loads, rules_version, tx
-from .sources.base import conversation_history, item_body
+from .sources.base import conversation_history, item_body, quote
 
 IGNORE_CATEGORIES = ("advertising", "newsletter", "cfp", "review_invitation_unaccepted", "automated_notice",
                      "fyi_no_action", "handled_elsewhere", "social", "spam", "other")
 MAX_ITEM_CHARS = 4000
+BULK_ITEM_CHARS = 800
 MAX_EARLIER_CHARS = 600
 QUOTE_START = re.compile(r"^(On .{5,200} wrote:|在.{2,80}写道[:：]|-----Original Message-----|From: .+)$", re.M)
 
@@ -160,7 +161,7 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, manifest:
             r["entity_id"] for r in conn.execute(
                 "SELECT e.entity_id FROM evidence_links e JOIN source_items s ON s.id=e.source_item_id"
                 " WHERE e.entity_type='task' AND s.conversation_key=?", (batch["conversation_key"],))}]
-        title = next((i.get("title") for i in batch_items if i.get("title")), "")
+        title = " ".join(next((i.get("title") for i in batch_items if i.get("title")), "").split())
         out.append(f"\n### {batch['source']} {batch['conversation_key']}  {title}")
         if batch_items and batch_items[0].get("url"):
             out.append(f"link: {batch_items[0]['url']}")
@@ -169,10 +170,10 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, manifest:
         earlier = conversation_history(conn, batch["source"], batch["conversation_key"], exclude_batch=batch["id"], limit=6)
         for e in earlier:
             body = trim_quoted(item_body(conn, e["id"]))
-            out.append(f"\n{_item_header(e)} [earlier]\n{_clip(body, MAX_EARLIER_CHARS)}")
+            out.append(f"\n{_item_header(e)} [earlier]\n{quote(_clip(body, MAX_EARLIER_CHARS))}")
         for item in batch_items:
             body = item_body(conn, item["id"])
-            limit = 800 if item["meta"].get("bulk_hint") else MAX_ITEM_CHARS
+            limit = BULK_ITEM_CHARS if item["meta"].get("bulk_hint") else MAX_ITEM_CHARS
             body = trim_quoted(body) if item["source"] == "gmail" else body
             extras = []
             if item["meta"].get("to"):
@@ -180,8 +181,9 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, manifest:
             if item["meta"].get("attachments"):
                 extras.append("attachments: " + ", ".join(a["filename"] for a in item["meta"]["attachments"]))
             if item.get("title") and item["source"] == "gmail":
-                extras.append(f"subject: {item['title']}")
-            out.append(f"\n{_item_header(item)} NEW\n" + ("\n".join(extras) + "\n" if extras else "") + _clip(body, limit))
+                extras.append(f"subject: {' '.join(item['title'].split())}")
+            out.append(f"\n{_item_header(item)} NEW\n" + ("\n".join(extras) + "\n" if extras else "")
+                       + quote(_clip(body, limit)))
 
     digest = manifest.get("digest")
     if digest:

@@ -24,7 +24,7 @@ from typing import Any
 
 from . import clock
 from .config import Config
-from .db import tx
+from .db import loads, tx
 
 QUIET_DEFAULTS = {"slack": 30, "gmail": 15, "github": 10, "manual": 0}
 SECTION = {"gmail": "email", "slack": "slack", "github": "github"}
@@ -100,7 +100,13 @@ def plan_intake_wake(conn: sqlite3.Connection, cfg: Config, extra_reasons: list[
         interval = min_wake_interval(cfg, source)
         last = clock.minutes_since(last_wake_for_source(conn, source))
         if interval and last is not None and last < interval:
-            gated[source] = batch_ids  # may still ride along with another reason
+            budget = int(cfg.get("wake.max_context_chars", 60000))
+            if sum(estimate_chars(conn, b) for b in batch_ids) <= budget:
+                gated[source] = batch_ids  # may still ride along with another reason
+                continue
+            # More than one run's worth is waiting (e.g. the first backfill): do not hold it back.
+            plan.reasons.append(f"backlog:{source}:{len(batch_ids)}")
+            plan.batch_ids.extend(batch_ids)
             continue
         plan.reasons.append(f"mature:{source}:{len(batch_ids)}")
         plan.batch_ids.extend(batch_ids)
@@ -111,20 +117,43 @@ def plan_intake_wake(conn: sqlite3.Connection, cfg: Config, extra_reasons: list[
             plan.reasons.append(f"ride_along:{source}:{len(batch_ids)}")
     else:
         plan.deferred = {source: len(v) for source, v in gated.items()}
-    limit = int(cfg.get("wake.max_items_per_run", 60))
     if plan.batch_ids:
-        plan.batch_ids = _limit_by_items(conn, plan.batch_ids, limit)
+        plan.batch_ids = _limit_batches(conn, plan.batch_ids, int(cfg.get("wake.max_items_per_run", 60)),
+                                        int(cfg.get("wake.max_context_chars", 60000)))
     return plan
 
 
-def _limit_by_items(conn: sqlite3.Connection, batch_ids: list[str], limit: int) -> list[str]:
-    chosen, total = [], 0
+ITEM_OVERHEAD = 200     # header, recipients and subject lines per rendered item
+BATCH_OVERHEAD = 300    # conversation heading, link, linked tasks
+
+
+def estimate_chars(conn: sqlite3.Connection, batch_id: str) -> int:
+    """Upper bound of the evidence text one batch adds to the intake context (see intake.render_context)."""
+    from .intake import BULK_ITEM_CHARS, MAX_EARLIER_CHARS, MAX_ITEM_CHARS
+    batch = conn.execute("SELECT source, conversation_key FROM batches WHERE id=?", (batch_id,)).fetchone()
+    total = BATCH_OVERHEAD
+    for r in conn.execute("SELECT s.meta, LENGTH(b.body) AS n FROM source_items s LEFT JOIN source_bodies b"
+                          " ON b.item_id=s.id WHERE s.batch_id=? AND s.state='batched'", (batch_id,)):
+        limit = BULK_ITEM_CHARS if loads(r["meta"], {}).get("bulk_hint") else MAX_ITEM_CHARS
+        total += min(r["n"] or 0, limit) + ITEM_OVERHEAD
+    earlier = conn.execute(
+        "SELECT COUNT(*) FROM source_items WHERE source=? AND conversation_key=? AND (batch_id IS NULL OR batch_id != ?)"
+        " AND state IN ('processed','batched','pending')", (batch["source"], batch["conversation_key"], batch_id)
+    ).fetchone()[0] if batch else 0
+    return total + min(earlier, 6) * (MAX_EARLIER_CHARS + ITEM_OVERHEAD)
+
+
+def _limit_batches(conn: sqlite3.Connection, batch_ids: list[str], max_items: int, max_chars: int) -> list[str]:
+    """Batches in order until the item or character budget is reached (always at least one)."""
+    chosen, items, chars = [], 0, 0
     for batch_id in batch_ids:
         count = conn.execute("SELECT COUNT(*) FROM source_items WHERE batch_id=?", (batch_id,)).fetchone()[0]
-        if chosen and total + count > limit:
+        size = estimate_chars(conn, batch_id)
+        if chosen and (items + count > max_items or chars + size > max_chars):
             break
         chosen.append(batch_id)
-        total += count
+        items += count
+        chars += size
     return chosen
 
 

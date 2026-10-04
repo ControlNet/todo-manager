@@ -154,6 +154,12 @@ def attach_to_batch(conn: sqlite3.Connection, item_id: str, source: str, convers
     return batch_id
 
 
+def quote(text: str) -> str:
+    """Render untrusted source text as a quote block, so none of its lines can pose as a
+    section or instruction of the surrounding model context."""
+    return "\n".join(f"> {line}" if line.strip() else ">" for line in (text or "").splitlines()) or ">"
+
+
 def item_body(conn: sqlite3.Connection, item_id: str) -> str:
     row = conn.execute("SELECT body FROM source_bodies WHERE item_id=?", (item_id,)).fetchone()
     return row["body"] if row else ""

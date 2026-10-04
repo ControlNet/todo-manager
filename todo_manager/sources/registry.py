@@ -31,6 +31,7 @@ def conversation_sources(cfg: Config) -> list[Any]:
                                              overlap_minutes=int(gh.get("overlap_minutes", 30))))
         if gh.get("notifications", True):
             adapters.append(GitHubNotificationSource(client, set(gh.get("repos", [])), ident.get("github_logins", []),
+                                                     bot_logins=gh.get("bot_logins", []),
                                                      overlap_minutes=int(gh.get("overlap_minutes", 30))))
     slack = cfg.section("slack")
     if slack.get("enabled"):

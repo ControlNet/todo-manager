@@ -500,7 +500,7 @@ matrix_target = ""
 
 [email]
 enabled = false
-accounts = []   # [{name = "...", address = "...", token_command = "..."}]
+accounts = []   # [{name = "work", address = "me@example.org", token_command = ["~/.hermes/scripts/<token helper>", "work"]}]
 
 [slack]
 enabled = false
