@@ -9,7 +9,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from todo_manager import clock, config, db, delegation, effects, export, gate_feedback, health, rules, store
+from todo_manager import clock, config, db, delegation, effects, export, gate_feedback, health, rules, runs, store
 from todo_manager.kanban import FakeKanban
 from todo_manager.notify import MatrixNotifier
 from tests.helpers import WorkspaceCase
@@ -84,9 +84,9 @@ class DeliveryFileTests(PortabilityBase):
 
 class ExportImportTests(PortabilityBase):
     def export_bundle(self):
-        (self.tmp / "runs" / "run_x").mkdir(parents=True)
-        (self.tmp / "runs" / "run_x" / "decisions.json").write_text('{"items": []}', encoding="utf-8")
-        (self.tmp / "runs" / "run_x" / "manifest.json").write_text('{"run_id": "run_x"}', encoding="utf-8")
+        self.run_x = runs.start(self.conn, "feedback")
+        runs.write_json(self.tmp, self.run_x, "manifest.json", {"run_id": self.run_x})
+        (self.tmp / "runs" / self.run_x / "decisions.json").write_text('{"items": []}', encoding="utf-8")
         return export.export_snapshot(self.conn, self.cfg)
 
     def test_round_trip_into_a_fresh_directory(self):
@@ -109,8 +109,8 @@ class ExportImportTests(PortabilityBase):
             self.assertEqual(sha(self.target / art["path"]), art["sha256"])
         finally:
             conn2.close()
-        self.assertTrue((self.target / "runs" / "run_x" / "decisions.json").exists(), "run context moves along")
-        self.assertTrue((self.target / "runs" / "run_x" / "manifest.json").exists())
+        self.assertTrue((self.target / "runs" / self.run_x / "decisions.json").exists(), "run context moves along")
+        self.assertTrue((self.target / "runs" / self.run_x / "manifest.json").exists())
 
     def test_a_tampered_or_incomplete_bundle_is_refused(self):
         self.delivered()

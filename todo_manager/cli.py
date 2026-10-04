@@ -398,11 +398,13 @@ def cmd_export(args: argparse.Namespace) -> int:
     from . import export
     cfg, conn = _open(args)
     root = export.export_snapshot(conn, cfg)
-    result: dict[str, Any] = {"export": str(root)}
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    result: dict[str, Any] = {"export": str(root), "integrity": manifest["integrity"],
+                              "artifact_problems": manifest["artifact_problems"]}
     if args.verify:
         result["rebuild"] = export.verify_rebuild(root / "data.json")
     _print(result)
-    return 0 if not args.verify or result["rebuild"]["ok"] else 1
+    return 0 if not manifest["integrity"] and (not args.verify or result["rebuild"]["ok"]) else 1
 
 
 def cmd_backup(args: argparse.Namespace) -> int:

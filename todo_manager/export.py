@@ -1,9 +1,15 @@
 """Exports, rebuild verification, import, backup and restore. Everything is written under TODO_HOME.
 
-* ``export_snapshot`` writes human-readable Markdown (tasks/, projects/, rules/, views/),
-  ``data.json`` (every table) and ``workspace/`` (config.toml without secrets, AGENTS.md, run
-  context ``runs/``, delivery files ``deliveries/``) into ``exports/<stamp>/``; ``manifest.json``
-  lists every file with its SHA-256 and every table with its row hash.
+* ``export_snapshot`` first copies the database with SQLite's online backup (one consistent
+  read, safe while gates and applies run), then writes from that copy only: human-readable
+  Markdown (tasks/, projects/, rules/, views/), ``data.json`` (every table) and ``workspace/``
+  (config.toml without secrets, AGENTS.md, the run context ``runs/<id>`` of the runs in the
+  snapshot, the delivery files the snapshot's deliveries refer to) into ``exports/<stamp>/``;
+  ``manifest.json`` lists every file with its SHA-256, every table with its row hash, kept
+  files that differ from their delivery record, and the history check.
+* ``integrity_problems``: each task's and project's history holds exactly the versions 1..its
+  version, and no foreign key dangles. Checked by export, rebuild, import (refused on a
+  problem), backup check and restore (reported).
 * ``verify_rebuild`` loads ``data.json`` into a fresh database and compares every table,
   proving the export alone is enough to rebuild the state.
 * ``import_bundle`` builds a new workspace in an empty directory from an export (checked
@@ -28,13 +34,13 @@ from pathlib import Path
 from typing import Any
 
 from . import clock, db, delegation, i18n, rules, store
+from .db import loads
 from .config import Config
 from .files import sha256_file
 from .notion.schema import label as option_label
 
 EXPORT_FORMAT = "todo-manager-export/2"
 WORKSPACE_FILES = ("config.toml", "AGENTS.md")
-WORKSPACE_DIRS = ("runs", "deliveries")
 SECRET_KEY = re.compile(r"(token|secret|password|passwd|api_?key|private_?key|credential)", re.I)
 SAFE_KEYS = {"token_env", "token_file"}   # names of where a secret lives, not the secret
 
@@ -150,8 +156,52 @@ def view_rows(conn: sqlite3.Connection, cfg: Config) -> dict[str, list[dict[str,
     }
 
 
+def integrity_problems(conn: sqlite3.Connection) -> list[str]:
+    """History and references that do not add up (empty when the state is whole)."""
+    found = []
+    fk = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk:
+        found.append(f"{len(fk)} foreign key errors")
+    for kind, table in (("task", "tasks"), ("project", "projects")):
+        for r in conn.execute(
+                f"SELECT e.id, e.version, COUNT(h.id) AS n, COUNT(DISTINCT h.version) AS d, MIN(h.version) AS lo,"
+                f" MAX(h.version) AS hi FROM {table} e LEFT JOIN history h ON h.entity_type=? AND h.entity_id=e.id"
+                f" GROUP BY e.id, e.version ORDER BY e.id", (kind,)):
+            if not (r["n"] == r["d"] == r["version"] and r["lo"] == 1 and r["hi"] == r["version"]):
+                found.append(f"{kind} {r['id']} is at version {r['version']} but its history has {r['n']} entries"
+                             f" for versions {r['lo']}..{r['hi']}")
+    return found
+
+
+def _snapshot(conn: sqlite3.Connection, path: Path) -> sqlite3.Connection:
+    """A read-only copy of the database taken in one step of the online backup API."""
+    dest = sqlite3.connect(str(path))
+    try:
+        conn.backup(dest)
+        dest.execute("PRAGMA journal_mode = DELETE")
+    finally:
+        dest.close()
+    snap = sqlite3.connect(f"file:{path}?mode=ro", uri=True, isolation_level=None)
+    snap.row_factory = sqlite3.Row
+    return snap
+
+
 def export_snapshot(conn: sqlite3.Connection, cfg: Config, out_dir: Path | None = None) -> Path:
     root = out_dir or cfg.home / "exports" / _stamp()
+    root.mkdir(parents=True, exist_ok=True)
+    snap_path = root.parent / f".{root.name}.snapshot.sqlite"
+    snap = _snapshot(conn, snap_path)
+    try:
+        _write_export(snap, cfg, root)
+    finally:
+        snap.close()
+        for leftover in (snap_path, Path(f"{snap_path}-journal")):
+            leftover.unlink(missing_ok=True)
+    return root
+
+
+def _write_export(conn: sqlite3.Connection, cfg: Config, root: Path) -> None:
+    """Everything below reads ``conn``, the snapshot: Markdown, data and files agree."""
     for sub in ("tasks", "projects", "rules", "views"):
         (root / sub).mkdir(parents=True, exist_ok=True)
     projects = {p["id"]: p["title"] for p in store.list_projects(conn, ("active", "paused", "done", "archived"))}
@@ -171,16 +221,19 @@ def export_snapshot(conn: sqlite3.Connection, cfg: Config, out_dir: Path | None 
     (root / "views" / "home.md").write_text("\n".join(view_lines), encoding="utf-8")
     data = dump(conn)
     (root / "data.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    redacted = _export_workspace(cfg.home, root / "workspace")
+    run_ids = [r["id"] for r in data.get("runs", [])]
+    artifacts = [a for d in data.get("deliveries", []) for a in loads(d["artifacts"], []) if isinstance(a, dict)]
+    redacted, artifact_problems = _export_workspace(cfg.home, root / "workspace", run_ids, artifacts)
     files = {str(p.relative_to(root)): {"sha256": sha256_file(p), "size": p.stat().st_size}
              for p in sorted(root.rglob("*")) if p.is_file() and p != root / "manifest.json"}
     manifest = {"format": EXPORT_FORMAT, "exported_at": clock.iso(), "schema_version": db.schema_version(conn),
                 "tables": {k: {"rows": len(v), "hash": _table_hash(v)} for k, v in data.items()},
-                "files": files, "redacted_config_keys": redacted,
+                "files": files, "redacted_config_keys": redacted, "artifact_problems": artifact_problems,
+                "integrity": integrity_problems(conn),
                 "not_exported": ["secrets (environment variables, token files)", "backups/", "state/locks",
-                                 "state/hermes (machine-specific install record)"]}
+                                 "state/hermes (machine-specific install record)",
+                                 "files no run or delivery of the snapshot refers to (written after it)"]}
     (root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
-    return root
 
 
 def _scrub_config(text: str) -> tuple[str, list[str]]:
@@ -198,7 +251,11 @@ def _scrub_config(text: str) -> tuple[str, list[str]]:
     return "\n".join(out) + "\n", redacted
 
 
-def _export_workspace(home: Path, dest: Path) -> list[str]:
+def _export_workspace(home: Path, dest: Path, run_ids: list[str],
+                      artifacts: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """Config (secrets redacted), AGENTS.md, the context of ``run_ids`` and the kept delivery
+    files in ``artifacts``. Returns (redacted config keys, kept files that are missing or no
+    longer match their delivery record)."""
     dest.mkdir(parents=True, exist_ok=True)
     redacted: list[str] = []
     for name in WORKSPACE_FILES:
@@ -210,11 +267,24 @@ def _export_workspace(home: Path, dest: Path) -> list[str]:
             (dest / name).write_text(text, encoding="utf-8")
         else:
             shutil.copyfile(src, dest / name)
-    for name in WORKSPACE_DIRS:
-        if (home / name).is_dir():
-            shutil.copytree(home / name, dest / name, dirs_exist_ok=True,
+    for run_id in run_ids:
+        if (home / "runs" / run_id).is_dir():
+            shutil.copytree(home / "runs" / run_id, dest / "runs" / run_id, dirs_exist_ok=True,
                             ignore=shutil.ignore_patterns("*.tmp"))
-    return redacted
+    problems: list[str] = []
+    for art in artifacts:
+        rel = art.get("path")
+        if not rel:
+            continue
+        src = home / rel
+        if not src.is_file():
+            problems.append(f"{rel}: missing")
+            continue
+        (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dest / rel)
+        if sha256_file(dest / rel) != art.get("sha256"):
+            problems.append(f"{rel}: differs from its delivery record")
+    return redacted, problems
 
 
 def check_bundle(root: Path) -> dict[str, Any]:
@@ -281,9 +351,10 @@ def import_bundle(root: Path, target: Path) -> dict[str, Any]:
             if mismatched:
                 raise ImportError_(f"rebuilt tables differ from the export: {mismatched}")
             conn.execute("PRAGMA foreign_keys = ON")
-            fk = conn.execute("PRAGMA foreign_key_check").fetchall()
-            if fk:
-                raise ImportError_(f"{len(fk)} foreign key errors in the export")
+            broken = integrity_problems(conn)
+            if broken:
+                raise ImportError_("the exported state is not whole (history or references): " + "; ".join(broken[:20])
+                                   + ". Fix the source workspace (or restore a backup there) and export again")
             db.migrate(conn)
             report = reconcile_after_restore(conn, "import")
         finally:
@@ -295,7 +366,7 @@ def import_bundle(root: Path, target: Path) -> dict[str, Any]:
     return {"ok": True, "home": str(target), "schema_version": db.SCHEMA_VERSION,
             "from_schema": manifest["schema_version"], "tables": len(data),
             "files": len(manifest.get("files") or {}), "redacted_config_keys": manifest.get("redacted_config_keys"),
-            **report}
+            "artifact_problems": manifest.get("artifact_problems", []), "integrity": [], **report}
 
 
 def _move_into(staging: Path, target: Path) -> None:
@@ -344,12 +415,13 @@ def verify_rebuild(data_path: Path) -> dict[str, Any]:
                                      f" ({','.join('?' for _ in cols)})", [row[c] for c in cols])
             conn.execute("PRAGMA foreign_keys = ON")
             fk = [tuple(r) for r in conn.execute("PRAGMA foreign_key_check")]
+            broken = integrity_problems(conn)
             rebuilt = dump(conn)
         finally:
             conn.close()
     mismatched = [k for k in data if _table_hash(data[k]) != _table_hash(rebuilt.get(k, []))]
     return {"tables": len(data), "rows": sum(len(v) for v in data.values()), "mismatched": mismatched,
-            "foreign_key_errors": len(fk), "ok": not mismatched and not fk}
+            "foreign_key_errors": len(fk), "integrity_problems": broken, "ok": not mismatched and not broken}
 
 
 def backup(conn: sqlite3.Connection, cfg: Config, keep: int | None = None, prefix: str = "todo") -> Path:
@@ -373,13 +445,16 @@ def backup(conn: sqlite3.Connection, cfg: Config, keep: int | None = None, prefi
 
 def check_backup(path: Path) -> dict[str, Any]:
     src = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    src.row_factory = sqlite3.Row
     try:
         integrity = src.execute("PRAGMA integrity_check").fetchone()[0]
         version = src.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
         counts = {t: src.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("tasks", "projects", "feedback")}
+        broken = integrity_problems(src) if integrity == "ok" else []
     finally:
         src.close()
-    return {"integrity": integrity, "schema_version": int(version[0]) if version else None, "counts": counts}
+    return {"integrity": integrity, "schema_version": int(version[0]) if version else None, "counts": counts,
+            "integrity_problems": broken}
 
 
 def restore(conn: sqlite3.Connection, cfg: Config, path: Path) -> dict[str, Any]:
@@ -396,4 +471,6 @@ def restore(conn: sqlite3.Connection, cfg: Config, path: Path) -> dict[str, Any]
     finally:
         src.close()
     db.migrate(conn)
-    return {**info, "safety_backup": str(safety), **reconcile_after_restore(conn, "restore")}
+    # Reported, not refused: a restore is the way back, and the safety backup keeps what was live.
+    return {**info, "safety_backup": str(safety), **reconcile_after_restore(conn, "restore"),
+            "integrity_problems": integrity_problems(conn)}
