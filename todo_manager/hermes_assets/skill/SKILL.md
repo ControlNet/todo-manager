@@ -3,6 +3,7 @@ name: todo-manager
 description: "Use for the Todo Manager cron runs (intake and feedback) and whenever the user asks in chat about their todos, tasks, projects, follow-ups or agent delegations shown in their Notion Todo Manager. Works only through the `todo-manager` command."
 version: 1.0.0
 author: todo-manager
+license: AGPL-3.0-only
 metadata:
   hermes:
     tags: [todo, tasks, notion, kanban, productivity]

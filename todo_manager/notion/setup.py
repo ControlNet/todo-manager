@@ -83,11 +83,13 @@ def home_markdown() -> str:
                                                  "🤖 Agent 排队／处理中", "✅ 待我验收／待我补充", "🕘 最近完成与重要变化"))
 
 
-def plan(parent_page_id: str) -> list[str]:
+def plan(parent_page_id: str | None = None, home_page_id: str | None = None) -> list[str]:
     """Human-readable list of the writes ``apply`` would perform on a fresh setup."""
     default_ids = {p.field: p.name for p in schema.TASK_PROPS}
     project_ids = {p.field: p.name for p in schema.PROJECT_PROPS}
-    steps = [f"在父页面 {parent_page_id} 下新建页面「{HOME_TITLE}」：顶部数据新鲜度提示框 + 7 个分区标题",
+    first = (f"把现有页面 {home_page_id} 用作首页：在页面顶部插入数据新鲜度提示框 + 7 个分区标题（页面原有内容保留在下方）"
+             if home_page_id else f"在父页面 {parent_page_id} 下新建页面「{HOME_TITLE}」：顶部数据新鲜度提示框 + 7 个分区标题")
+    steps = [first,
              "在首页下新建数据库「项目」：" + "、".join(f"{p.name}({p.type})" for p in schema.PROJECT_PROPS),
              "在首页下新建数据库「任务」：" + "、".join(f"{p.name}({p.type})" for p in schema.TASK_PROPS)
              + f"；「项目」为双向关联，在项目库生成「{schema.TASKS_RELATION_NAME}」列"]
@@ -97,11 +99,27 @@ def plan(parent_page_id: str) -> list[str]:
     return steps
 
 
-def apply(conn: sqlite3.Connection, client: NotionClient, parent_page_id: str) -> dict[str, Any]:
+def apply(conn: sqlite3.Connection, client: NotionClient, parent_page_id: str | None = None,
+          home_page_id: str | None = None) -> dict[str, Any]:
+    """Create what is missing. ``home_page_id`` adopts an existing (e.g. new, empty top-level)
+    page as the home page; otherwise a new home page is created under ``parent_page_id``."""
+    if not (parent_page_id or home_page_id):
+        raise ValueError("either a parent page or an existing home page is required")
     done: dict[str, Any] = {}
     me = client.me()
     save_state(conn, bot_user_id=me["id"])
     home = get_meta(conn, "notion.home_page_id")
+    if not home and home_page_id:
+        page = client.retrieve_page(home_page_id)
+        if page.get("in_trash"):
+            raise ValueError(f"page {home_page_id} is in the trash")
+        current = client.page_markdown(page["id"]).get("markdown") or ""
+        if body.extract(current, HOME_MARKER) is None:
+            client.update_markdown(page["id"], {"type": "insert_content", "insert_content": {
+                "content": home_markdown(), "position": {"type": "start"}}})
+        home = page["id"]
+        save_state(conn, home_page_id=home)
+        done["home_page"] = home
     if not home:
         page = client.create_page({"type": "page_id", "page_id": parent_page_id},
                                   {"title": {"title": [{"type": "text", "text": {"content": HOME_TITLE}}]}},

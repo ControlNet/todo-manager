@@ -308,7 +308,7 @@ def cmd_notion(args: argparse.Namespace) -> int:
     from .notion.client import NotionClient
     cfg, conn = _open(args)
     if args.action == "plan":
-        for n, step in enumerate(setup.plan(args.parent), 1):
+        for n, step in enumerate(setup.plan(args.parent, args.home_page), 1):
             print(f"{n}. {step}")
         return 0
     client = NotionClient.from_config(cfg)
@@ -318,9 +318,11 @@ def cmd_notion(args: argparse.Namespace) -> int:
         _print({"bot": {"id": me.get("id"), "name": me.get("name")}, "workspace_people": len(people),
                 "people": [{"id": u["id"], "name": u.get("name")} for u in people]})
         return 0
+    if not (args.parent or args.home_page):
+        return _fail("INVALID", "pass --home-page <existing page id> or --parent <page id>")
     if not args.yes:
         return _fail("CONFIRM", "notion setup writes to the production workspace; review `notion plan` and pass --yes")
-    _print(setup.apply(conn, client, args.parent))
+    _print(setup.apply(conn, client, args.parent, args.home_page))
     return 0
 
 
@@ -594,9 +596,12 @@ def build_parser() -> argparse.ArgumentParser:
     ns = s.add_subparsers(dest="action", required=True)
     x = ns.add_parser("plan", help="print the setup writes without performing them")
     x.add_argument("--parent", default="<parent-page-id>")
+    x.add_argument("--home-page", help="use this existing page as the home page")
     ns.add_parser("whoami", help="show the integration bot and workspace members (read-only)")
     x = ns.add_parser("setup", help="create home page, databases and views (production write)")
-    x.add_argument("--parent", required=True)
+    g = x.add_mutually_exclusive_group()
+    g.add_argument("--home-page", help="existing page (shared with the integration) to use as the home page")
+    g.add_argument("--parent", help="create a new home page under this page")
     x.add_argument("--yes", action="store_true")
     s.set_defaults(fn=cmd_notion)
 

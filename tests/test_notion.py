@@ -59,6 +59,21 @@ class SetupTests(NotionCase):
         self.assertEqual(len(self.writes()), before, "re-running setup writes nothing")
         self.assertTrue(any("关联视图" in s for s in setup.plan("parent")))
 
+    def test_setup_can_adopt_an_existing_page_as_home(self):
+        from todo_manager import db
+        conn = db.connect(self.tmp / "other.sqlite")
+        try:
+            home = self.fake._new_page({"type": "workspace"}, {}, "我自己写的说明", USER_ID)["id"]
+            setup.apply(conn, self.client, home_page_id=home)
+            setup.apply(conn, self.client, home_page_id=home)
+            md = self.fake.markdown[home]
+            self.assertEqual(md.count("数据新鲜度"), 1)
+            self.assertIn("我自己写的说明", md)
+            self.assertEqual(load_state(conn, self.cfg).home_page_id, home)
+            self.assertEqual(len(self.fake.views), 14, "7 more views on the adopted page")
+        finally:
+            conn.close()
+
 
 class PushPullTests(NotionCase):
     def setUp(self):
