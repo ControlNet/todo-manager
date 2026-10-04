@@ -72,7 +72,7 @@ class FakeSlack:
         raise AssertionError(f"unexpected request {url}")
 
 
-class SlackThreadTests(WorkspaceCase):
+class SlackCase(WorkspaceCase):
     def setUp(self):
         super().setUp()
         self.slack = FakeSlack()
@@ -99,6 +99,8 @@ class SlackThreadTests(WorkspaceCase):
     def now(self):
         return clock.now().timestamp()
 
+
+class SlackThreadTests(SlackCase):
     def known_old_thread(self):
         """A thread from three days ago, read while it was recent; then the window moved on."""
         start = self.now()
@@ -193,3 +195,54 @@ class SlackThreadTests(WorkspaceCase):
         index = json.loads(self.cursor)["thread_index"]
         self.assertEqual(len(index), 3, "at most thread_index_max threads")
         self.assertNotIn(old, index, "threads idle for longer than thread_watch_days are dropped")
+
+
+class ThreadScanProgressTests(SlackCase):
+    """B07: a scan cut short by ``thread_scan_pages`` resumes from the oldest parent it reached
+    (newest first), and the scan watermark only advances when a pass covered every parent back
+    to the ``thread_watch_days`` horizon. Coverage is by parent time, not by thread activity."""
+
+    def old_threads(self, n=10):
+        start = self.now()
+        parents = []
+        for i in range(n):
+            parent = self.slack.post(start - (10 + i) * DAY, f"old topic {i}")
+            self.slack.post(start - (10 + i) * DAY + 60, "ok", user="U3", thread=float(parent))
+            parents.append(parent)
+        return parents
+
+    def test_a_truncated_scan_resumes_and_reaches_the_oldest_thread(self):
+        parents = self.old_threads()
+        self.fetch(page_size=2, thread_scan_pages=1, thread_scan_minutes=0)
+        reply = self.slack.post(self.now(), "still need the dataset card?", thread=float(parents[-1]))
+        found = []
+        for _ in range(8):
+            clock.advance(minutes=5)
+            found += self.ids(self.fetch(page_size=2, thread_scan_pages=1, thread_scan_minutes=0), route="batch")
+        self.assertIn(f"C1:{reply}", found, "the oldest thread is reached by later runs")
+
+    def test_the_watermark_advances_only_after_a_complete_pass(self):
+        self.old_threads()
+        result = self.fetch(page_size=2, thread_scan_pages=1, thread_scan_minutes=0)
+        state = json.loads(self.cursor)
+        self.assertIsNone(state.get("scan_since"), "a partial pass leaves the watermark alone")
+        self.assertIsNotNone(state.get("scan_resume"))
+        self.assertEqual(result.meta.get("thread_scan"), "partial")
+        for _ in range(10):
+            clock.advance(minutes=5)
+            result = self.fetch(page_size=2, thread_scan_pages=1, thread_scan_minutes=0)
+            if result.meta.get("thread_scan") == "complete":
+                break
+        state = json.loads(self.cursor)
+        self.assertEqual(result.meta.get("thread_scan"), "complete")
+        self.assertIsNotNone(state.get("scan_since"))
+        self.assertIsNone(state.get("scan_resume"))
+
+    def test_an_unfinished_pass_continues_before_the_next_cadence_slot(self):
+        self.old_threads()
+        self.fetch(page_size=2, thread_scan_pages=1, thread_scan_minutes=60)
+        clock.advance(minutes=5)
+        before = len([c for c in self.slack.calls if c[0] == "conversations.history"])
+        self.fetch(page_size=2, thread_scan_pages=1, thread_scan_minutes=60)
+        history = [c for c in self.slack.calls if c[0] == "conversations.history"][before:]
+        self.assertTrue(any("latest" in p for _, p in history), "the pass goes on without waiting an hour")

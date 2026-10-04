@@ -12,9 +12,15 @@
   that contains it (the history window, or that thread's replies) was read in this run.
 * Threads whose parent is older than the window: a bounded index (``thread_index_max`` threads
   active within ``thread_watch_days``) remembers the last reply read per thread, and a scan of
-  older parents (every ``thread_scan_minutes``, at most ``thread_scan_pages`` pages) reads a
-  thread again when it has a newer reply or activity inside the overlap window. A thread never
-  seen before also brings its parent and up to ``CONTEXT_REPLIES`` earlier replies as context.
+  older parents reads a thread again when it has a newer reply or activity inside the overlap
+  window. A scan pass walks parents newest first back to the ``thread_watch_days`` horizon; one
+  run reads at most ``thread_scan_pages`` pages and an unfinished pass resumes from the oldest
+  parent it reached on the next run, so no parent is starved. A new pass starts every
+  ``thread_scan_minutes``. The watermark below which an unknown thread's replies count as already
+  covered (``scan_since``) advances only when a pass completes. Coverage is by parent time: a
+  thread whose parent is older than the horizon is not read, however recent its replies.
+  A thread never seen before also brings its parent and up to ``CONTEXT_REPLIES`` earlier
+  replies as context.
 * Cadence: a conversation with a human (non-bot) message in the last ``active_hours`` is read
   every run; a quiet one at most once per ``quiet_poll_minutes`` (staggered per conversation),
   which keeps dozens of conversations within Slack's rate limits.
@@ -259,11 +265,13 @@ class SlackSource(SlackApi):
         kept = sorted(((ts, v) for ts, v in index.items() if v >= horizon), key=lambda kv: -kv[1])[:self.index_max]
         new_state = {"newest": max_ts, "last_message": last_message or None,
                      "window": {i: c for i, c in seen.items() if float(i.split(":")[1]) >= max_ts - self.overlap * 60},
-                     "thread_index": {ts: f"{v:.6f}" for ts, v in kept},
-                     "scanned_at": scan.get("scanned_at", state.get("scanned_at")),
-                     "scan_since": scan.get("scan_since", state.get("scan_since"))}
+                     "thread_index": {ts: f"{v:.6f}" for ts, v in kept}}
+        for key in ("scanned_at", "scan_since", "scan_resume", "scan_pass_since"):
+            new_state[key] = scan[key] if key in scan else state.get(key)
         meta: dict[str, Any] = {"messages": len(items), "threads": len(read_threads)}
-        if self.truncated:
+        if scan.get("progress"):
+            meta["thread_scan"] = scan["progress"]          # complete | partial (resumes next run)
+        if scan.get("progress") == "partial":
             meta["thread_scan_truncated"] = True
         if self.quiet_poll:
             meta["poll_interval_minutes"] = self.quiet_poll   # widens the health staleness threshold
@@ -304,19 +312,29 @@ class SlackSource(SlackApi):
     def _scan_threads(self, state: dict[str, Any], now: float, oldest: float, items: list[Item],
                       seen: dict[str, str], read_threads: dict[str, float], index: dict[str, float]) -> dict[str, Any]:
         """Parents older than the window whose thread has a reply we have not read, or activity
-        inside the overlap window (edits, deletions). Bounded by cadence and pages."""
+        inside the overlap window (edits, deletions). One run reads at most ``scan_pages`` pages;
+        an unfinished pass resumes below the oldest parent it reached."""
+        resume = state.get("scan_resume")
         scanned_at = float(state.get("scanned_at") or 0)
-        if self.scan_minutes and now - scanned_at < self.scan_minutes * 60:
+        if resume is None and self.scan_minutes and now - scanned_at < self.scan_minutes * 60:
             return {}
         horizon = now - self.watch_days * 86400
-        if horizon >= oldest:
-            return {"scanned_at": now, "scan_since": oldest}
-        # Replies newer than this were possibly never read (the window start of the last scan).
-        scan_since = float(state.get("scan_since") or oldest)
+        pass_since = float(state.get("scan_pass_since") or oldest) if resume is not None else oldest
+        upper = min(float(resume), oldest) if resume is not None else oldest
+        done = {"scanned_at": now, "scan_since": pass_since, "scan_resume": None, "scan_pass_since": None,
+                "progress": "complete"}
+        if horizon >= upper:
+            return done
+        # Replies newer than this were possibly never read: the window start when the last
+        # COMPLETE pass began (a partial pass does not move it).
+        scan_since = float(state.get("scan_since") or pass_since)
         max_ts = 0.0
+        self.truncated = False
         parents = self._paged("conversations.history", {"channel": self.channel, "oldest": f"{horizon:.6f}",
-                                                        "latest": f"{oldest:.6f}", "inclusive": "true"},
+                                                        "latest": f"{upper:.6f}",
+                                                        "inclusive": "false" if resume is not None else "true"},
                               max_pages=self.scan_pages)
+        partial = self.truncated and bool(parents)
         for parent in parents:
             ts = parent.get("ts")
             if not parent.get("reply_count") or parent.get("thread_ts") != ts or ts in read_threads:
@@ -330,7 +348,10 @@ class SlackSource(SlackApi):
                 max_ts = max(max_ts, self._read_thread(ts, 0.0, scan_since, items, seen, read_threads, index))
             elif latest > known or latest >= oldest:
                 max_ts = max(max_ts, self._read_thread(ts, min(known, oldest), None, items, seen, read_threads, index))
-        return {"scanned_at": now, "scan_since": oldest, "max_ts": max_ts}
+        if partial:
+            return {"scan_resume": min(float(p["ts"]) for p in parents), "scan_pass_since": pass_since,
+                    "max_ts": max_ts, "progress": "partial"}
+        return {**done, "max_ts": max_ts}
 
     def _deletions(self, state: dict[str, Any], oldest: float, seen: dict[str, str],
                    read_threads: dict[str, float], started: datetime) -> list[Item]:
