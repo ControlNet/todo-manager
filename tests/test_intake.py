@@ -110,7 +110,7 @@ class IntakeWakeTests(WorkspaceCase):
         self.assertIn("503", row["last_error"])
 
     def test_context_budget_limits_a_run_and_a_backlog_is_not_held_back(self):
-        self.cfg.data["wake"]["max_context_chars"] = 9000
+        self.cfg.data["wake"]["max_evidence_chars"] = 9000
         self.gmail.push(*[mail(f"m{i}", f"t{i}", f"thread {i} " + "x" * 3000) for i in range(6)])
         self.gate()
         clock.advance(minutes=16)
@@ -131,7 +131,7 @@ class IntakeWakeTests(WorkspaceCase):
         self.assertFalse(wake_of(out))
 
     def test_an_email_backlog_does_not_starve_chat(self):
-        self.cfg.data["wake"]["max_context_chars"] = 9000
+        self.cfg.data["wake"]["max_evidence_chars"] = 9000
         self.gmail.push(*[mail(f"m{i}", f"t{i}", f"thread {i} " + "x" * 3000) for i in range(12)])
         self.gate()
         clock.advance(minutes=16)

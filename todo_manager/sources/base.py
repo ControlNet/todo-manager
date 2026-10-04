@@ -195,11 +195,15 @@ def items_for_batch(conn: sqlite3.Connection, batch_id: str) -> list[dict[str, A
 
 
 def conversation_history(conn: sqlite3.Connection, source: str, conversation_key: str,
-                         exclude_batch: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
+                         exclude_batch: str | None = None, limit: int = 30,
+                         before: str | None = None) -> list[dict[str, Any]]:
+    """Latest messages of a conversation (oldest first), optionally only those before ``before``
+    (the last new message of a batch: a later segment's messages are not shown as earlier)."""
     rows = conn.execute(
         "SELECT * FROM source_items WHERE source=? AND conversation_key=? AND (batch_id IS NULL OR batch_id != ?)"
-        " AND state IN ('processed','batched','pending') ORDER BY occurred_at DESC LIMIT ?",
-        (source, conversation_key, exclude_batch or "", limit)).fetchall()
+        " AND state IN ('processed','batched','pending') AND (? IS NULL OR occurred_at < ?)"
+        " ORDER BY occurred_at DESC LIMIT ?",
+        (source, conversation_key, exclude_batch or "", before, before, limit)).fetchall()
     return [{**dict(r), "meta": loads(r["meta"], {})} for r in reversed(rows)]
 
 

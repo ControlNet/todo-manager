@@ -13,6 +13,13 @@ Per-source policy:
 Mature batches of every source are merged into one model run. Waking for one source
 never pulls in immature batches of another (``mature`` is decided per batch first).
 A ``forced`` batch (explicit "process this now") matures immediately.
+
+Budget: ``wake.max_context_chars`` bounds the whole rendered context and
+``wake.max_evidence_chars`` the new evidence in it (the evidence gets what the fixed part -
+rules, open tasks, follow-ups, digest, format - leaves). A conversation larger than one run is
+split into segments in message order; the later segment is a separate mature batch that waits
+while an earlier segment of the same conversation is in flight, and is never marked processed
+before it was rendered and decided.
 """
 
 from __future__ import annotations
@@ -23,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
-from . import clock
+from . import clock, ids
 from .config import Config
 from .db import loads, tx
 
@@ -89,10 +96,23 @@ def last_wake_for_source(conn: sqlite3.Connection, source: str) -> str | None:
     return row["at"] if row else None
 
 
-def plan_intake_wake(conn: sqlite3.Connection, cfg: Config, extra_reasons: list[str] | None = None) -> WakePlan:
-    """Decide which mature batches go into this run and whether to wake at all."""
+def evidence_budget(cfg: Config, base_chars: int = 0) -> int:
+    """Characters of new evidence one run may render, after the fixed part of the context."""
+    total = int(cfg.get("wake.max_context_chars", 60000))
+    return max(0, min(int(cfg.get("wake.max_evidence_chars", 40000)), total - base_chars))
+
+
+def plan_intake_wake(conn: sqlite3.Connection, cfg: Config, extra_reasons: list[str] | None = None,
+                     base_chars: int = 0) -> WakePlan:
+    """Decide which mature batches go into this run and whether to wake at all. ``base_chars``
+    is the size of the context without evidence."""
     plan = WakePlan(wake=False, reasons=list(extra_reasons or []))
-    rows = conn.execute("SELECT id, source FROM batches WHERE state='mature' ORDER BY matured_at").fetchall()
+    budget = evidence_budget(cfg, base_chars)
+    # A later segment of a conversation waits while an earlier one is in flight (message order).
+    rows = conn.execute(
+        "SELECT id, source FROM batches b WHERE state='mature' AND NOT EXISTS (SELECT 1 FROM batches o"
+        " WHERE o.source=b.source AND o.conversation_key=b.conversation_key AND o.state='claimed')"
+        " ORDER BY matured_at, first_item_at").fetchall()
     by_source: dict[str, list[str]] = {}
     for row in rows:
         by_source.setdefault(row["source"], []).append(row["id"])
@@ -101,7 +121,6 @@ def plan_intake_wake(conn: sqlite3.Connection, cfg: Config, extra_reasons: list[
         interval = min_wake_interval(cfg, source)
         last = clock.minutes_since(last_wake_for_source(conn, source))
         if interval and last is not None and last < interval:
-            budget = int(cfg.get("wake.max_context_chars", 60000))
             if sum(estimate_chars(conn, b) for b in batch_ids) <= budget:
                 gated[source] = batch_ids  # may still ride along with another reason
                 continue
@@ -120,9 +139,8 @@ def plan_intake_wake(conn: sqlite3.Connection, cfg: Config, extra_reasons: list[
         plan.deferred = {source: len(v) for source, v in gated.items()}
     if plan.batch_ids:
         source_of = {row["id"]: row["source"] for row in rows}
-        plan.batch_ids = _limit_batches(conn, _round_robin(plan.batch_ids, source_of),
-                                        int(cfg.get("wake.max_items_per_run", 60)),
-                                        int(cfg.get("wake.max_context_chars", 60000)))
+        plan.batch_ids = _fit_batches(conn, _round_robin(plan.batch_ids, source_of), source_of,
+                                      int(cfg.get("wake.max_items_per_run", 60)), budget)
     return plan
 
 
@@ -139,34 +157,107 @@ ITEM_OVERHEAD = 200     # header, recipients and subject lines per rendered item
 BATCH_OVERHEAD = 300    # conversation heading, link, linked tasks
 
 
+EARLIER_SHOWN = 6       # earlier messages rendered as context per conversation
+
+
+def _item_sizes(conn: sqlite3.Connection, batch_id: str) -> list[tuple[str, int]]:
+    """(item id, rendered size bound) of a batch's new items in message order."""
+    from .intake import BULK_ITEM_CHARS, MAX_ITEM_CHARS
+    sizes = []
+    for r in conn.execute("SELECT s.id, s.meta, LENGTH(b.body) AS n FROM source_items s LEFT JOIN source_bodies b"
+                          " ON b.item_id=s.id WHERE s.batch_id=? AND s.state='batched' ORDER BY s.occurred_at,"
+                          " s.fetched_at, s.id", (batch_id,)):
+        limit = BULK_ITEM_CHARS if loads(r["meta"], {}).get("bulk_hint") else MAX_ITEM_CHARS
+        sizes.append((r["id"], min(r["n"] or 0, limit) + ITEM_OVERHEAD))
+    return sizes
+
+
+def _earlier_chars(conn: sqlite3.Connection, batch_id: str) -> int:
+    from .intake import MAX_EARLIER_CHARS
+    batch = conn.execute("SELECT source, conversation_key, last_item_at FROM batches WHERE id=?", (batch_id,)).fetchone()
+    if batch is None:
+        return 0
+    rows = conn.execute(
+        "SELECT LENGTH(b.body) AS n FROM source_items s LEFT JOIN source_bodies b ON b.item_id=s.id"
+        " WHERE s.source=? AND s.conversation_key=? AND (s.batch_id IS NULL OR s.batch_id != ?)"
+        " AND s.state IN ('processed','batched','pending') AND s.occurred_at < ? ORDER BY s.occurred_at DESC LIMIT ?",
+        (batch["source"], batch["conversation_key"], batch_id, batch["last_item_at"] or "", EARLIER_SHOWN)).fetchall()
+    return sum(min(r["n"] or 0, MAX_EARLIER_CHARS) + ITEM_OVERHEAD for r in rows)
+
+
 def estimate_chars(conn: sqlite3.Connection, batch_id: str) -> int:
     """Upper bound of the evidence text one batch adds to the intake context (see intake.render_context)."""
-    from .intake import BULK_ITEM_CHARS, MAX_EARLIER_CHARS, MAX_ITEM_CHARS
-    batch = conn.execute("SELECT source, conversation_key FROM batches WHERE id=?", (batch_id,)).fetchone()
-    total = BATCH_OVERHEAD
-    for r in conn.execute("SELECT s.meta, LENGTH(b.body) AS n FROM source_items s LEFT JOIN source_bodies b"
-                          " ON b.item_id=s.id WHERE s.batch_id=? AND s.state='batched'", (batch_id,)):
-        limit = BULK_ITEM_CHARS if loads(r["meta"], {}).get("bulk_hint") else MAX_ITEM_CHARS
-        total += min(r["n"] or 0, limit) + ITEM_OVERHEAD
-    earlier = conn.execute(
-        "SELECT COUNT(*) FROM source_items WHERE source=? AND conversation_key=? AND (batch_id IS NULL OR batch_id != ?)"
-        " AND state IN ('processed','batched','pending')", (batch["source"], batch["conversation_key"], batch_id)
-    ).fetchone()[0] if batch else 0
-    return total + min(earlier, 6) * (MAX_EARLIER_CHARS + ITEM_OVERHEAD)
+    return BATCH_OVERHEAD + _earlier_chars(conn, batch_id) + sum(n for _, n in _item_sizes(conn, batch_id))
 
 
-def _limit_batches(conn: sqlite3.Connection, batch_ids: list[str], max_items: int, max_chars: int) -> list[str]:
-    """Batches in order until the item or character budget is reached (always at least one)."""
+def split_batch(conn: sqlite3.Connection, batch_id: str, max_chars: int, max_items: int) -> str | None:
+    """Keep the leading messages of a batch that fit ``max_chars``/``max_items`` (at least one)
+    and move the rest, unread, into a new mature batch of the same conversation. Returns the new
+    batch id, or None when everything fits."""
+    sizes = _item_sizes(conn, batch_id)
+    room = max_chars - BATCH_OVERHEAD - _earlier_chars(conn, batch_id)
+    keep, used = 0, 0
+    for _, size in sizes:
+        if keep and (keep >= max_items or used + size > room):
+            break
+        keep += 1
+        used += size
+    tail = [item_id for item_id, _ in sizes[keep:]]
+    if not tail:
+        return None
+    new_id = ids.new_id("batch")
+    with tx(conn):
+        first, last = conn.execute(
+            f"SELECT MIN(occurred_at), MAX(occurred_at) FROM source_items WHERE id IN ({','.join('?' * len(tail))})",
+            tail).fetchone()
+        conn.execute(
+            "INSERT INTO batches(id, source, conversation_key, state, first_item_at, last_item_at, last_activity_at,"
+            " matured_at, forced, created_at) SELECT ?, source, conversation_key, 'mature', ?, ?, last_activity_at,"
+            " matured_at, forced, ? FROM batches WHERE id=?", (new_id, first, last, clock.iso(), batch_id))
+        for start in range(0, len(tail), 500):
+            chunk = tail[start:start + 500]
+            conn.execute(f"UPDATE source_items SET batch_id=? WHERE id IN ({','.join('?' * len(chunk))})",
+                         (new_id, *chunk))
+        head_last = conn.execute("SELECT MAX(occurred_at) FROM source_items WHERE batch_id=?", (batch_id,)).fetchone()[0]
+        conn.execute("UPDATE batches SET last_item_at=? WHERE id=?", (head_last, batch_id))
+    return new_id
+
+
+def _fit_batches(conn: sqlite3.Connection, batch_ids: list[str], source_of: dict[str, str], max_items: int,
+                 max_chars: int) -> list[str]:
+    """Batches in order until the item or character budget is reached; a batch that would fit
+    a later run waits for it. A batch that cannot fit any run on its own is split: its segment
+    gets the room left, at most an even share per waiting source (so one huge thread cannot hold
+    every run), and at least one message when nothing else was chosen."""
+    sources = len({source_of[b] for b in batch_ids}) or 1
     chosen, items, chars = [], 0, 0
     for batch_id in batch_ids:
-        count = conn.execute("SELECT COUNT(*) FROM source_items WHERE batch_id=?", (batch_id,)).fetchone()[0]
+        sizes = _item_sizes(conn, batch_id)
         size = estimate_chars(conn, batch_id)
-        if chosen and (items + count > max_items or chars + size > max_chars):
-            break
-        chosen.append(batch_id)
-        items += count
-        chars += size
+        if items + len(sizes) <= max_items and chars + size <= max_chars:
+            chosen.append(batch_id)
+            items += len(sizes)
+            chars += size
+            continue
+        if sizes and (len(sizes) > max_items or size > max_chars):   # oversize: no run could take it whole
+            room_chars = min(max_chars - chars, max_chars // sources)
+            room_items = min(max_items - items, max(1, max_items // sources))
+            first = BATCH_OVERHEAD + _earlier_chars(conn, batch_id) + sizes[0][1]
+            if not chosen or (room_items > 0 and room_chars >= first):
+                split_batch(conn, batch_id, room_chars, max(room_items, 1))
+                chosen.append(batch_id)
+                items += min(len(sizes), max(room_items, 1))
+                chars += estimate_chars(conn, batch_id)
+                continue
+        break
     return chosen
+
+
+def unclaim(conn: sqlite3.Connection, batch_id: str, run_id: str) -> None:
+    """Undo this run's claim of a batch that did not fit the rendered budget (not an attempt)."""
+    with tx(conn):
+        conn.execute("UPDATE batches SET state='mature', claimed_run=NULL, claimed_at=NULL, attempts=attempts-1"
+                     " WHERE id=? AND claimed_run=? AND state='claimed'", (batch_id, run_id))
 
 
 def claim(conn: sqlite3.Connection, batch_ids: list[str], run_id: str) -> list[str]:

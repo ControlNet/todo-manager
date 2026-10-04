@@ -76,7 +76,8 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
                             (entry,)).fetchone()
         out["runs"][entry] = {
             "last": dict(id=last["id"], at=last["started_at"], status=last["status"], error=last["error"]) if last else None,
-            "last_wake": dict(id=woke["id"], at=woke["started_at"], completed=bool(woke["agent_completed_at"]))
+            "last_wake": dict(id=woke["id"], at=woke["started_at"], completed=bool(woke["agent_completed_at"]),
+                              over_budget=loads(woke["summary"], {}).get("context_over_budget"))
             if woke else None}
     out["notion_ready"] = bool(get_meta(conn, "notion.tasks_data_source_id") or cfg.get("notion.tasks_data_source_id"))
     out["problems"] = problems(out, cfg)
@@ -123,6 +124,9 @@ def problems(rep: dict[str, Any], cfg: Config) -> list[str]:
         if last["status"] == "error":
             found.append(f"{entry} gate error: {last['error']}")
         woke = info["last_wake"]
+        if woke and woke.get("over_budget"):
+            found.append(f"{entry} run {woke['id']} context is over budget ({woke['over_budget']} chars): fewer open"
+                         " tasks/rules or a larger wake.max_context_chars")
         if woke and not woke["completed"] and (clock.minutes_since(woke["at"]) or 0) > 90:
             found.append(f"{entry} run {woke['id']} woke the model but never applied its decisions")
     return found

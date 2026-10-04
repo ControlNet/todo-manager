@@ -18,7 +18,7 @@ import re
 import sqlite3
 from typing import Any
 
-from . import clock, prompts, rules, runs, store
+from . import batching, clock, prompts, rules, runs, store
 from .config import Config
 from .db import dumps, loads, rules_version, tx
 from .sources.base import conversation_history, item_body, quote
@@ -167,7 +167,9 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, manifest:
             out.append(f"link: {batch_items[0]['url']}")
         if related:
             out.append("already linked tasks: " + "; ".join(f"{t['id']} [{t['status']}] {t['title']}" for t in related))
-        earlier = conversation_history(conn, batch["source"], batch["conversation_key"], exclude_batch=batch["id"], limit=6)
+        earlier = conversation_history(conn, batch["source"], batch["conversation_key"], exclude_batch=batch["id"],
+                                       limit=batching.EARLIER_SHOWN,
+                                       before=max((i["occurred_at"] for i in batch_items), default=None))
         for e in earlier:
             body = trim_quoted(item_body(conn, e["id"]))
             out.append(f"\n{_item_header(e)} [earlier]\n{quote(_clip(body, MAX_EARLIER_CHARS))}")

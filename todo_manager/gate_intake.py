@@ -16,7 +16,7 @@ import time
 from datetime import timedelta
 from typing import Any
 
-from . import batching, clock, runs
+from . import batching, clock, intake, runs
 from .config import Config
 from .db import tx
 from .sources.base import SourceError, get_cursor, persist_fetch, record_fetch_error, retire_scopes
@@ -187,13 +187,22 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[
             extra.append(f"commit_digest:{len(digest['item_ids'])}")
         if followups:
             extra.append(f"followups_due:{len(followups)}")
-        plan = batching.plan_intake_wake(conn, cfg, extra)
+        draft = {"followups": followups, "digest": digest}
+        base_chars = 0
+        if extra or conn.execute("SELECT 1 FROM batches WHERE state='mature' LIMIT 1").fetchone():
+            base_chars = len(intake.render_context(conn, cfg, run_id, draft))   # nothing claimed yet
+        plan = batching.plan_intake_wake(conn, cfg, extra, base_chars=base_chars)
         if plan.deferred:
             summary["deferred_by_interval"] = plan.deferred
         if not plan.wake:
             runs.finish(conn, run_id, status="idle", summary=summary)
             return '{"wakeAgent": false}', False
         claimed = batching.claim(conn, plan.batch_ids, run_id)
+        claimed, context_chars = fit_rendered(conn, cfg, run_id, claimed, draft)
+        summary["context_chars"] = context_chars
+        total = int(cfg.get("wake.max_context_chars", 60000))
+        if context_chars > total:
+            summary["context_over_budget"] = context_chars
         now = clock.iso()
         with tx(conn):
             claim_followups(conn, run_id, followups)
@@ -212,6 +221,9 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[
             f"Wake reasons: {', '.join(plan.reasons)}",
             f"Conversations claimed: {len(claimed)}; follow-ups due: {len(followups)};"
             f" commit digest: {'yes' if digest else 'no'}",
+            f"Context: {context_chars} chars (budget {total})" + (
+                "; over budget: the fixed part (rules, open tasks, follow-ups, digest, format) is too large"
+                if context_chars > total else ""),
             f"Do: load skill todo-manager, run `todo-manager intake show {run_id}`, decide, then `todo-manager intake apply {run_id} --file <decisions.json>`.",
             '{"wakeAgent": true}',
         ]
@@ -219,6 +231,26 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[
     except Exception as exc:  # noqa: BLE001 - never wake the model for a gate crash
         runs.finish(conn, run_id, status="error", summary=summary, error=f"{type(exc).__name__}: {exc}")
         return '{"wakeAgent": false}', False
+
+
+def fit_rendered(conn: sqlite3.Connection, cfg: Config, run_id: str, claimed: list[str],
+                 draft: dict[str, Any]) -> tuple[list[str], int]:
+    """Check the real rendered context against ``wake.max_context_chars``: give back the last
+    claimed conversations, then split the only one left, until it fits or one message remains
+    (then the size is reported as over budget, never silently cut)."""
+    total = int(cfg.get("wake.max_context_chars", 60000))
+    claimed = list(claimed)
+    while True:
+        size = len(intake.render_context(conn, cfg, run_id, draft))
+        if size <= total or not claimed:
+            return claimed, size
+        if len(claimed) > 1:
+            batching.unclaim(conn, claimed.pop(), run_id)
+            continue
+        count = len(intake.run_new_items(conn, run_id))
+        if count <= 1:
+            return claimed, size
+        batching.split_batch(conn, claimed[0], 10 ** 9, count // 2)
 
 
 def manifest_for(cfg: Config, run_id: str) -> dict[str, Any]:

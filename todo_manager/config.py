@@ -113,9 +113,12 @@ DEFAULTS: dict[str, Any] = {
         "max_attempts": 3,
     },
     "wake": {
-        # Upper bound on items rendered into one model context; the rest wait for next run.
+        # Upper bounds for one intake model run; the rest waits for the next run. The whole
+        # rendered context is checked against max_context_chars before the model is woken;
+        # new evidence gets at most max_evidence_chars of it (PROPOSED values).
         "max_items_per_run": 60,
         "max_context_chars": 60000,
+        "max_evidence_chars": 40000,
     },
 }
 
