@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from ..config import Config, read_env_secret
@@ -37,19 +38,30 @@ def conversation_sources(cfg: Config) -> list[Any]:
     if slack.get("enabled"):
         from .slack import SlackSource
         token_env = slack.get("token_env", "SLACK_USER_TOKEN")
+        token_file = slack.get("token_file") or ""
         env_file = cfg.get("notion.env_file")
 
         def token() -> str:
+            from .base import SourceError
+            if token_file:   # e.g. a 0600 file under ~/.hermes/credentials/
+                path = Path(token_file).expanduser()
+                try:
+                    value = path.read_text(encoding="utf-8").strip()
+                except OSError:
+                    raise SourceError(f"Slack token file {path} is not readable") from None
+                if not value:
+                    raise SourceError(f"Slack token file {path} is empty")
+                return value
             value = read_env_secret(token_env, env_file)
             if not value:
-                from .base import SourceError
                 raise SourceError(f"{token_env} is not set")
             return value
 
+        names: dict[str, str | None] = {}   # one users.info lookup per member per gate run
         for conv in slack.get("conversations", []):
             adapters.append(SlackSource(token=token, team=slack.get("team", ""), conversation=conv,
                                         my_user_ids=ident.get("slack_user_ids", []),
-                                        page_size=int(slack.get("page_size", 200))))
+                                        page_size=int(slack.get("page_size", 200)), user_names=names))
     return adapters
 
 

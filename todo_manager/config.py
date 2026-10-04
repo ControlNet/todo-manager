@@ -53,6 +53,7 @@ DEFAULTS: dict[str, Any] = {
     "slack": {
         "enabled": False,
         "token_env": "SLACK_USER_TOKEN",
+        "token_file": "",  # alternative to token_env: a private file holding only the token
         "conversations": [],  # channel / DM IDs confirmed in scope
         "quiet_minutes": 30,  # agreed: >= 30 minutes after the last relevant message
         "page_size": 200,

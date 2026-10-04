@@ -504,7 +504,9 @@ accounts = []   # [{name = "work", address = "me@example.org", token_command = [
 
 [slack]
 enabled = false
-conversations = []
+token_env = "SLACK_USER_TOKEN"   # or token_file = "~/.hermes/credentials/<file>" (only the token, mode 0600)
+team = ""                        # workspace id (T...)
+conversations = []               # channel / DM ids (C..., G..., D...)
 
 [github]
 enabled = false

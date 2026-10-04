@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -20,6 +21,7 @@ from ..net import HttpError, HttpTimeout, request_json
 from .base import FetchResult, Item, SourceError
 
 API = "https://slack.com/api"
+MENTION = re.compile(r"<@([UW][A-Z0-9]+)(?:\|[^>]*)?>")
 SKIP_SUBTYPES = {"channel_join", "channel_leave", "bot_add", "channel_topic", "channel_purpose", "reminder_add"}
 
 
@@ -32,7 +34,8 @@ class SlackSource:
 
     def __init__(self, *, token: Callable[[], str], team: str, conversation: str, my_user_ids: list[str],
                  overlap_minutes: int = 24 * 60, lookback_days: int = 7, page_size: int = 200,
-                 http: Callable[..., Any] = request_json, known_ids: Callable[[set[str]], set[str]] | None = None):
+                 http: Callable[..., Any] = request_json, known_ids: Callable[[set[str]], set[str]] | None = None,
+                 user_names: dict[str, str | None] | None = None):
         self.token = token
         self.team = team
         self.channel = conversation
@@ -42,6 +45,7 @@ class SlackSource:
         self.page_size = page_size
         self.http = http
         self.known_ids = known_ids
+        self.names = user_names if user_names is not None else {}   # shared cache: user id -> name
 
     @property
     def scope(self) -> str:
@@ -58,6 +62,29 @@ class SlackSource:
         if not data.get("ok"):
             raise SourceError(f"slack {method}: {data.get('error')}")
         return data
+
+    def _name(self, user_id: str) -> str | None:
+        """Display name of a workspace member (users.info, cached); None when unknown."""
+        if user_id not in self.names:
+            try:
+                user = self._call("users.info", {"user": user_id}).get("user") or {}
+            except SourceError as exc:
+                if exc.retry_after:
+                    raise
+                user = {}
+            profile = user.get("profile") or {}
+            self.names[user_id] = (user.get("real_name") or profile.get("real_name")
+                                   or profile.get("display_name") or user.get("name") or None)
+        return self.names[user_id]
+
+    def _mentions(self, text: str) -> str:
+        def name(match: re.Match[str]) -> str:
+            uid = match.group(1)
+            label = self._name(uid)
+            if not label:
+                return match.group(0)
+            return f"@{label}" + (" [ME]" if uid in self.me else "")
+        return MENTION.sub(name, text or "")
 
     def _paged(self, method: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
@@ -121,8 +148,14 @@ class SlackSource:
         user = msg.get("user") or msg.get("bot_id") or ""
         is_bot = bool(msg.get("bot_id")) and user not in self.me
         files = [f.get("name") for f in msg.get("files", []) or []]
+        if is_bot:
+            label = (msg.get("bot_profile") or {}).get("name") or msg.get("username")
+        else:
+            label = self._name(user) if msg.get("user") else None
+        author = f"{label} ({user})" if label else user
         return Item(source="slack", account=self.team, external_id=external, version=edited,
                     kind="edit" if edited else "message", conversation_key=key, thread_key=key,
-                    occurred_at=ts_to_iso(edited or msg["ts"]), author=user, author_is_me=user in self.me,
-                    title=None, url=None, body=msg.get("text", ""), route="context" if is_bot else "batch",
+                    occurred_at=ts_to_iso(edited or msg["ts"]), author=author, author_is_me=user in self.me,
+                    title=None, url=None, body=self._mentions(msg.get("text", "")),
+                    route="context" if is_bot else "batch",
                     meta={"files": files, "thread_ts": thread_ts, "ts": msg["ts"]})

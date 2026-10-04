@@ -137,6 +137,8 @@ class GitHubNotificationTests(WorkspaceCase):
 
 
 class SlackAdapterTests(WorkspaceCase):
+    NO_USERS = ("users.info", {"ok": False, "error": "user_not_found"})
+
     def source(self, http):
         return SlackSource(token=lambda: "t", team="T1", conversation="C1", my_user_ids=["UME"], http=http,
                            page_size=2)
@@ -156,6 +158,7 @@ class SlackAdapterTests(WorkspaceCase):
             ("conversations.replies", {"ok": True, "messages": [
                 {"ts": f"{now - 50:.6f}", "user": "U2", "text": "parent"},
                 {"ts": f"{now - 40:.6f}", "user": "UME", "text": "will do by Friday"}]}),
+            self.NO_USERS,
         ])
         result = self.source(http).fetch(None)
         keys = {i.external_id: i for i in result.items}
@@ -170,13 +173,44 @@ class SlackAdapterTests(WorkspaceCase):
             m for m in top_pages[None]["messages"][1:] + top_pages["c2"]["messages"]]}),
             ("conversations.replies", {"ok": True, "messages": [
                 {"ts": f"{now - 50:.6f}", "user": "U2", "text": "parent"},
-                {"ts": f"{now - 40:.6f}", "user": "UME", "text": "will do by Friday"}]})])
+                {"ts": f"{now - 40:.6f}", "user": "UME", "text": "will do by Friday"}]}), self.NO_USERS])
         result2 = self.source(http2).fetch(result.cursor)
         deleted = [i for i in result2.items if i.kind == "deletion"]
         self.assertEqual([i.external_id for i in deleted], [f"C1:{now - 60:.6f}"])
+
+    def test_authors_and_mentions_are_resolved_to_names(self):
+        now = clock.now().timestamp()
+        users = {"U2": {"ok": True, "user": {"id": "U2", "real_name": "Alice Chen", "profile": {"display_name": "alice"}}},
+                 "UME": {"ok": True, "user": {"id": "UME", "real_name": "Test User", "profile": {}}}}
+        http = FakeHttp([
+            ("conversations.history", {"ok": True, "messages": [
+                {"ts": f"{now - 60:.6f}", "user": "U2", "text": "<@UME> can you send the slides? cc <@U9>"}]}),
+            ("users.info", lambda p: users.get(p["user"], {"ok": False, "error": "user_not_found"})),
+        ])
+        [item] = self.source(http).fetch(None).items
+        self.assertEqual(item.author, "Alice Chen (U2)")
+        self.assertIn("@Test User [ME] can you send the slides?", item.body)
+        self.assertIn("<@U9>", item.body, "unknown users stay as ids")
+        lookups = [c[2]["user"] for c in http.calls if "users.info" in c[1]]
+        self.assertEqual(sorted(lookups), ["U2", "U9", "UME"], "each user looked up once, unknown ones too")
 
     def test_api_error_is_a_failure(self):
         http = FakeHttp([("conversations.history", {"ok": False, "error": "not_in_channel"})])
         with self.assertRaises(Exception) as ctx:
             self.source(http).fetch(None)
         self.assertIn("not_in_channel", str(ctx.exception))
+
+
+class SlackRegistryTests(WorkspaceCase):
+    def test_token_can_come_from_a_private_file(self):
+        from todo_manager.sources import registry
+        from todo_manager.sources.base import SourceError
+        token_file = self.tmp / "slack_user_token"
+        token_file.write_text("xoxp-test-token\n", encoding="utf-8")
+        self.cfg.data["slack"].update(enabled=True, token_file=str(token_file), conversations=["C1"], team="T1")
+        [src] = [s for s in registry.conversation_sources(self.cfg) if s.name == "slack"]
+        self.assertEqual(src.token(), "xoxp-test-token")
+        token_file.unlink()
+        with self.assertRaises(SourceError) as ctx:
+            src.token()
+        self.assertNotIn("xoxp", str(ctx.exception))
