@@ -54,6 +54,24 @@ class MigrationTests(unittest.TestCase):
         db.connect(self.path).close()
         self.assertEqual(len(list((self.home / "backups").glob("pre-schema-*.sqlite"))), 1)
 
+    def test_surfaced_follow_ups_become_done_checks(self):
+        make_v1(self.path)
+        conn = sqlite3.connect(str(self.path), isolation_level=None)
+        conn.execute("UPDATE tasks SET follow_up_date='2026-10-01' WHERE id='tsk_1'")
+        conn.execute("INSERT INTO tasks(id, title, status, next_actor, origin, follow_up_date, created_at, updated_at)"
+                     " VALUES ('tsk_2', 'Moved on', 'waiting', 'external', 'cli', '2026-10-09', 'x', 'x')")
+        for tid in ("tsk_1", "tsk_2"):
+            conn.execute("INSERT INTO decisions(id, run_id, op, target_type, target_id, created_at)"
+                         " VALUES (?, 'run_1', 'followup_surfaced', 'task', ?, '2026-10-01T09:00:00Z')", (f"d_{tid}", tid))
+        conn.close()
+        conn = db.connect(self.path)
+        try:
+            rows = [tuple(r) for r in conn.execute("SELECT task_id, due, state FROM followup_checks")]
+        finally:
+            conn.close()
+        # tsk_2's follow-up date moved after it was surfaced: that is a new, open check.
+        self.assertEqual(rows, [("tsk_1", "2026-10-01", "done")])
+
     def test_fresh_database_takes_no_backup(self):
         db.connect(self.path).close()
         self.assertFalse((self.home / "backups").exists())

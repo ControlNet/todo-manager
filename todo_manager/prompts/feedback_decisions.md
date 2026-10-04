@@ -43,3 +43,5 @@ carry real changes into task fields; `applied` or `ignored` lets the box be rege
 user's own notes on the page changed: most are notes, some are requirements; never a rule unless stated as
 one), property_edit (an edit by someone else, not applied), page_trashed, direct.
 On error the command prints `{"error": CODE, "details": [...]}` and applies nothing: fix the file and re-run.
+A repeated apply of the same file prints the first report with `"duplicate": true`; `ALREADY_APPLIED` (applied
+with a different file) and `STALE_RUN` (released) mean: stop.

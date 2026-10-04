@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from datetime import timedelta
 from typing import Any
 
 from . import batching, clock, runs
@@ -22,6 +23,7 @@ from .sources.base import SourceError, get_cursor, persist_fetch, record_fetch_e
 
 FETCH_BUDGET_SECONDS = 200
 STALE_CLAIM_MINUTES = 90
+FOLLOWUP_ATTEMPTS = 2
 
 
 def fetch_all(conn: sqlite3.Connection, adapters: list[Any], budget: float = FETCH_BUDGET_SECONDS) -> dict[str, Any]:
@@ -131,14 +133,41 @@ def commit_digest_check(conn: sqlite3.Connection, cfg: Config, adapters: list[An
 
 
 def due_followups(conn: sqlite3.Connection, cfg: Config) -> list[str]:
+    """Open tasks whose follow-up date has come. One check per (task, follow-up date): it is
+    claimed by a run and done only when that run's decisions are applied; a run that never
+    applies releases it after ``STALE_CLAIM_MINUTES`` for a bounded number of attempts, then it
+    is marked failed (reported by health). A new follow-up date is a new check."""
     today = clock.local_date(cfg.tz).isoformat()
+    cutoff = clock.iso(clock.now() - timedelta(minutes=STALE_CLAIM_MINUTES))
     rows = conn.execute(
-        "SELECT t.id, t.follow_up_date FROM tasks t WHERE t.status IN ('todo','in_progress','waiting')"
-        " AND t.follow_up_date IS NOT NULL AND substr(t.follow_up_date,1,10) <= ?"
-        " AND (t.snooze_until IS NULL OR substr(t.snooze_until,1,10) <= ?)"
-        " AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.target_id=t.id AND d.op='followup_surfaced'"
-        "   AND d.created_at >= substr(t.follow_up_date,1,10))", (today, today)).fetchall()
-    return [r["id"] for r in rows]
+        "SELECT t.id, substr(t.follow_up_date,1,10) AS due, f.state, f.claimed_at, f.attempts FROM tasks t"
+        " LEFT JOIN followup_checks f ON f.task_id=t.id AND f.due=substr(t.follow_up_date,1,10)"
+        " WHERE t.status IN ('todo','in_progress','waiting') AND t.follow_up_date IS NOT NULL"
+        " AND substr(t.follow_up_date,1,10) <= ? AND (t.snooze_until IS NULL OR substr(t.snooze_until,1,10) <= ?)",
+        (today, today)).fetchall()
+    due = []
+    for r in rows:
+        if r["state"] is None:
+            due.append(r["id"])
+        elif r["state"] == "claimed" and (r["claimed_at"] or "") < cutoff:
+            if r["attempts"] < FOLLOWUP_ATTEMPTS:
+                due.append(r["id"])
+            else:
+                with tx(conn):
+                    conn.execute("UPDATE followup_checks SET state='failed', updated_at=? WHERE task_id=? AND due=?",
+                                 (clock.iso(), r["id"], r["due"]))
+    return due
+
+
+def claim_followups(conn: sqlite3.Connection, run_id: str, task_ids: list[str]) -> None:
+    now = clock.iso()
+    for tid in task_ids:
+        conn.execute(
+            "INSERT INTO followup_checks(task_id, due, state, run_id, attempts, claimed_at, updated_at)"
+            " SELECT id, substr(follow_up_date,1,10), 'claimed', ?, 1, ?, ? FROM tasks WHERE id=?"
+            " ON CONFLICT(task_id, due) DO UPDATE SET state='claimed', run_id=excluded.run_id,"
+            " attempts=followup_checks.attempts+1, claimed_at=excluded.claimed_at, updated_at=excluded.updated_at",
+            (run_id, now, now, tid))
 
 
 def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[Any],
@@ -167,10 +196,7 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[
         claimed = batching.claim(conn, plan.batch_ids, run_id)
         now = clock.iso()
         with tx(conn):
-            for tid in followups:
-                conn.execute(
-                    "INSERT INTO decisions(id, run_id, op, target_type, target_id, created_at) VALUES (?,?,?,?,?,?)",
-                    (f"dec_fu_{run_id}_{tid}", run_id, "followup_surfaced", "task", tid, now))
+            claim_followups(conn, run_id, followups)
             if digest:
                 conn.execute(
                     "INSERT INTO daily_jobs(job, day, state, attempts, run_id, updated_at) VALUES"

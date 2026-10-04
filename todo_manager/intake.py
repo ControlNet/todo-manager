@@ -18,7 +18,7 @@ import re
 import sqlite3
 from typing import Any
 
-from . import clock, prompts, rules, store
+from . import clock, prompts, rules, runs, store
 from .config import Config
 from .db import dumps, loads, rules_version, tx
 from .sources.base import conversation_history, item_body, quote
@@ -230,9 +230,20 @@ def _validate(conn: sqlite3.Connection, run_id: str, decisions: dict[str, Any], 
     covered: set[str] = set()
     refs: set[str] = set()
     project_refs: set[str] = set()
+    reviewed: set[str] = set()
+    seen_ops: dict[str, int] = {}
     for n, op in enumerate(items):
         kind = op.get("op")
         where = f"items[{n}] ({kind})"
+        canonical = dumps(op)
+        if canonical in seen_ops:
+            errors.append(f"{where}: identical to items[{seen_ops[canonical]}]; give each decision once")
+            continue
+        seen_ops[canonical] = n
+        if kind in ("update_task", "link", "followup_reviewed"):
+            reviewed.add(op.get("task"))
+        elif kind == "create_task" and op.get("follow_up_of"):
+            reviewed.add(op["follow_up_of"])
         evidence = op.get("evidence", []) or []
         for ev in evidence:
             sid = ev.get("item")
@@ -253,6 +264,8 @@ def _validate(conn: sqlite3.Connection, run_id: str, decisions: dict[str, Any], 
             except store.StoreError as exc:
                 errors.append(f"{where}: {exc}")
             if op.get("ref"):
+                if op["ref"] in refs:
+                    errors.append(f"{where}: ref {op['ref']!r} used twice")
                 refs.add(op["ref"])
             project = op.get("project")
             if isinstance(project, str) and project and not project.startswith("@") and \
@@ -285,6 +298,8 @@ def _validate(conn: sqlite3.Connection, run_id: str, decisions: dict[str, Any], 
         elif kind == "create_project":
             if not op.get("ref") or not op.get("title"):
                 errors.append(f"{where}: ref and title required")
+            if "@" + op.get("ref", "") in project_refs:
+                errors.append(f"{where}: project ref {op.get('ref')!r} used twice")
             project_refs.add("@" + op.get("ref", ""))
         elif kind == "update_project":
             if conn.execute("SELECT 1 FROM projects WHERE id=?", (op.get("project", ""),)).fetchone() is None:
@@ -308,140 +323,186 @@ def _validate(conn: sqlite3.Connection, run_id: str, decisions: dict[str, Any], 
     missing = new_ids - covered
     if missing:
         errors.append(f"uncovered new items (link as evidence or ignore with category): {sorted(missing)}")
+    unreviewed = [t for t in manifest.get("followups") or [] if t not in reviewed]
+    if unreviewed:
+        errors.append(f"uncovered follow-ups (update_task/link the task, or followup_reviewed when nothing changes):"
+                      f" {unreviewed}")
     return errors
+
+
+def _ownership_problems(conn: sqlite3.Connection, run_id: str, manifest: dict[str, Any]) -> list[str]:
+    """Everything the manifest lists must still be claimed by this run (checked inside the
+    applying transaction: a late result of a stale claim never applies over a newer run)."""
+    problems = []
+    batch_ids = manifest.get("batch_ids") or []
+    if batch_ids:
+        marks = ",".join("?" for _ in batch_ids)
+        owned = conn.execute(f"SELECT COUNT(*) FROM batches WHERE id IN ({marks}) AND claimed_run=? AND state='claimed'",
+                             (*batch_ids, run_id)).fetchone()[0]
+        if owned != len(batch_ids):
+            problems.append(f"{len(batch_ids) - owned} of {len(batch_ids)} conversations are no longer claimed by this"
+                            " run (released after a timeout or taken over by a newer run)")
+    digest = manifest.get("digest")
+    if digest and conn.execute("SELECT 1 FROM daily_jobs WHERE job='commit_digest' AND day=? AND state='claimed'"
+                               " AND run_id=?", (digest["day"], run_id)).fetchone() is None:
+        problems.append("the commit digest is no longer claimed by this run")
+    for tid in manifest.get("followups") or []:
+        if conn.execute("SELECT 1 FROM followup_checks WHERE task_id=? AND run_id=? AND state='claimed'",
+                        (tid, run_id)).fetchone() is None:
+            problems.append(f"follow-up {tid} is no longer claimed by this run")
+    return problems
 
 
 def apply_decisions(conn: sqlite3.Connection, cfg: Config, run_id: str, decisions: dict[str, Any],
                     manifest: dict[str, Any]) -> dict[str, Any]:
-    current_rv = rules_version(conn)
-    if decisions.get("rules_version") != current_rv:
-        changed = [dict(r) for r in conn.execute(
-            "SELECT rule_id, revision, title, body, status FROM rule_revisions WHERE rules_version > ? ORDER BY rules_version",
-            (int(decisions.get("rules_version") or 0),))]
-        raise DecisionError("STALE_RULES", [f"rules changed since you read them (now {current_rv}); re-check against: "
-                                            + dumps(changed)])
-    if not run_batches(conn, run_id) and not manifest.get("digest") and not manifest.get("followups"):
-        raise DecisionError("STALE_RUN", ["this run no longer holds any claimed batches (already applied or released)"])
-    errors = _validate(conn, run_id, decisions, manifest)
-    if errors:
-        raise DecisionError("INVALID", errors)
+    """Apply a run's decisions exactly once: validation, the ownership check and every write
+    happen in one transaction that also records the run as applied."""
+    digest_hash = runs.decisions_hash(decisions)
+    with tx(conn):
+        try:
+            prior = runs.applied_report(conn, run_id, digest_hash)
+        except runs.AlreadyApplied as exc:
+            raise DecisionError("ALREADY_APPLIED", [str(exc)]) from None
+        if prior is not None:
+            return prior
+        current_rv = rules_version(conn)
+        if decisions.get("rules_version") != current_rv:
+            changed = [dict(r) for r in conn.execute(
+                "SELECT rule_id, revision, title, body, status FROM rule_revisions WHERE rules_version > ?"
+                " ORDER BY rules_version", (int(decisions.get("rules_version") or 0),))]
+            raise DecisionError("STALE_RULES", [f"rules changed since you read them (now {current_rv}); re-check"
+                                                " against: " + dumps(changed)])
+        stale = _ownership_problems(conn, run_id, manifest)
+        if stale:
+            raise DecisionError("STALE_RUN", stale)
+        errors = _validate(conn, run_id, decisions, manifest)
+        if errors:
+            raise DecisionError("INVALID", errors)
+        report = _apply(conn, run_id, decisions, manifest, current_rv)
+        runs.record_applied(conn, run_id, "intake", digest_hash, report)
+    return report
 
+
+def _apply(conn: sqlite3.Connection, run_id: str, decisions: dict[str, Any], manifest: dict[str, Any],
+           current_rv: int) -> dict[str, Any]:
     report: dict[str, Any] = {"created_tasks": [], "updated_tasks": [], "rejected_fields": [], "ignored": 0,
                               "created_projects": [], "updated_projects": [], "suggested_rules": []}
     touched_tasks: set[str] = set()
     touched_projects: set[str] = set()
-    with tx(conn):
-        project_map: dict[str, str] = {}
-        for op in decisions["items"]:
-            if op["op"] == "create_project":
-                pid = store.create_project(conn, op["title"], origin="intake", actor="agent", cause_ref=run_id,
-                                           domain=op.get("domain"), goal=op.get("goal"), next_step=op.get("next_step"),
-                                           repos=op.get("repos", []))
-                project_map["@" + op["ref"]] = pid
-                report["created_projects"].append(pid)
-                touched_projects.add(pid)
-                store.record_decision(conn, run_id=run_id, op="create_project", target_type="project", target_id=pid,
-                                      source_item_ids=[e["item"] for e in op.get("evidence", [])],
-                                      rationale=op.get("rationale"), rules_version=current_rv)
-                for ev in op.get("evidence", []):
-                    store.link_evidence(conn, "project", pid, ev["item"], ev.get("role", "context"), ev.get("note"))
-        task_refs: dict[str, str] = {}
-        for op in decisions["items"]:
-            kind = op["op"]
-            evidence = op.get("evidence", []) or []
-            source_ids = [e["item"] for e in evidence]
-            if kind == "create_task":
-                project = op.get("project")
-                if isinstance(project, dict):
-                    project = None
-                if isinstance(project, str) and project.startswith("@"):
-                    project = project_map[project]
-                fields = {k: op.get(k) for k in ("waiting_on", "responsibility", "next_step", "done_criteria", "summary",
-                                                 "due_date", "due_basis", "follow_up_date", "focus", "focus_reason")
-                          if op.get(k) is not None}
-                did = store.record_decision(conn, run_id=run_id, op="create_task", target_type="task", target_id=None,
-                                            source_item_ids=source_ids, rationale=op.get("rationale"),
-                                            rules_version=current_rv)
-                tid = store.create_task(conn, op["title"], origin="intake", actor="agent", cause_ref=did,
-                                        project_id=project or None, status=op.get("status", "todo"),
-                                        next_actor=op.get("next_actor", "me"), **fields)
-                conn.execute("UPDATE decisions SET target_id=? WHERE id=?", (tid, did))
-                for ev in evidence:
-                    store.link_evidence(conn, "task", tid, ev["item"], ev.get("role", "origin"), ev.get("note"), did)
-                if op.get("follow_up_of"):
-                    store.link_tasks(conn, tid, op["follow_up_of"], "follow_up_of")
-                if op.get("ref"):
-                    task_refs[op["ref"]] = tid
-                report["created_tasks"].append(tid)
-                touched_tasks.add(tid)
-            elif kind in ("update_task", "link"):
-                tid = op["task"]
-                did = store.record_decision(conn, run_id=run_id, op=kind, target_type="task", target_id=tid,
-                                            source_item_ids=source_ids, rationale=op.get("rationale"),
-                                            rules_version=current_rv)
-                for ev in evidence:
-                    store.link_evidence(conn, "task", tid, ev["item"], ev.get("role", "context"), ev.get("note"), did)
-                if kind == "update_task" and op.get("set"):
-                    changes = dict(op["set"])
-                    if op.get("note"):
-                        changes["change_note"] = op["note"]
-                    result = store.update_task(conn, tid, changes, actor="agent", origin="intake", cause_ref=did,
-                                               based_on_version=op["based_on_version"],
-                                               override_human=bool(op.get("override_human")))
-                    if "change_note" in result.applied:
-                        conn.execute("UPDATE tasks SET change_note_at=? WHERE id=?", (clock.iso(), tid))
-                    if result.rejected:
-                        report["rejected_fields"].append({"task": tid, "rejected": result.rejected})
-                        conn.execute("UPDATE decisions SET outcome=?, detail=? WHERE id=?",
-                                     ("partial" if result.applied else "rejected", dumps(result.rejected), did))
-                    if result.applied:
-                        report["updated_tasks"].append(tid)
-                        if result.applied.get("status") in store.CLOSED_STATUSES and op.get("closed_reason"):
-                            store.set_closed_reason(conn, tid, op["closed_reason"])
-                touched_tasks.add(tid)
-            elif kind == "ignore":
-                store.record_decision(conn, run_id=run_id, op="ignore", target_type=None, target_id=None,
-                                      source_item_ids=op["items"], category=op["category"],
-                                      rationale=op.get("rationale"), rules_version=current_rv)
-                report["ignored"] += len(op["items"])
-            elif kind == "update_project":
-                pid = op["project"]
-                changes = dict(op.get("set", {}))
-                did = store.record_decision(conn, run_id=run_id, op="update_project", target_type="project",
-                                            target_id=pid, source_item_ids=source_ids, rationale=op.get("rationale"),
-                                            rules_version=current_rv)
-                if "recent_activity" in changes:
-                    conn.execute("UPDATE projects SET recent_activity_at=? WHERE id=?", (clock.iso(), pid))
-                result = store.update_project(conn, pid, changes, actor="agent", origin="intake", cause_ref=did,
-                                              based_on_version=op.get("based_on_version"),
-                                              repos_add=op.get("repos_add", []))
-                for ev in evidence:
-                    store.link_evidence(conn, "project", pid, ev["item"], ev.get("role", "context"), ev.get("note"), did)
+    project_map: dict[str, str] = {}
+    for op in decisions["items"]:
+        if op["op"] == "create_project":
+            pid = store.create_project(conn, op["title"], origin="intake", actor="agent", cause_ref=run_id,
+                                       domain=op.get("domain"), goal=op.get("goal"), next_step=op.get("next_step"),
+                                       repos=op.get("repos", []))
+            project_map["@" + op["ref"]] = pid
+            report["created_projects"].append(pid)
+            touched_projects.add(pid)
+            store.record_decision(conn, run_id=run_id, op="create_project", target_type="project", target_id=pid,
+                                  source_item_ids=[e["item"] for e in op.get("evidence", [])],
+                                  rationale=op.get("rationale"), rules_version=current_rv)
+            for ev in op.get("evidence", []):
+                store.link_evidence(conn, "project", pid, ev["item"], ev.get("role", "context"), ev.get("note"))
+    task_refs: dict[str, str] = {}
+    for op in decisions["items"]:
+        kind = op["op"]
+        evidence = op.get("evidence", []) or []
+        source_ids = [e["item"] for e in evidence]
+        if kind == "create_task":
+            project = op.get("project")
+            if isinstance(project, dict):
+                project = None
+            if isinstance(project, str) and project.startswith("@"):
+                project = project_map[project]
+            fields = {k: op.get(k) for k in ("waiting_on", "responsibility", "next_step", "done_criteria", "summary",
+                                             "due_date", "due_basis", "follow_up_date", "focus", "focus_reason")
+                      if op.get(k) is not None}
+            did = store.record_decision(conn, run_id=run_id, op="create_task", target_type="task", target_id=None,
+                                        source_item_ids=source_ids, rationale=op.get("rationale"),
+                                        rules_version=current_rv)
+            tid = store.create_task(conn, op["title"], origin="intake", actor="agent", cause_ref=did,
+                                    project_id=project or None, status=op.get("status", "todo"),
+                                    next_actor=op.get("next_actor", "me"), **fields)
+            conn.execute("UPDATE decisions SET target_id=? WHERE id=?", (tid, did))
+            for ev in evidence:
+                store.link_evidence(conn, "task", tid, ev["item"], ev.get("role", "origin"), ev.get("note"), did)
+            if op.get("follow_up_of"):
+                store.link_tasks(conn, tid, op["follow_up_of"], "follow_up_of")
+            if op.get("ref"):
+                task_refs[op["ref"]] = tid
+            report["created_tasks"].append(tid)
+            touched_tasks.add(tid)
+        elif kind in ("update_task", "link"):
+            tid = op["task"]
+            did = store.record_decision(conn, run_id=run_id, op=kind, target_type="task", target_id=tid,
+                                        source_item_ids=source_ids, rationale=op.get("rationale"),
+                                        rules_version=current_rv)
+            for ev in evidence:
+                store.link_evidence(conn, "task", tid, ev["item"], ev.get("role", "context"), ev.get("note"), did)
+            if kind == "update_task" and op.get("set"):
+                changes = dict(op["set"])
+                if op.get("note"):
+                    changes["change_note"] = op["note"]
+                result = store.update_task(conn, tid, changes, actor="agent", origin="intake", cause_ref=did,
+                                           based_on_version=op["based_on_version"],
+                                           override_human=bool(op.get("override_human")))
+                if "change_note" in result.applied:
+                    conn.execute("UPDATE tasks SET change_note_at=? WHERE id=?", (clock.iso(), tid))
                 if result.rejected:
-                    report["rejected_fields"].append({"project": pid, "rejected": result.rejected})
-                report["updated_projects"].append(pid)
-                touched_projects.add(pid)
-            elif kind == "suggest_rule":
-                rid = rules.add_rule(conn, title=op["title"], body=op["body"], scope_type=op.get("scope_type", "global"),
-                                     scope_id=op.get("scope_id"), status="suggested", actor="agent")
-                report["suggested_rules"].append(rid)
-            elif kind == "followup_reviewed":
-                store.record_decision(conn, run_id=run_id, op="followup_reviewed", target_type="task",
-                                      target_id=op["task"], rationale=op.get("rationale"), rules_version=current_rv)
-        now = clock.iso()
-        conn.execute("UPDATE source_items SET state='processed', processed_at=?, processed_run=? WHERE batch_id IN"
-                     " (SELECT id FROM batches WHERE claimed_run=? AND state='claimed') AND state='batched'",
-                     (now, run_id, run_id))
-        conn.execute("UPDATE batches SET state='done', done_at=? WHERE claimed_run=? AND state='claimed'", (now, run_id))
-        digest = manifest.get("digest")
-        if digest:
-            marks = ",".join("?" for _ in digest["item_ids"])
-            if digest["item_ids"]:
-                conn.execute(f"UPDATE source_items SET state='processed', processed_at=?, processed_run=? WHERE id IN ({marks})",
-                             (now, run_id, *digest["item_ids"]))
-            conn.execute("UPDATE daily_jobs SET state='done', run_id=?, updated_at=? WHERE job='commit_digest' AND day=?",
-                         (run_id, now, digest["day"]))
-        conn.execute("UPDATE runs SET agent_completed_at=? WHERE id=?", (now, run_id))
+                    report["rejected_fields"].append({"task": tid, "rejected": result.rejected})
+                    conn.execute("UPDATE decisions SET outcome=?, detail=? WHERE id=?",
+                                 ("partial" if result.applied else "rejected", dumps(result.rejected), did))
+                if result.applied:
+                    report["updated_tasks"].append(tid)
+                    if result.applied.get("status") in store.CLOSED_STATUSES and op.get("closed_reason"):
+                        store.set_closed_reason(conn, tid, op["closed_reason"])
+            touched_tasks.add(tid)
+        elif kind == "ignore":
+            store.record_decision(conn, run_id=run_id, op="ignore", target_type=None, target_id=None,
+                                  source_item_ids=op["items"], category=op["category"],
+                                  rationale=op.get("rationale"), rules_version=current_rv)
+            report["ignored"] += len(op["items"])
+        elif kind == "update_project":
+            pid = op["project"]
+            changes = dict(op.get("set", {}))
+            did = store.record_decision(conn, run_id=run_id, op="update_project", target_type="project",
+                                        target_id=pid, source_item_ids=source_ids, rationale=op.get("rationale"),
+                                        rules_version=current_rv)
+            if "recent_activity" in changes:
+                conn.execute("UPDATE projects SET recent_activity_at=? WHERE id=?", (clock.iso(), pid))
+            result = store.update_project(conn, pid, changes, actor="agent", origin="intake", cause_ref=did,
+                                          based_on_version=op.get("based_on_version"),
+                                          repos_add=op.get("repos_add", []))
+            for ev in evidence:
+                store.link_evidence(conn, "project", pid, ev["item"], ev.get("role", "context"), ev.get("note"), did)
+            if result.rejected:
+                report["rejected_fields"].append({"project": pid, "rejected": result.rejected})
+            report["updated_projects"].append(pid)
+            touched_projects.add(pid)
+        elif kind == "suggest_rule":
+            rid = rules.add_rule(conn, title=op["title"], body=op["body"], scope_type=op.get("scope_type", "global"),
+                                 scope_id=op.get("scope_id"), status="suggested", actor="agent")
+            report["suggested_rules"].append(rid)
+        elif kind == "followup_reviewed":
+            store.record_decision(conn, run_id=run_id, op="followup_reviewed", target_type="task",
+                                  target_id=op["task"], rationale=op.get("rationale"), rules_version=current_rv)
+    # Follow-ups are done only now that the decisions about them are applied.
+    conn.execute("UPDATE followup_checks SET state='done', updated_at=? WHERE run_id=? AND state='claimed'",
+                 (clock.iso(), run_id))
+    now = clock.iso()
+    conn.execute("UPDATE source_items SET state='processed', processed_at=?, processed_run=? WHERE batch_id IN"
+                 " (SELECT id FROM batches WHERE claimed_run=? AND state='claimed') AND state='batched'",
+                 (now, run_id, run_id))
+    conn.execute("UPDATE batches SET state='done', done_at=? WHERE claimed_run=? AND state='claimed'", (now, run_id))
+    digest = manifest.get("digest")
+    if digest:
+        marks = ",".join("?" for _ in digest["item_ids"])
+        if digest["item_ids"]:
+            conn.execute(f"UPDATE source_items SET state='processed', processed_at=?, processed_run=? WHERE id IN ({marks})",
+                         (now, run_id, *digest["item_ids"]))
+        conn.execute("UPDATE daily_jobs SET state='done', run_id=?, updated_at=? WHERE job='commit_digest' AND day=?",
+                     (run_id, now, digest["day"]))
+    conn.execute("UPDATE runs SET agent_completed_at=? WHERE id=?", (now, run_id))
     report["touched_tasks"] = sorted(touched_tasks)
     report["touched_projects"] = sorted(touched_projects)
     return report

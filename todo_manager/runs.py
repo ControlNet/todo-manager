@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -34,6 +35,31 @@ def mark_agent_completed(conn: sqlite3.Connection, run_id: str, summary: dict[st
     with tx(conn):
         conn.execute("UPDATE runs SET agent_completed_at=?, summary=? WHERE id=?",
                      (clock.iso(), dumps(merged), run_id))
+
+
+class AlreadyApplied(Exception):
+    """The run's decisions were applied before with a different decisions file."""
+
+
+def decisions_hash(decisions: Any) -> str:
+    return hashlib.sha256(dumps(decisions).encode("utf-8")).hexdigest()
+
+
+def applied_report(conn: sqlite3.Connection, run_id: str, digest: str) -> dict[str, Any] | None:
+    """The stored report when this run's decisions were already applied (exactly once per run:
+    a repeated apply after a lost response returns it; different decisions are refused)."""
+    row = conn.execute("SELECT * FROM applied_runs WHERE run_id=?", (run_id,)).fetchone()
+    if row is None:
+        return None
+    if row["decisions_hash"] != digest:
+        raise AlreadyApplied(f"run {run_id} was already applied at {row['applied_at']} with other decisions")
+    return {**loads(row["report"], {}), "duplicate": True}
+
+
+def record_applied(conn: sqlite3.Connection, run_id: str, entry: str, digest: str, report: dict[str, Any]) -> None:
+    """Inside the transaction that applied the decisions."""
+    conn.execute("INSERT INTO applied_runs(run_id, entry, decisions_hash, report, applied_at) VALUES (?,?,?,?,?)",
+                 (run_id, entry, digest, dumps(report), clock.iso()))
 
 
 def get(conn: sqlite3.Connection, run_id: str) -> dict[str, Any] | None:

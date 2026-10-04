@@ -112,7 +112,9 @@ class CliTests(CliCase):
         _, out = self.tm("task", "show", tid)
         self.assertEqual(json.loads(out)["due_date"], "2026-10-09")
         code, out = self.tm("feedback", "apply", run_id, "--file", str(decisions))
-        self.assertEqual((code, json.loads(out)["error"]), (2, "STALE_RUN"))
+        self.assertEqual((code, json.loads(out)["duplicate"]), (0, True), "same file again: the first report")
+        _, out = self.tm("task", "show", tid)
+        self.assertEqual(json.loads(out)["version"], 2, "applied once")
 
     def test_export_verify_backup_restore(self):
         _, out = self.tm("task", "create", "--title", "A")

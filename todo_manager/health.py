@@ -65,6 +65,10 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
         "messages_unconfirmed": conn.execute(
             "SELECT COUNT(*) FROM delegation_messages WHERE status='sending'").fetchone()[0]}
     out["batches"] = {r["state"]: r["n"] for r in conn.execute("SELECT state, COUNT(*) n FROM batches GROUP BY state")}
+    out["followups_failed"] = [r["task_id"] for r in conn.execute(
+        "SELECT f.task_id FROM followup_checks f JOIN tasks t ON t.id=f.task_id WHERE f.state='failed'"
+        " AND t.status IN ('todo','in_progress','waiting') AND f.due=substr(t.follow_up_date,1,10)"
+        " ORDER BY f.updated_at DESC LIMIT 20")]
     out["runs"] = {}
     for entry in ENTRIES:
         last = conn.execute("SELECT * FROM runs WHERE entry=? ORDER BY started_at DESC LIMIT 1", (entry,)).fetchone()
@@ -106,6 +110,9 @@ def problems(rep: dict[str, Any], cfg: Config) -> list[str]:
     if attention.get("approval_outcome_unknown"):
         found.append(f"approved external actions with unknown outcome (paused, check manually): "
                      f"{', '.join(attention['approval_outcome_unknown'])}")
+    if rep.get("followups_failed"):
+        found.append(f"follow-ups no run handled (set a new follow-up date to retry): "
+                     f"{', '.join(rep['followups_failed'])}")
     for entry, info in rep["runs"].items():
         last = info["last"]
         if last is None:

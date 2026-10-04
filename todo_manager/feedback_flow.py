@@ -28,7 +28,7 @@ import sqlite3
 from datetime import timedelta
 from typing import Any
 
-from . import clock, delegation, effects, feedback, i18n, prompts, rules, store
+from . import clock, delegation, effects, feedback, i18n, prompts, rules, runs, store
 from .config import Config
 from .sources.base import quote
 from .db import dumps, loads, rules_version, tx
@@ -418,32 +418,37 @@ def _queue_reply(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any], text
 
 
 def apply_decisions(conn: sqlite3.Connection, cfg: Config, run_id: str, decisions: dict[str, Any]) -> dict[str, Any]:
+    """Apply a run's decisions exactly once: checks and writes happen in one transaction that
+    also records the run as applied (a repeat after a lost response returns the first report)."""
     if decisions.get("run_id") != run_id:
         raise FeedbackDecisionError("INVALID", [f"run_id must be {run_id}"])
-    current_rv = rules_version(conn)
-    if decisions.get("rules_version") != current_rv:
-        changed = [dict(r) for r in conn.execute(
-            "SELECT rule_id, revision, title, body, status FROM rule_revisions WHERE rules_version > ? ORDER BY rules_version",
-            (int(decisions.get("rules_version") or 0),))]
-        raise FeedbackDecisionError("STALE_RULES", [f"rules changed (now {current_rv}); re-check: {dumps(changed)}"])
-    claimed = feedback.claimed_by(conn, run_id)
-    superseded = {r["id"] for r in conn.execute(
-        "SELECT id FROM feedback WHERE claimed_run=? AND status='superseded'", (run_id,))}
-    if not claimed and not superseded:
-        raise FeedbackDecisionError("STALE_RUN", ["this run holds no pending feedback (already applied or released)"])
-    errors = _validate(conn, decisions, claimed, superseded)
-    if errors:
-        raise FeedbackDecisionError("INVALID", errors)
-    by_id = {f["id"]: f for f in claimed}
-    report: dict[str, Any] = {"applied": [], "clarify": [], "ignored": [], "superseded": []}
+    digest = runs.decisions_hash(decisions)
     try:
         with tx(conn):
+            try:
+                prior = runs.applied_report(conn, run_id, digest)
+            except runs.AlreadyApplied as exc:
+                raise FeedbackDecisionError("ALREADY_APPLIED", [str(exc)]) from None
+            if prior is not None:
+                return prior
+            current_rv = rules_version(conn)
+            if decisions.get("rules_version") != current_rv:
+                changed = [dict(r) for r in conn.execute(
+                    "SELECT rule_id, revision, title, body, status FROM rule_revisions WHERE rules_version > ?"
+                    " ORDER BY rules_version", (int(decisions.get("rules_version") or 0),))]
+                raise FeedbackDecisionError("STALE_RULES", [f"rules changed (now {current_rv}); re-check: {dumps(changed)}"])
+            claimed = feedback.claimed_by(conn, run_id)
+            superseded = {r["id"] for r in conn.execute(
+                "SELECT id FROM feedback WHERE claimed_run=? AND status='superseded'", (run_id,))}
+            if not claimed and not superseded:
+                raise FeedbackDecisionError("STALE_RUN", ["this run holds no pending feedback (released)"])
+            errors = _validate(conn, decisions, claimed, superseded)
+            if errors:
+                raise FeedbackDecisionError("INVALID", errors)
+            by_id = {f["id"]: f for f in claimed}
+            report: dict[str, Any] = {"applied": [], "clarify": [], "ignored": [], "superseded": []}
             for item in decisions["items"]:
-                if item["feedback"] in superseded:
-                    report["superseded"].append(item["feedback"])
-                    continue
-                fb = conn.execute("SELECT status FROM feedback WHERE id=?", (item["feedback"],)).fetchone()
-                if fb["status"] != "pending":   # re-checked inside the transaction
+                if item["feedback"] not in by_id:
                     report["superseded"].append(item["feedback"])
                     continue
                 fb = by_id[item["feedback"]]
@@ -459,6 +464,7 @@ def apply_decisions(conn: sqlite3.Connection, cfg: Config, run_id: str, decision
                     _release_body(conn, fb["scope_id"])
                     effects.task_push(conn, fb["scope_id"])
             conn.execute("UPDATE runs SET agent_completed_at=? WHERE id=?", (clock.iso(), run_id))
+            runs.record_applied(conn, run_id, "feedback", digest, report)
     except (store.StoreError, delegation.DelegationError, rules.RuleError) as exc:
         raise FeedbackDecisionError("INVALID", [f"nothing was applied: {exc}"]) from None
     return report

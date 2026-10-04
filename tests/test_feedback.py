@@ -89,7 +89,24 @@ class GateTests(GateCase):
         self.assertEqual(feedback.get(self.conn, fid)["status"], "applied")
         with self.assertRaises(FeedbackDecisionError) as ctx:
             self.decide(run_id, [{"feedback": fid, "outcome": "applied", "ops": []}])
-        self.assertEqual(ctx.exception.code, "STALE_RUN", "applying twice is refused")
+        self.assertEqual(ctx.exception.code, "ALREADY_APPLIED", "other decisions for an applied run are refused")
+
+    def test_reapplying_after_a_lost_response_returns_the_first_report(self):
+        self.fake.user_comment(self.page, "截止日期改到下周一")
+        _, _, run_id = self.gate()
+        fid = feedback.claimed_by(self.conn, run_id)[0]["id"]
+        task = store.get_task(self.conn, self.task)
+        items = [{"feedback": fid, "outcome": "applied", "reply": "已改为 10-12。",
+                  "ops": [{"op": "update_task", "task": self.task, "based_on_version": task["version"],
+                           "set": {"due_date": "2026-10-12"}}]}]
+        first = self.decide(run_id, items)
+        again = self.decide(run_id, items)
+        self.assertTrue(again["duplicate"])
+        self.assertEqual(again["applied"], first["applied"])
+        self.assertEqual(store.get_task(self.conn, self.task)["version"], task["version"] + 1)
+        self.gate()
+        self.assertEqual([c["rich_text"] for c in self.bot_comments()].count(self.bot_comments()[-1]["rich_text"]),
+                         1, "the reply is queued once")
 
     def test_invalid_decisions_apply_nothing(self):
         self.fake.user_comment(self.page, "这个不用做了")

@@ -298,6 +298,9 @@ class ApplyTests(WorkspaceCase):
                    "items": [{"op": "ignore", "items": [self.item_id("m1")], "category": "fyi_no_action",
                               "rationale": "fyi"}]}
         intake.apply_decisions(self.conn, self.cfg, run_id, payload, manifest)
+        # The same file again (e.g. the response was lost) is a no-op that returns the first report.
+        self.assertTrue(intake.apply_decisions(self.conn, self.cfg, run_id, payload, manifest)["duplicate"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM decisions WHERE op='ignore'").fetchone()[0], 1)
         with self.assertRaises(intake.DecisionError) as ctx:
-            intake.apply_decisions(self.conn, self.cfg, run_id, payload, manifest)
-        self.assertEqual(ctx.exception.code, "STALE_RUN")
+            intake.apply_decisions(self.conn, self.cfg, run_id, {**payload, "items": []}, manifest)
+        self.assertEqual(ctx.exception.code, "ALREADY_APPLIED")

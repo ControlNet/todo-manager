@@ -35,10 +35,15 @@ Ops:
 - `update_project` {project, based_on_version?, set: {goal|next_step|blockers|recent_activity|status|domain}, repos_add?,
   evidence?, rationale}. Commit digest: summarise per project in `recent_activity`; never one task per commit.
 - `suggest_rule` {title, body, scope_type?, scope_id?}: a generalisation for the user to confirm (not binding).
-- `followup_reviewed` {task, rationale}: a due follow-up was looked at and needs no change today.
+- `followup_reviewed` {task, rationale}: a due follow-up was looked at and needs no change today. Every
+  follow-up listed for this run must be covered: `update_task`/`link` on that task, a `create_task` with
+  `follow_up_of`, or `followup_reviewed`.
 
 One task per commitment, not per message. A thread that adds information to an existing task is `link` or
 `update_task`, never a duplicate. When unsure whether something is the user's, prefer `ignore` with
 category `fyi_no_action` and a rationale over inventing a task.
 On error the command prints `{"error": CODE, "details": [...]}` and applies nothing: fix the file and re-run.
 `STALE_RULES` means rules changed: re-read them (`todo-manager rule list`) and re-check your decisions.
+A repeated apply of the same file (e.g. after a lost response) prints the first report with `"duplicate": true`;
+`ALREADY_APPLIED` means this run was applied with a different file: stop, nothing more to do. `STALE_RUN` means
+this run's work was taken over by a newer run: stop.

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -458,6 +458,32 @@ ALTER TABLE notion_pages ADD COLUMN pending_write TEXT;
 ALTER TABLE notion_pages ADD COLUMN body_read_at TEXT;
 ALTER TABLE notion_pages ADD COLUMN notes_hash TEXT;
 ALTER TABLE notion_pages ADD COLUMN notes_text TEXT;
+""",
+    # 5: exactly-once application of a run's decisions, and follow-up checks that are claimed
+    # by a run and completed only when its decisions are applied.
+    5: """
+CREATE TABLE applied_runs (
+  run_id TEXT PRIMARY KEY,
+  entry TEXT NOT NULL,
+  decisions_hash TEXT NOT NULL,
+  report TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+);
+CREATE TABLE followup_checks (
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  due TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('claimed','done','failed')),
+  run_id TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  claimed_at TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (task_id, due)
+);
+INSERT OR IGNORE INTO followup_checks(task_id, due, state, run_id, attempts, claimed_at, updated_at)
+  SELECT d.target_id, substr(t.follow_up_date, 1, 10), 'done', d.run_id, 1, d.created_at, d.created_at
+  FROM decisions d JOIN tasks t ON t.id = d.target_id
+  WHERE d.op = 'followup_surfaced' AND t.follow_up_date IS NOT NULL
+    AND d.created_at >= substr(t.follow_up_date, 1, 10);
 """,
 }
 
