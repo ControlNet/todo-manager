@@ -14,15 +14,30 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from todo_manager import delegation, store
+from todo_manager import delegation, kanban, store
 from todo_manager.kanban import BridgeKanban
 from tests.helpers import WorkspaceCase
 
 HERMES_PY = Path(os.environ.get("TM_HERMES_PYTHON", "~/.hermes/hermes-agent/venv/bin/python")).expanduser()
 HERMES_REPO = Path(os.environ.get("TM_HERMES_REPO", "~/.hermes/hermes-agent")).expanduser()
 SIM = Path(__file__).with_name("hermes_worker_sim.py")
+RACE = Path(__file__).with_name("hermes_race_bridge.py")
 BOARD = "tm-integration"
+
+
+class RacingBridge(BridgeKanban):
+    """The real bridge, run through hermes_race_bridge.py when ``race`` has steps for the
+    transition's action: real Hermes calls land between its anchor check and its state call."""
+
+    race: dict = {}
+
+    def call(self, op, mutating=True, **args):
+        if op == "transition" and args.get("action") in self.race:
+            with mock.patch.object(kanban, "BRIDGE", RACE):
+                return super().call(op, mutating, race=self.race.pop(args["action"]), **args)
+        return super().call(op, mutating, **args)
 
 
 @unittest.skipUnless(HERMES_PY.exists() and HERMES_REPO.exists(), "Hermes interpreter not available")
@@ -220,3 +235,45 @@ class HermesKanbanIntegration(WorkspaceCase):
         again = self.kb.transition(card, "archive")
         self.assertEqual(again["outcome"], "already")
         self.assertIn("terminated", again["termination"])
+
+    # ----- boundary 2: a dashboard action between the bridge's check and its state call -----
+
+    def racing(self):
+        kb = RacingBridge(BOARD, str(HERMES_PY), str(HERMES_REPO), str(self.hermes_home))
+        kb.race = {}
+        return kb
+
+    def test_an_answer_unblocking_a_newer_question_is_reported_as_raced(self):
+        did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草", goal="Draft only")
+        self.tick()
+        card = delegation.get(self.conn, did)["card_id"]
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.assertTrue(self.sim("block", task_id=card, reason="Q1?", kind="needs_input"))
+        q1 = self._event_id(card, "blocked")
+        kb = self.racing()
+        kb.race["unblock"] = {"before": "unblock_task", "steps": [
+            {"op": "unblock"}, {"op": "claim"}, {"op": "block", "reason": "Q2?", "kind": "capability"}]}
+        result = kb.transition(card, "unblock", q1)
+        self.assertEqual(result["outcome"], "raced", "Hermes unblocked Q2 with the answer to Q1")
+        self.assertEqual(self.kb.transition(card, "unblock", q1)["outcome"], "already", "a retry changes nothing")
+
+    def test_an_accept_completing_a_newer_version_is_reported_to_the_user(self):
+        did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草", goal="Draft only")
+        self.tick()
+        card = delegation.get(self.conn, did)["card_id"]
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.assertTrue(self.sim("review", task_id=card, summary="v1", metadata={"deliverable_markdown": "v1"}))
+        self.tick()
+        mid = delegation.add_message(self.conn, did, "accept", "可以", feedback_id="fbk_acc")
+        kb = self.racing()
+        kb.race["complete"] = {"before": "complete_task", "steps": [
+            {"op": "reopen_review"}, {"op": "claim"},
+            {"op": "review", "summary": "v2", "metadata": {"deliverable_markdown": "v2"}}]}
+        delegation.send_messages(self.conn, self.cfg, kb)
+        self.assertEqual(self.sim("status", task_id=card)["status"], "done")
+        msg = self.conn.execute("SELECT status, error FROM delegation_messages WHERE id=?", (mid,)).fetchone()
+        self.assertEqual(msg["status"], "sent")
+        self.assertIn("raced", msg["error"])
+        notices = [r["payload"] for r in self.conn.execute("SELECT payload FROM outbox")
+                   if "有人在看板上改动了卡片" in r["payload"]]
+        self.assertEqual(len(notices), 1)

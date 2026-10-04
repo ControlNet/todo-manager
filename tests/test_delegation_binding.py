@@ -192,3 +192,45 @@ class OperationIdentityTests(BindingBase):
              "set": {"status": "cancelled"}}])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM delegation_messages WHERE kind='cancel'")
                          .fetchone()[0], 1)
+
+
+class TransitionRaceTests(BindingBase):
+    """Boundary 2: Hermes cannot check the anchor and run its state function in one transaction
+    (``write_txn`` refuses nesting), so a dashboard action can land in between. FakeKanban's
+    ``interleave`` runs it at exactly that point; the native version is in tests/integration."""
+
+    def raced_notices(self):
+        return [t for t in self.outbox_texts() if "有人在看板上改动了卡片" in t]
+
+    def test_an_accept_that_lands_on_a_newer_version_is_reported(self):
+        did, card = self.delivered()
+        mid = delegation.add_message(self.conn, did, "accept", "可以", feedback_id="fbk_acc")
+        self.kb.interleave["complete"] = lambda: self.dashboard_v2(card)
+        self.send()
+        self.assertEqual(self.kb.cards[card]["status"], "done", "Hermes completed the card it saw")
+        self.assertEqual(self.msg(mid)["status"], "sent")
+        self.assertIn("raced", self.msg(mid)["error"])
+        self.assertEqual(len(self.raced_notices()), 1, "the user is told it acted on a newer version")
+
+    def test_an_answer_that_lands_on_a_newer_question_is_reported(self):
+        did, card = self.running()
+        self.kb.worker_block(card, "截止日期是周四还是周五？")
+        self.tick()
+        mid = delegation.add_message(self.conn, did, "answer", "周五", feedback_id="fbk_ans")
+
+        def dashboard_then_new_question():
+            self.kb.unblock(card)
+            self.kb.worker_start(card)
+            self.kb.worker_block(card, "要抄送 Bob 吗？")
+
+        self.kb.interleave["unblock"] = dashboard_then_new_question
+        self.send()
+        self.assertIn("raced", self.msg(mid)["error"])
+        self.assertEqual(len(self.raced_notices()), 1)
+
+    def test_no_interleaving_is_a_plain_success(self):
+        did, card = self.delivered()
+        mid = delegation.add_message(self.conn, did, "accept", "可以", feedback_id="fbk_acc")
+        self.send()
+        self.assertEqual((self.msg(mid)["status"], self.msg(mid)["error"]), ("sent", None))
+        self.assertEqual(self.raced_notices(), [])

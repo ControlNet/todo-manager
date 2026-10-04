@@ -818,6 +818,17 @@ def _unused(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str, Any], re
     return "superseded"
 
 
+def _raced(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], msg: dict[str, Any]) -> None:
+    """The transition was applied, but to a newer question/version that a dashboard action put
+    on the card between our check and the call (``transition_raced``): the user is told."""
+    text = i18n.t("dlg.raced", kind=i18n.t(f"dlg.msg.{msg['kind']}"), title=d["title"], body=(msg["body"] or "")[:300])
+    with tx(conn):
+        conn.execute("UPDATE delegation_messages SET error=? WHERE id=?",
+                     ("raced: applied to a newer question or version on the card", msg["id"]))
+        effects.task_comment(conn, d["task_id"], f"raced:{msg['id']}", text)
+        effects.notify(conn, cfg, f"raced:{msg['id']}", text, task_id=d["task_id"])
+
+
 def _cancel_unsubmitted(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any],
                         msg: dict[str, Any]) -> str:
     if d["status"] == "reconcile":
@@ -909,7 +920,7 @@ def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any
     if not attempted and _newer_than_bound(conn, d, msg):
         return _unused(conn, d, msg, "newer_version")
     if kind == "accept":
-        return _send_accept(conn, kb, d, msg)
+        return _send_accept(conn, cfg, kb, d, msg)
     if kind == "pause":
         if status in EXECUTING:
             with tx(conn):
@@ -969,7 +980,10 @@ def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any
     if result["outcome"] == "mismatch":
         return _unused(conn, d, msg, "newer_question" if kind in ("answer", "resume") else "card_moved",
                        status=result["status"])
-    return _sent_transition(conn, d, msg, reserved=result["outcome"] == "done")
+    sent = _sent_transition(conn, d, msg, reserved=result["outcome"] in ("done", "raced"))
+    if result["outcome"] == "raced":
+        _raced(conn, cfg, d, msg)
+    return sent
 
 
 def _sent_transition(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str, Any], reserved: bool) -> str:
@@ -1014,7 +1028,7 @@ def _send_cancel(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str,
     return "sent"
 
 
-def _send_accept(conn: sqlite3.Connection, kb: Kanban, d: dict[str, Any], msg: dict[str, Any]) -> str:
+def _send_accept(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any], msg: dict[str, Any]) -> str:
     if d["status"] != "review":
         _finish(conn, msg["id"], "failed", f"cannot accept while delegation is {d['status']}")
         return "failed"
@@ -1034,6 +1048,8 @@ def _send_accept(conn: sqlite3.Connection, kb: Kanban, d: dict[str, Any], msg: d
         _set(conn, d["id"], status="ended", card_status=result["status"])
         if not for_task_active_other(conn, d):
             _task_state(conn, d["id"], "todo", "me", i18n.t("dlg.accepted"))
+    if result["outcome"] == "raced":
+        _raced(conn, cfg, d, msg)
     return "sent"
 
 

@@ -22,7 +22,7 @@ import traceback
 
 MARK = "@@TM@@"
 
-# Mirror of todo_manager.kanban.TRANSITIONS / transition_verdict (this file cannot import
+# Mirror of todo_manager.kanban.TRANSITIONS / transition_verdict / transition_raced (this file cannot import
 # the package); tests/integration checks both against the installed Hermes code.
 TRANSITIONS = {
     "unblock": {"anchors": ("blocked", "block_loop_detected", "gave_up"), "from": ("blocked", "triage"),
@@ -48,6 +48,17 @@ def transition_verdict(status, events, action, anchor):
     if spec["from"] is not None and status not in spec["from"]:
         return "mismatch"
     return "apply"
+
+
+def transition_raced(events, action, anchor):
+    if anchor is None:
+        return False
+    spec = TRANSITIONS[action]
+    done = [e.id for e in events if e.kind in spec["done_by"] and e.id > int(anchor)]
+    if not done:
+        return False
+    ours = max(done)
+    return any(e.kind in spec["anchors"] and int(anchor) < e.id < ours for e in events)
 
 
 def _out(payload: dict) -> None:
@@ -162,9 +173,11 @@ def main() -> None:
             return _out({"ok": True, "result": bool(kb.archive_task(conn, req["task_id"]))})
         if op == "transition":
             # Check and apply in one process, right before the Hermes state function (which
-            # re-checks the status in its own transaction). There is no conditional unblock in
-            # Hermes; a blocked/review card has no worker, so only a human dashboard action can
-            # interleave between the check and the call.
+            # re-checks the status in its own transaction). They cannot share one transaction:
+            # write_txn refuses nesting and complete_task & co. must not run under an outer
+            # transaction. A blocked/review card has no worker, so only a human dashboard action
+            # can interleave between the check and the call; that is detected from the events
+            # afterwards and reported as "raced" (applied to a newer question/version).
             tid, action, anchor = req["task_id"], req["action"], req.get("anchor")
             task = kb.get_task(conn, tid)
             if task is None:
@@ -182,8 +195,9 @@ def main() -> None:
                 else:
                     ok = kb.archive_task(conn, tid)
                 after = kb.get_task(conn, tid)
-                outcome = "done" if ok else (
-                    "already" if transition_verdict(after.status, kb.list_events(conn, tid), action, anchor) == "already"
+                events = kb.list_events(conn, tid)
+                outcome = ("raced" if transition_raced(events, action, anchor) else "done") if ok else (
+                    "already" if transition_verdict(after.status, events, action, anchor) == "already"
                     else "mismatch")
             task = kb.get_task(conn, tid)
             termination = None

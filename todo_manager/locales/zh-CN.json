@@ -39,6 +39,7 @@
   "dlg.needs_input": "Agent 等你补充信息",
   "dlg.quarantine": "⚠️ 委派 {title} 在看板上出现多张匹配卡片，已隔离等待人工处理。",
   "dlg.question": "❓ Agent 需要你补充（{title}）：{reason}",
+  "dlg.raced": "⚠️ 你对“{title}”的{kind}已在看板上执行，但就在执行前有人在看板上改动了卡片，它作用在了更新的问题或版本上，而不是你回复的那一个。请检查看板：{body}",
   "dlg.reason.answered_elsewhere": "这个问题已在看板上被处理",
   "dlg.reason.card_moved": "卡片已不在当时的状态（{status}）",
   "dlg.reason.newer_question": "Agent 已经进入新的问题或状态",

@@ -39,6 +39,7 @@
   "dlg.needs_input": "Agent needs your input",
   "dlg.quarantine": "⚠️ Agent work \"{title}\" matches several board cards; quarantined until handled manually.",
   "dlg.question": "❓ Agent needs your input ({title}): {reason}",
+  "dlg.raced": "⚠️ Your {kind} for \"{title}\" was carried out on the board, but someone changed the card just before, so it acted on a newer question or version than the one you replied to. Please check the board: {body}",
   "dlg.reason.answered_elsewhere": "the question was already resolved on the board",
   "dlg.reason.card_moved": "the card is no longer at that point ({status})",
   "dlg.reason.newer_question": "the agent has moved on to a newer question or state",

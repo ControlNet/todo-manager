@@ -54,6 +54,22 @@ def transition_verdict(status: str, events: list[dict[str, Any]], action: str, a
     return "apply"
 
 
+def transition_raced(events: list[dict[str, Any]], action: str, anchor: int | None) -> bool:
+    """After a transition bound to ``anchor`` was applied: did a newer anchor event (a new
+    question, a new version for review) land between the check and the call, so that the
+    transition acted on that newer state? Hermes cannot run the check and its state function
+    in one transaction (``write_txn`` refuses nesting; ``complete_task`` & co. must not run
+    under an outer transaction), so this is detected afterwards and reported, not prevented."""
+    if anchor is None:
+        return False
+    spec = TRANSITIONS[action]
+    done = [int(e["id"]) for e in events if e["kind"] in spec["done_by"] and int(e["id"]) > int(anchor)]
+    if not done:
+        return False
+    ours = max(done)
+    return any(e["kind"] in spec["anchors"] and int(anchor) < int(e["id"]) < ours for e in events)
+
+
 class KanbanError(Exception):
     def __init__(self, message: str, code: str | None = None, uncertain: bool = False):
         super().__init__(message)
@@ -165,8 +181,9 @@ class BridgeKanban:
 
     def transition(self, card_id: str, action: str, anchor: int | None = None,
                    summary: str | None = None) -> dict[str, Any]:
-        """Check-and-apply in one bridge process: ``{"outcome": "done"|"already"|"mismatch",
-        "status": ..., "termination": <archive_worker_termination payload or None>}``."""
+        """Check-and-apply in one bridge process: ``{"outcome": "done"|"raced"|"already"|"mismatch",
+        "status": ..., "termination": <archive_worker_termination payload or None>}``. ``raced``:
+        applied, but to a newer question/version that landed between the check and the call."""
         return self.call("transition", task_id=card_id, action=action, anchor=anchor, summary=summary)
 
     def counts(self) -> dict[str, int]:
@@ -191,6 +208,9 @@ class FakeKanban:
         self.fail_next: dict[str, Exception] = {}
         self.lose_response: set[str] = set()
         self.terminate_ok = True  # outcome of terminating a running worker on archive
+        # action -> callable run after the transition's check and before its state function:
+        # stands in for a dashboard action interleaving there (the race ``transition_raced`` reports).
+        self.interleave: dict[str, Any] = {}
         self.settings_values = {"review_dispatch": False, "auto_decompose": False}
         self._n = 0
 
@@ -363,18 +383,20 @@ class FakeKanban:
         verdict = transition_verdict(card["status"], events, action, anchor)
         outcome = verdict
         if verdict == "apply":
+            if action in self.interleave:
+                self.interleave.pop(action)()
             if action == "unblock":
                 ok = self.respecify(card_id) if card["status"] == "triage" else self.unblock(card_id)
             else:
                 ok = getattr(self, action)(card_id, *((summary or "",) if action == "complete" else ()))
             after = [e for e in self.events if e["task_id"] == card_id]
-            outcome = "done" if ok else (
+            outcome = ("raced" if transition_raced(after, action, anchor) else "done") if ok else (
                 "already" if transition_verdict(card["status"], after, action, anchor) == "already" else "mismatch")
         termination = None
         if action == "archive":
             term = [e for e in self.events if e["task_id"] == card_id and e["kind"] == "archive_worker_termination"]
             termination = term[-1]["payload"] if term else None
-        if outcome == "done" and action in self.lose_response:
+        if outcome in ("done", "raced") and action in self.lose_response:
             self.lose_response.discard(action)
             raise KanbanError(f"bridge timeout during transition {action}", uncertain=True)
         return {"outcome": outcome, "status": card["status"], "termination": termination}
