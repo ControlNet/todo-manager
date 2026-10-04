@@ -21,7 +21,7 @@ from typing import Any
 from . import batching, clock, prompts, rules, runs, store
 from .config import Config
 from .db import dumps, loads, rules_version, tx
-from .sources.base import conversation_history, item_body, quote
+from .sources.base import conversation_history, conversation_root, item_body, quote
 
 IGNORE_CATEGORIES = ("advertising", "newsletter", "cfp", "review_invitation_unaccepted", "automated_notice",
                      "fyi_no_action", "handled_elsewhere", "social", "spam", "other")
@@ -100,6 +100,38 @@ def _item_header(item: dict[str, Any]) -> str:
     return f"[{item['id']}] {item.get('occurred_at', '')} from {who}{flag}"
 
 
+def _github_status(conn: sqlite3.Connection, cfg: Config, batch: dict[str, Any],
+                   batch_items: list[dict[str, Any]]) -> str | None:
+    """State of an issue/PR and the user's part in it, from the newest item that carries it."""
+    if not batch["conversation_key"].startswith("github:"):
+        return None
+    meta = next((i["meta"] for i in reversed(batch_items) if i["meta"].get("state")), None)
+    if meta is None:
+        return None
+    logins = {login.lower() for login in cfg.section("identity").get("github_logins", [])}
+    assignees, requested = meta.get("assignees") or [], meta.get("requested_reviewers") or []
+    parts = [f"state: {meta['state']}"]
+    if meta.get("opener"):
+        parts.append(f"opened by {meta['opener']}")
+    if assignees:
+        parts.append("assignees: " + ", ".join(assignees))
+    if requested:
+        parts.append("review requested from: " + ", ".join(requested))
+    you = []
+    if (meta.get("opener") or "").lower() in logins:
+        you.append("author")
+    if logins & {a.lower() for a in assignees}:
+        you.append("assignee")
+    if logins & {r.lower() for r in requested}:
+        you.append("review requested")
+    if meta.get("reason"):
+        you.append(f"notified ({meta['reason']})")
+    if conn.execute("SELECT 1 FROM source_items WHERE conversation_key=? AND author_is_me=1 LIMIT 1",
+                    (batch["conversation_key"],)).fetchone():
+        you.append("has commented")
+    return "status: " + "; ".join(parts) + "\nyou: " + (", ".join(you) or "not involved so far")
+
+
 def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, manifest: dict[str, Any]) -> str:
     out: list[str] = []
     now_local = clock.local_dt(cfg.tz)
@@ -167,12 +199,20 @@ def render_context(conn: sqlite3.Connection, cfg: Config, run_id: str, manifest:
             out.append(f"link: {batch_items[0]['url']}")
         if related:
             out.append("already linked tasks: " + "; ".join(f"{t['id']} [{t['status']}] {t['title']}" for t in related))
+        status = _github_status(conn, cfg, batch, batch_items)
+        if status:
+            out.append(status)
+        last_new = max((i["occurred_at"] for i in batch_items), default=None)
         earlier = conversation_history(conn, batch["source"], batch["conversation_key"], exclude_batch=batch["id"],
-                                       limit=batching.EARLIER_SHOWN,
-                                       before=max((i["occurred_at"] for i in batch_items), default=None))
+                                       limit=batching.EARLIER_SHOWN, before=last_new)
+        root = conversation_root(conn, batch["source"], batch["conversation_key"], exclude_batch=batch["id"],
+                                 before=last_new)
+        if root and all(e["id"] != root["id"] for e in earlier):
+            earlier.insert(0, root)
         for e in earlier:
             body = trim_quoted(item_body(conn, e["id"]))
-            out.append(f"\n{_item_header(e)} [earlier]\n{quote(_clip(body, MAX_EARLIER_CHARS))}")
+            label = "first message" if root and e["id"] == root["id"] else "earlier"
+            out.append(f"\n{_item_header(e)} [{label}]\n{quote(_clip(body, MAX_EARLIER_CHARS))}")
         for item in batch_items:
             body = item_body(conn, item["id"])
             limit = BULK_ITEM_CHARS if item["meta"].get("bulk_hint") else MAX_ITEM_CHARS

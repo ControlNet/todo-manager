@@ -177,11 +177,14 @@ def _earlier_chars(conn: sqlite3.Connection, batch_id: str) -> int:
     batch = conn.execute("SELECT source, conversation_key, last_item_at FROM batches WHERE id=?", (batch_id,)).fetchone()
     if batch is None:
         return 0
-    rows = conn.execute(
-        "SELECT LENGTH(b.body) AS n FROM source_items s LEFT JOIN source_bodies b ON b.item_id=s.id"
-        " WHERE s.source=? AND s.conversation_key=? AND (s.batch_id IS NULL OR s.batch_id != ?)"
-        " AND s.state IN ('processed','batched','pending') AND s.occurred_at < ? ORDER BY s.occurred_at DESC LIMIT ?",
-        (batch["source"], batch["conversation_key"], batch_id, batch["last_item_at"] or "", EARLIER_SHOWN)).fetchall()
+    shown = ("SELECT s.id, LENGTH(b.body) AS n FROM source_items s LEFT JOIN source_bodies b ON b.item_id=s.id"
+             " WHERE s.source=? AND s.conversation_key=? AND (s.batch_id IS NULL OR s.batch_id != ?)"
+             " AND s.state IN ('processed','batched','pending') AND s.occurred_at < ?")
+    params = (batch["source"], batch["conversation_key"], batch_id, batch["last_item_at"] or "")
+    rows = conn.execute(shown + " ORDER BY s.occurred_at DESC LIMIT ?", (*params, EARLIER_SHOWN)).fetchall()
+    root = conn.execute(shown + " ORDER BY s.occurred_at, s.fetched_at LIMIT 1", params).fetchone()
+    if root and root["id"] not in {r["id"] for r in rows}:
+        rows.append(root)   # the first message is always shown
     return sum(min(r["n"] or 0, MAX_EARLIER_CHARS) + ITEM_OVERHEAD for r in rows)
 
 

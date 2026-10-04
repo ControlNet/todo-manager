@@ -290,6 +290,7 @@ class GmailSource:
             body=body, route=route,
             meta={"to": recipients[:20], "labels": sorted(labels), "attachments": attachments,
                   "bulk_hint": bulk and not author_is_me, "github_ref": github_ref,
+                  "github_sender": headers.get("x-github-sender") if github_ref else None,
                   "gmail_thread": thread_id, "rfc_message_id": headers.get("message-id"),
                   "in_reply_to": headers.get("in-reply-to")},
         )

@@ -112,8 +112,9 @@ class GitHubNotificationTests(WorkspaceCase):
     PR = "https://api.github.com/repos/octo/repo/pulls/7"
 
     def fetch(self, notes, objects):
+        """The notification items (context about the matter is covered in test_github_context)."""
         src = GitHubNotificationSource(FakeGitHub(notes, objects), set(), ["me-gh"], bot_logins=["dependabot[bot]"])
-        return src.fetch(None).items
+        return [i for i in src.fetch(None).items if i.kind == "notification"]
 
     def test_own_merged_pr_is_marked_as_mine_with_its_state(self):
         pr = {"user": {"login": "me-gh"}, "state": "closed", "merged": True, "body": "Adds the loader"}
@@ -142,7 +143,8 @@ class GitHubNotificationTests(WorkspaceCase):
                    "requested_reviewer": {"login": "bob"}}]
         client = FakeGitHub([], {}, pages={"repos/octo/repo/issues": [issue], "repos/octo/repo/issues/7/events": events})
         items = GitHubRepoSource(client, "octo/repo", ["me-gh"], []).fetch(None).items
-        self.assertEqual({i.meta["event"]: i.route for i in items}, {"merged": "if_open_task", "review_requested": "batch"})
+        self.assertEqual({i.meta["event"]: i.route for i in items if i.kind == "event"},
+                         {"merged": "if_open_task", "review_requested": "batch"})
 
     def test_latest_comment_by_someone_else_is_attributed_to_them(self):
         pr = {"user": {"login": "me-gh"}, "state": "open", "merged": False, "body": ""}

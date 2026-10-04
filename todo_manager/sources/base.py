@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field, replace
+from datetime import timedelta
 from typing import Any, Iterable
 
 from .. import clock, ids
@@ -106,6 +107,8 @@ def persist_fetch(conn: sqlite3.Connection, source: str, result: FetchResult) ->
         for item in result.items:
             if item.route == "if_open_task":
                 item = replace(item, route="batch" if _open_task_matter(conn, item) else "context")
+            if item.route == "batch" and _copy_of_github_event(conn, item):
+                item = replace(item, route="superseded")
             inserted_id = _insert_item(conn, item, now)
             if inserted_id is None:
                 stats["duplicate"] += 1
@@ -125,6 +128,31 @@ def persist_fetch(conn: sqlite3.Connection, source: str, result: FetchResult) ->
             " last_error=NULL, consecutive_failures=0, meta=excluded.meta",
             (source, result.scope, result.cursor, now, now, dumps(meta)))
     return stats
+
+
+GITHUB_COPY_WINDOW = timedelta(minutes=3)
+
+
+def _github_actor(author: str | None, meta: dict[str, Any]) -> str:
+    """GitHub login behind an item: the API author, or a notification mail's X-GitHub-Sender."""
+    if meta.get("github_sender"):
+        return str(meta["github_sender"]).lower()
+    author = author or ""
+    return "" if "@" in author or "<" in author else author.lower()
+
+
+def _copy_of_github_event(conn: sqlite3.Connection, item: Item) -> bool:
+    """The same GitHub event read through the API and as notification mail (same matter, same
+    GitHub user, within a few minutes): the later copy is kept for audit but not batched."""
+    actor = _github_actor(item.author, item.meta)
+    at = clock.parse(item.occurred_at)
+    if not item.conversation_key.startswith("github:") or not actor or at is None:
+        return False
+    rows = conn.execute(
+        "SELECT author, meta FROM source_items WHERE conversation_key=? AND source != ? AND state != 'superseded'"
+        " AND occurred_at BETWEEN ? AND ?", (item.conversation_key, item.source, clock.iso(at - GITHUB_COPY_WINDOW),
+                                            clock.iso(at + GITHUB_COPY_WINDOW))).fetchall()
+    return any(_github_actor(r["author"], loads(r["meta"], {})) == actor for r in rows)
 
 
 def _open_task_matter(conn: sqlite3.Connection, item: Item) -> bool:
@@ -205,6 +233,17 @@ def conversation_history(conn: sqlite3.Connection, source: str, conversation_key
         " ORDER BY occurred_at DESC LIMIT ?",
         (source, conversation_key, exclude_batch or "", before, before, limit)).fetchall()
     return [{**dict(r), "meta": loads(r["meta"], {})} for r in reversed(rows)]
+
+
+def conversation_root(conn: sqlite3.Connection, source: str, conversation_key: str,
+                      exclude_batch: str | None = None, before: str | None = None) -> dict[str, Any] | None:
+    """The first stored message of a conversation (an issue's body, a thread's parent)."""
+    row = conn.execute(
+        "SELECT * FROM source_items WHERE source=? AND conversation_key=? AND (batch_id IS NULL OR batch_id != ?)"
+        " AND state IN ('processed','batched','pending') AND (? IS NULL OR occurred_at < ?)"
+        " ORDER BY occurred_at, fetched_at LIMIT 1",
+        (source, conversation_key, exclude_batch or "", before, before)).fetchone()
+    return {**dict(row), "meta": loads(row["meta"], {})} if row else None
 
 
 def known_external_ids(conn: sqlite3.Connection, source: str, account: str, external_ids: Iterable[str]) -> set[str]:
