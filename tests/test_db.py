@@ -72,6 +72,33 @@ class MigrationTests(unittest.TestCase):
         # tsk_2's follow-up date moved after it was surfaced: that is a new, open check.
         self.assertEqual(rows, [("tsk_1", "2026-10-01", "done")])
 
+    def test_v5_box_edits_and_comments_get_revisions(self):
+        """B01/B02 (v6): a pending box edit seeds the box's last seen fingerprint, so re-reading
+        the same box after the upgrade does not present it as a new edit."""
+        make_v1(self.path)
+        conn = sqlite3.connect(str(self.path), isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        for version in range(2, 6):
+            for statement in db._split_sql(db.MIGRATIONS[version]):
+                conn.execute(statement)
+        conn.execute("UPDATE meta SET value='5' WHERE key='schema_version'")
+        conn.execute("INSERT INTO notion_pages(page_id, entity_type, entity_id, managed_hash) VALUES"
+                     " ('pg_1', 'task', 'tsk_1', 'ours'), ('pg_2', 'task', 'tsk_2', 'ours2')")
+        conn.execute("INSERT INTO feedback(id, origin, source_id, source_version, received_at, scope_type, kind, status)"
+                     " VALUES ('fb_1', 'notion_page', 'pg_1', 'body:theirs', 'x', 'task', 'body_edit', 'pending')")
+        conn.execute("INSERT INTO notion_comments(comment_id, page_id, content_hash, seen_at) VALUES ('c1', 'pg_1', 'h', 'x')")
+        conn.close()
+        conn = db.connect(self.path)
+        try:
+            rows = {r["page_id"]: (r["box_revision"], r["box_seen_hash"], r["notes_revision"])
+                    for r in conn.execute("SELECT * FROM notion_pages")}
+            self.assertEqual(rows, {"pg_1": (0, "theirs", 0), "pg_2": (0, "ours2", 0)})
+            self.assertEqual(conn.execute("SELECT revision FROM notion_comments").fetchone()[0], 1)
+        finally:
+            conn.close()
+        self.assertEqual(len(list((self.home / "backups").glob("pre-schema-v6-from-v5-*.sqlite"))), 1,
+                         "the rollback point is the pre-migration copy")
+
     def test_fresh_database_takes_no_backup(self):
         db.connect(self.path).close()
         self.assertFalse((self.home / "backups").exists())

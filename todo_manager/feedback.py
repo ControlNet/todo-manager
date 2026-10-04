@@ -97,11 +97,26 @@ def resolve(conn: sqlite3.Connection, feedback_id: str, status: str, result: Any
                   feedback_id))
 
 
-def supersede_older(conn: sqlite3.Connection, origin: str, source_id: str, keep_id: str) -> int:
-    """An edited comment replaces its unprocessed earlier version."""
-    cur = conn.execute("UPDATE feedback SET status='superseded', applied_at=? WHERE origin=? AND source_id=?"
-                       " AND id != ? AND status='pending'", (clock.iso(), origin, source_id, keep_id))
-    return cur.rowcount
+def supersede(conn: sqlite3.Connection, feedback_ids: list[str], reason: str, by: str | None = None) -> int:
+    """Pending rows (claimed or not) that a newer revision of the same text replaced or withdrew.
+
+    A run that claimed one of them skips it at apply time; the reason and successor are kept."""
+    n = 0
+    for fid in feedback_ids:
+        n += conn.execute("UPDATE feedback SET status='superseded', applied_at=?, result=? WHERE id=? AND status='pending'",
+                          (clock.iso(), dumps({"reason": reason, "superseded_by": by}), fid)).rowcount
+    return n
+
+
+def supersede_older(conn: sqlite3.Connection, origin: str, source_id: str, keep_id: str,
+                    kind: str | None = None, reason: str = "edited") -> int:
+    """A newer revision replaces the unprocessed earlier ones of the same stream."""
+    sql = "SELECT id FROM feedback WHERE origin=? AND source_id=? AND id != ? AND status='pending'"
+    params: list[Any] = [origin, source_id, keep_id]
+    if kind is not None:
+        sql += " AND kind=?"
+        params.append(kind)
+    return supersede(conn, [r["id"] for r in conn.execute(sql, params)], reason, keep_id)
 
 
 def recent(conn: sqlite3.Connection, scope_type: str, scope_id: str | None, limit: int = 10) -> list[dict[str, Any]]:

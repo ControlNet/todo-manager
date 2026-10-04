@@ -31,7 +31,7 @@ from typing import Any
 from . import clock, delegation, effects, feedback, i18n, prompts, rules, runs, store
 from .config import Config
 from .sources.base import quote
-from .db import dumps, loads, rules_version, tx
+from .db import dumps, get_meta, loads, rules_version, tx
 
 OUTCOMES = ("applied", "clarify", "ignored")
 MAX_REPLY_CHARS = 600
@@ -417,6 +417,24 @@ def _queue_reply(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any], text
         effects.page_comment(conn, p["page_id"], key, text, discussion_id=fb.get("reply_to"))
 
 
+def _page_edited_since_read(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any]) -> bool:
+    """A box/notes interpretation is checked against the page before it is applied: a later
+    edit by someone else than our integration that the gate pulled but whose body it has not
+    read yet may have replaced or withdrawn the text. Edit times are compared by minute; an edit
+    in the same minute as the read is caught by the gate's next re-read instead."""
+    if fb["kind"] not in ("body_edit", "page_notes"):
+        return False
+    row = conn.execute("SELECT last_edited_time, last_edited_by, body_read_at FROM notion_pages WHERE page_id=?",
+                       ((fb["payload"] or {}).get("page_id"),)).fetchone()
+    if row is None or not row["last_edited_time"] or not row["body_read_at"]:
+        return False
+    bot = cfg.get("notion.bot_user_id") or get_meta(conn, "notion.bot_user_id")
+    if row["last_edited_by"] == bot:
+        return False
+    minute = lambda ts: clock.parse(ts).replace(second=0, microsecond=0)  # noqa: E731
+    return minute(row["last_edited_time"]) > minute(row["body_read_at"])
+
+
 def apply_decisions(conn: sqlite3.Connection, cfg: Config, run_id: str, decisions: dict[str, Any]) -> dict[str, Any]:
     """Apply a run's decisions exactly once: checks and writes happen in one transaction that
     also records the run as applied (a repeat after a lost response returns the first report)."""
@@ -442,12 +460,21 @@ def apply_decisions(conn: sqlite3.Connection, cfg: Config, run_id: str, decision
                 "SELECT id FROM feedback WHERE claimed_run=? AND status='superseded'", (run_id,))}
             if not claimed and not superseded:
                 raise FeedbackDecisionError("STALE_RUN", ["this run holds no pending feedback (released)"])
-            errors = _validate(conn, decisions, claimed, superseded)
+            deferred = {f["id"] for f in claimed if _page_edited_since_read(conn, cfg, f)}
+            errors = _validate(conn, decisions, [f for f in claimed if f["id"] not in deferred], superseded | deferred)
             if errors:
                 raise FeedbackDecisionError("INVALID", errors)
-            by_id = {f["id"]: f for f in claimed}
-            report: dict[str, Any] = {"applied": [], "clarify": [], "ignored": [], "superseded": []}
+            by_id = {f["id"]: f for f in claimed if f["id"] not in deferred}
+            report: dict[str, Any] = {"applied": [], "clarify": [], "ignored": [], "superseded": [], "deferred": []}
+            for fid in sorted(deferred):
+                # Released unapplied (not counted as a model attempt): the next gate reads the
+                # body and either supersedes it or hands it to a new run.
+                conn.execute("UPDATE feedback SET claimed_run=NULL, claimed_at=NULL, attempts=MAX(attempts-1, 0)"
+                             " WHERE id=?", (fid,))
+                report["deferred"].append(fid)
             for item in decisions["items"]:
+                if item["feedback"] in deferred:
+                    continue
                 if item["feedback"] not in by_id:
                     report["superseded"].append(item["feedback"])
                     continue

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -484,6 +484,21 @@ INSERT OR IGNORE INTO followup_checks(task_id, due, state, run_id, attempts, cla
   FROM decisions d JOIN tasks t ON t.id = d.target_id
   WHERE d.op = 'followup_surfaced' AND t.follow_up_date IS NOT NULL
     AND d.created_at >= substr(t.follow_up_date, 1, 10);
+""",
+    # 6: a persistent revision number per Notion feedback stream (a comment, a page's managed
+    # box, a page's own notes): a later read tells an unchanged re-read from a revert (A->B->A
+    # within one timestamp), and a run that claimed an older revision cannot apply it.
+    # Additive; the box's last seen fingerprint is seeded from a pending box edit, else from what we wrote.
+    6: """
+ALTER TABLE notion_comments ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE notion_pages ADD COLUMN box_revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE notion_pages ADD COLUMN box_seen_hash TEXT;
+ALTER TABLE notion_pages ADD COLUMN notes_revision INTEGER NOT NULL DEFAULT 0;
+UPDATE notion_pages SET box_seen_hash = COALESCE((
+  SELECT substr(f.source_version, 6) FROM feedback f
+  WHERE f.origin = 'notion_page' AND f.kind = 'body_edit' AND f.source_id = notion_pages.page_id
+    AND f.status = 'pending' AND f.source_version LIKE 'body:%'
+  ORDER BY f.received_at DESC LIMIT 1), managed_hash);
 """,
 }
 

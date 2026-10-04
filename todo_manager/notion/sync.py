@@ -327,30 +327,78 @@ class NotionSync:
         trust = {"author": editor, "author_is_user": self.is_user(editor)}
         found: list[str] = []
         with tx(self.conn):
-            if region is not None and row["managed_hash"] \
-                    and body.content_fingerprint(region) != row["managed_hash"]:
-                fp = body.content_fingerprint(region)
-                feedback.record(self.conn, origin="notion_page", source_id=row["page_id"], source_version=f"body:{fp}",
-                                text=region, scope_type="task", scope_id=task["id"], kind="body_edit",
-                                payload={"page_id": row["page_id"], "region": region,
-                                         "would_render": self.render_body(task)}, **trust)
-                found.append("body_edit")
+            if region is not None and row["managed_hash"]:
+                found += self._box_read(row, task, region, self.render_body(task), trust)
             notes_fp = body.content_fingerprint(notes) if notes else ""
+            revision = row["notes_revision"]
             if row["notes_hash"] is not None and notes_fp != row["notes_hash"]:
-                added, removed = _line_diff(row["notes_text"] or "", notes)
-                if added.strip() or removed.strip():
-                    payload = {"page_id": row["page_id"], "added": added[:3000], "removed": removed[:1500],
-                               "notes": notes[:3000], "truncated": bool(doc.get("truncated"))}
-                    if not self.user_ids():
-                        payload["identity_unverified"] = True
-                    feedback.record(self.conn, origin="notion_page", source_id=row["page_id"],
-                                    source_version=f"notes:{notes_fp}", text=added[:3000] or removed[:1500],
-                                    scope_type="task", scope_id=task["id"], kind="page_notes", payload=payload,
-                                    **trust)
-                    found.append("page_notes")
-            self.conn.execute("UPDATE notion_pages SET body_read_at=?, notes_hash=?, notes_text=? WHERE page_id=?",
-                              (clock.iso(), notes_fp, notes[:50000], row["page_id"]))
+                revision += 1
+                found += self._notes_read(row, task, notes, notes_fp, revision, bool(doc.get("truncated")), trust)
+            self.conn.execute("UPDATE notion_pages SET body_read_at=?, notes_hash=?, notes_text=?, notes_revision=?"
+                              " WHERE page_id=?", (clock.iso(), notes_fp, notes[:50000], revision, row["page_id"]))
         return found
+
+    def _box_read(self, row: dict[str, Any], task: dict[str, Any], region: str, rendered: str,
+                  trust: dict[str, Any]) -> list[str]:
+        """One read of the managed box. A changed box is a new revision: an edit replaces the
+        pending interpretation of the previous one; a box back to what we wrote withdraws it."""
+        fp = body.content_fingerprint(region)
+        if fp == (row["box_seen_hash"] or row["managed_hash"]):
+            return []                                    # unchanged since the last read
+        revision = row["box_revision"] + 1
+        self.conn.execute("UPDATE notion_pages SET box_revision=?, box_seen_hash=? WHERE page_id=?",
+                          (revision, fp, row["page_id"]))
+        if fp == row["managed_hash"]:
+            older = [r["id"] for r in self.conn.execute(
+                "SELECT id FROM feedback WHERE origin='notion_page' AND source_id=? AND kind='body_edit'"
+                " AND status='pending'", (row["page_id"],))]
+            feedback.supersede(self.conn, older, "withdrawn: the box is back to what we wrote")
+            return []
+        fid, _ = feedback.record(self.conn, origin="notion_page", source_id=row["page_id"],
+                                 source_version=f"body:r{revision}:{fp}", text=region, scope_type="task",
+                                 scope_id=task["id"], kind="body_edit", **trust,
+                                 payload={"page_id": row["page_id"], "region": region, "would_render": rendered,
+                                          "revision": revision})
+        feedback.supersede_older(self.conn, "notion_page", row["page_id"], fid, kind="body_edit",
+                                 reason="replaced by a later edit of the box")
+        return ["body_edit"]
+
+    def _notes_read(self, row: dict[str, Any], task: dict[str, Any], notes: str, notes_fp: str, revision: int,
+                    truncated: bool, trust: dict[str, Any]) -> list[str]:
+        """A new revision of the page's own notes. A pending note whose added lines are all still
+        there (and removed lines still gone) stays valid, so an append does not touch it; one
+        that no longer holds is superseded and what still holds of it is carried over. Lines it
+        added or removed that were never applied are not presented as removed/added again."""
+        added, removed = _line_diff(row["notes_text"] or "", notes)
+        if not (added.strip() or removed.strip()):
+            return []
+        present = {line.strip() for line in notes.splitlines()}
+        stale = [f for f in feedback.pending(self.conn, include_claimed=True)
+                 if f["kind"] == "page_notes" and f["origin"] == "notion_page" and f["source_id"] == row["page_id"]
+                 and not _note_holds(f["payload"], notes, present)]
+        stale_added = {line for f in stale for line in _lines(f["payload"].get("added"))}
+        stale_removed = {line for f in stale for line in _lines(f["payload"].get("removed"))}
+        net_added = _unique([line for f in stale for line in _lines(f["payload"].get("added")) if line in present]
+                            + [line for line in _lines(added) if line not in stale_removed])
+        net_removed = _unique([line for f in stale for line in _lines(f["payload"].get("removed"))
+                               if line not in present]
+                              + [line for line in _lines(removed) if line not in stale_added])
+        stale_ids = [f["id"] for f in stale]
+        if not (net_added or net_removed):
+            feedback.supersede(self.conn, stale_ids, "withdrawn: the note was removed or reverted")
+            return []
+        added, removed = "\n".join(net_added), "\n".join(net_removed)
+        payload = {"page_id": row["page_id"], "added": added[:3000], "removed": removed[:1500],
+                   "notes": notes[:3000], "truncated": truncated, "revision": revision}
+        if stale_ids:
+            payload["replaces"] = stale_ids
+        if not self.user_ids():
+            payload["identity_unverified"] = True
+        fid, _ = feedback.record(self.conn, origin="notion_page", source_id=row["page_id"],
+                                 source_version=f"notes:r{revision}:{notes_fp}", text=added[:3000] or removed[:1500],
+                                 scope_type="task", scope_id=task["id"], kind="page_notes", payload=payload, **trust)
+        feedback.supersede(self.conn, stale_ids, "replaced by a later edit of the notes", fid)
+        return ["page_notes"]
 
     def import_page(self, kind: str, page: dict[str, Any]) -> str:
         """Apply unseen human edits of one page. Returns created|edited|unchanged|ignored."""
@@ -733,10 +781,9 @@ class NotionSync:
                 self._store_region(page_id, rendered, region)
                 return "already current"
             if row["managed_hash"] and fp != row["managed_hash"]:
-                feedback.record(self.conn, origin="notion_page", source_id=page_id, source_version=f"body:{fp}",
-                                text=region, scope_type="task", scope_id=task["id"], kind="body_edit",
-                                author=row["last_edited_by"], author_is_user=self.is_user(row["last_edited_by"]),
-                                payload={"page_id": page_id, "region": region, "would_render": rendered})
+                with tx(self.conn):
+                    self._box_read(row, task, region, rendered, {"author": row["last_edited_by"],
+                                                                 "author_is_user": self.is_user(row["last_edited_by"])})
                 return "held: user edited the managed region"
             command = {"type": "update_content",
                        "update_content": {"content_updates": [{"old_str": region, "new_str": rendered}]}}
@@ -751,9 +798,10 @@ class NotionSync:
         return "updated" if region is not None else "inserted"
 
     def _store_region(self, page_id: str, rendered: str, region: str) -> None:
+        fp = body.content_fingerprint(region)
         with tx(self.conn):
-            self.conn.execute("UPDATE notion_pages SET rendered_hash=?, managed_hash=? WHERE page_id=?",
-                              (_h(rendered), body.content_fingerprint(region), page_id))
+            self.conn.execute("UPDATE notion_pages SET rendered_hash=?, managed_hash=?, box_seen_hash=? WHERE page_id=?",
+                              (_h(rendered), fp, fp, page_id))
 
     def accept_body_edit(self, page_id: str) -> None:
         """The user's edit inside the managed region was handled: the next push may overwrite it."""
@@ -913,23 +961,26 @@ class NotionSync:
         is_user = bool(author) and author in user_ids   # no configured identity: nobody is the user
         if not user_ids:
             payload["identity_unverified"] = True
+        # Each content change is a new revision of the comment, so A->B->A (even within one
+        # timestamp) yields a new row for the restored A instead of reusing A's old one.
+        revision = 1 if prev is None else int(prev["revision"] or 1) + 1
+        payload["revision"] = revision
         with tx(self.conn):
             fid, created = feedback.record(
                 self.conn, origin="notion_comment", source_id=c["id"],
-                # The content is part of the version: two edits can share a timestamp.
-                source_version=f"{c.get('last_edited_time') or ''}|{digest}", text=text, scope_type=scope_type,
-                scope_id=target.get("entity_id"), author=author, author_is_user=is_user,
+                source_version=f"r{revision}|{c.get('last_edited_time') or ''}|{digest}", text=text,
+                scope_type=scope_type, scope_id=target.get("entity_id"), author=author, author_is_user=is_user,
                 kind="comment" if prev is None else "comment_edit", payload=payload,
                 reply_to=c.get("discussion_id"))
-            if created and prev is not None:
+            if prev is not None:
                 feedback.supersede_older(self.conn, "notion_comment", c["id"], fid)
             self.conn.execute(
                 "INSERT INTO notion_comments(comment_id, page_id, discussion_id, author_id, is_bot, last_edited_time,"
-                " content_hash, feedback_id, seen_at) VALUES (?,?,?,?,0,?,?,?,?) ON CONFLICT(comment_id) DO UPDATE SET"
-                " last_edited_time=excluded.last_edited_time, content_hash=excluded.content_hash,"
-                " feedback_id=excluded.feedback_id, seen_at=excluded.seen_at",
+                " content_hash, feedback_id, seen_at, revision) VALUES (?,?,?,?,0,?,?,?,?,?) ON CONFLICT(comment_id)"
+                " DO UPDATE SET last_edited_time=excluded.last_edited_time, content_hash=excluded.content_hash,"
+                " feedback_id=excluded.feedback_id, seen_at=excluded.seen_at, revision=excluded.revision",
                 (c["id"], target["page_id"], c.get("discussion_id"), author, c.get("last_edited_time"), digest, fid,
-                 clock.iso()))
+                 clock.iso(), revision))
             if target["entity_type"] == "task":
                 self.conn.execute("UPDATE notion_pages SET last_comment_at=? WHERE page_id=?",
                                   (clock.iso(), target["page_id"]))
@@ -1012,6 +1063,23 @@ def _line_diff(before: str, after: str) -> tuple[str, str]:
         elif line.startswith("- ") and line[2:].strip():
             removed.append(line[2:])
     return "\n".join(added), "\n".join(removed)
+
+
+def _lines(text: str | None) -> list[str]:
+    return [line.strip() for line in (text or "").splitlines() if line.strip()]
+
+
+def _unique(lines: list[str]) -> list[str]:
+    return list(dict.fromkeys(lines))
+
+
+def _note_holds(payload: dict[str, Any], notes: str, present: set[str]) -> bool:
+    """A pending notes item still describes the page: its added lines are there (a clipped last
+    line matches as a substring) and its removed lines are still gone."""
+    added = _lines(payload.get("added"))
+    clipped = len(payload.get("added") or "") >= 3000
+    return all(line in present or (clipped and n == len(added) - 1 and line in notes) for n, line in enumerate(added)) \
+        and all(line not in present for line in _lines(payload.get("removed")))
 
 
 def _split_repos(text: str | None) -> list[str]:

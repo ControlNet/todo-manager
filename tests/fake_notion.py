@@ -1,7 +1,8 @@
 """TEST DOUBLE: an in-memory imitation of the Notion REST endpoints todo-manager uses.
 
 It mirrors the behaviours the sync relies on (data-source queries filtered/sorted by
-minute-precision ``last_edited_time``, property ids, select options created on write,
+``last_edited_time``, which this double rounds to the minute so tests can force two edits to
+share a timestamp; no precision of the real API is assumed), property ids, select options created on write,
 markdown body search-and-replace, unresolved-comment listing, ``in_trash``) and can
 inject faults (errors, lost write responses). It is NOT evidence that the real API
 behaves the same; real behaviour is checked separately against a sandbox page.
