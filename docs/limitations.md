@@ -25,7 +25,6 @@ verified and how.
 - **Kanban** is tested both with `FakeKanban` and against the installed Hermes Kanban code in an
   isolated `HERMES_HOME`; the worker is simulated (`tests/integration/hermes_worker_sim.py`),
   not a real model.
-- **Matrix reminders** (`hermes send`) are tested with a fake runner only.
 - **Not verified against real services:** GitHub notification mail and the same event read
   through the API are de-duplicated by event identity only in tests (the identity is taken from
   the mail's Message-ID suffix or its "view it on GitHub" link; the test mailbox had no GitHub
@@ -83,7 +82,7 @@ verified and how.
   (in message order); a segment not yet claimed waits while the conversation is active again.
   If even one conversation does not fit (the fixed part — rules, open tasks, follow-ups,
   format — is too large), the run is **deferred**: nothing is claimed, the model is not woken,
-  `health` reports it and a Matrix alert goes out once a day, until you shrink the fixed part,
+  `health` and the Notion freshness box report it, until you shrink the fixed part,
   raise `wake.max_context_chars`, or set `wake.over_budget = "proceed"` (then it runs over
   budget, reported). Nothing is cut silently.
 - Feedback context budget: a run claims the oldest feedback items whose rendered context fits
@@ -124,9 +123,6 @@ verified and how.
   keeps its cursor and is reported as stale (one line per source when there are many) until its
   row is deleted from the `cursors` table; there is no command for that yet. The same holds for
   a gate channel (e.g. `kanban`/`cards`) whose system was turned off while it was failing.
-- Matrix reminders are at-most-once: a send that timed out is not retried, because the outcome
-  cannot be looked up. After an import or restore, reminders that may already have gone out are
-  dropped (marked dead), not re-sent.
 - Portability: an export carries the database, non-secret config, run context and delivery
   files; credentials never. Card comments and run logs that exist only on the Hermes board stay
   there. Delivery files larger than 100 MB are recorded by hash only; a file that was

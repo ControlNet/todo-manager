@@ -115,6 +115,6 @@ claim) parks the card for you instead of a respawn that could repeat an approved
 ## Results
 
 Every gate run reads new card events: questions and failures become a delivery record plus a
-task comment (and an optional Matrix reminder); `review` results become a numbered delivery
+task comment; `review` results become a numbered delivery
 (`v1`, `v2`, …) shown in the task page's managed box, with artifacts listed. Workspaces of
 finished cards are deleted by Hermes, so workers keep needed files as artifacts.

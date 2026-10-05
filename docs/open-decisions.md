@@ -20,9 +20,9 @@ are raised to 30.)
 | `notion.history_poll_hours` | 24 | Sweep of recently closed pages for late comments |
 | `wake.max_context_chars` / `max_evidence_chars` / `max_items_per_run` | 60000 / 40000 / 60 | Whole rendered intake context / new evidence in it / new messages per run; the rest waits for the next run. The gate renders the context before waking and gives back conversations until it fits. Batches are taken round-robin across sources, so an email backlog cannot crowd out chat; a conversation larger than one run is split into segments in message order (each gets at most an even share per waiting source; a later segment waits for the earlier one). When more than one run's worth is waiting, the email/GitHub wake interval is skipped so a backlog drains every 5 minutes |
 | `feedback.max_items_per_run` | 20 | Feedback items per model run |
-| `feedback.max_attempts` | 3 | Model runs before an unapplied feedback item is marked failed (with a reminder) |
+| `feedback.max_attempts` | 3 | Model runs before an unapplied feedback item is marked failed (with a task comment) |
 | `kanban.max_running` | 1 | Delegations executing at once |
-| `notify.failure_alert_after_minutes` | 60 | A gate that has not run this long is reported |
+| `health.gate_idle_minutes` | 60 | A gate that has not run this long is reported |
 
 ## Agreed defaults
 
@@ -40,8 +40,6 @@ are raised to 30.)
   ids or channel name globs such as `"#alerts-*"`); `slack.conversations` lists single ones.
 - **Identities** (`identity.*`): your own addresses, logins and user ids. Never guessed; a
   message counts as yours only when it matches.
-- **Reminder target** (`notify.matrix`, `notify.matrix_target`): whether and where short Matrix
-  reminders go (important deliveries, questions, failures).
 - **Hermes Kanban settings** (`review_dispatch`, `auto_decompose`): global switches, both
   `true` on this machine (checked 2026-10-04). Delegations stay local until you turn them off;
   see [board-protocol.md](board-protocol.md). Also decide `kanban.max_retries` (default 1: a

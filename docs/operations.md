@@ -12,7 +12,7 @@ git clone <repository url> ~/src/todo-manager
 cd ~/src/todo-manager
 python3 -m unittest discover -s tests -t .        # expect "OK" (Hermes integration tests skip without Hermes)
 ./bin/todo-manager init --language zh-CN          # or en; default: TODO_MANAGER_LANG / system locale
-$EDITOR ~/.hermes/workspace/todo-manager/config.toml   # identities, sources, notify target
+$EDITOR ~/.hermes/workspace/todo-manager/config.toml   # identities, sources
 ./bin/todo-manager notion whoami                  # checks the token (read-only)
 ./bin/todo-manager notion plan --home-page <page id>   # review the writes
 ./bin/todo-manager notion setup --home-page <page id> --yes
@@ -48,10 +48,19 @@ todo-manager history <task id> # field-level history of one task or project
 
 Problems (stale sources, failing channels, given-up writes, quarantined delegations, failed
 feedback, a gate that has not run, a run deferred over its context budget, Notion pages a run
-could not use) also appear in the Notion freshness box and, when `notify.matrix` is enabled, as
-at most one Matrix reminder per problem per day. A problem is identified by what is wrong (the
-source scope or channel, the kind of problem), not by its text, so a changing error message does
-not send a second reminder.
+could not use) also appear in the Notion freshness box. A problem is identified by what is wrong
+(the source scope or channel, the kind of problem; `problem_keys` in `health --json`), not by its
+text, so a changing error message is still one problem.
+
+todo-manager sends no messages of its own. Results, questions and failures of delegations,
+replies to feedback and notices (an unknown approval outcome, a held comment, failed feedback)
+are Notion comments on the task page, or on the home page when there is no task page (chat
+feedback without a task, a task page in the trash). What a woken cron run reports (its last line) is
+delivered by that Hermes cron job's own `deliver` setting: `hermes install` creates the jobs
+with `local` (kept in Hermes, nothing sent) and never changes it afterwards, so to get run
+results in a chat set it in Hermes, e.g. `hermes cron edit <job id> --deliver matrix` (the
+home channel of that platform). An idle gate (nothing to interpret) wakes no model and
+delivers nothing.
 
 - A **source scope** is stale after 30 minutes without a successful fetch, plus its own polling
   interval (quiet Slack conversations are read about every `slack.quiet_poll_minutes`); when more
@@ -145,7 +154,7 @@ todo-manager --home /path/to/new/todo-manager delegate release-hold   # after ch
 ```
 
 **No replay after an import or restore.** Claims of runs that no longer exist are released;
-Matrix reminders and Notion comments that may already have gone out are marked dead instead of
+Notion comments that may already have gone out are marked dead instead of
 being sent again (idempotent Notion state pushes stay queued); card submissions and messages to
 the board are held. `health` shows "delegations held since …" until you have compared the board
 (`hermes kanban --board todo-manager list --tenant todo-manager`) with `todo-manager delegate list` and run
@@ -282,9 +291,9 @@ closed; `drop` rows stay only in the old system. Nothing old is modified or dele
   reconciled (looked up) before any retry. Given-up writes show in `health`; after fixing the
   cause, the next dirty scan re-queues the push.
 - Feedback that the model claimed but never applied is retried (bounded), then marked failed
-  with a reminder.
+  (a comment on its task page; `health` lists it).
 - Overlapping runs are prevented by per-gate locks; a restore takes both locks.
 - A message to the board that Hermes applied to a newer question or version than the one you
   replied to (someone acted on the dashboard at the same moment) is kept as sent, marked
-  `raced` on the message (`todo-manager task show <task>`), and you get a task comment and a
-  Matrix reminder; check the card and send a correction if needed.
+  `raced` on the message (`todo-manager task show <task>`), and you get a task comment; check
+  the card and send a correction if needed.
