@@ -171,7 +171,10 @@ verified and how.
     newer version);
   - cards are created with Hermes' per-card breaker `max_retries = 1` (`kanban.max_retries`):
     a crashed, timed-out or stale run parks the card instead of a respawn, and a run that held
-    an approval and ended without a result is marked `unknown`, paused and reported to you;
+    an approval and ended without a result is marked `unknown`, paused and reported to you -
+    also when the reopen's response was lost and the approval is confirmed only after the sync
+    read the run's end (then one gate tick later; a card with retries left could be restarted
+    by Hermes in that tick, as it can between a crash and the next tick in the normal case);
   - the approval record is an audit trail of what you allowed, not proof of what a worker did.
   Whether your words grant an external action at all (a `delegate` op with `send_email` in
   `allowed_actions`) is the feedback model's reading of what you wrote; only actions from the

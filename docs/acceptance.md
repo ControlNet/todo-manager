@@ -170,6 +170,19 @@ covers the same in the suite. The production workspace (schema v1) was not touch
 Full suite: 423 tests, 0 failures, 0 skips (`python3 -m unittest discover -s tests -t .`,
 including the 13 *hermes* integration tests).
 
+## Follow-up: approvals confirmed after their run ended (baseline dc1479b)
+
+| Item | Root cause | Fix | Tests | Commit |
+|---|---|---|---|---|
+| Late-confirmed approval never settled | an approval's outcome was settled only by the sync, at the run's end or result event, and only for approvals already confirmed (`consumed_at`). When the reopen's response was lost, the retry confirmed the approval one tick later, after the sync had read the run's end and moved its cursor past it: the outcome stayed NULL (no `unknown`, no pause; the ordinary failure notice was still sent) or, after a result, never became `reported` | the confirmation (`_sent_transition`) settles the approval in the same transaction from the card's events up to the sync cursor: the first run end or result after the reopen of the approved version's review and after the approval's comment. Run end → `unknown` (notice, pause, nothing replayed); result → `reported`. Ends not read yet stay with the sync. A pause queued meanwhile is not doubled; with a cancel pending the outcome and notice are recorded, the archive replaces the pause | `test_approval_late_confirmation` (FakeKanban: crash, result, two approvals, idempotent ticks and a reopened database, earlier runs and approvals, cancel, pause, sync-not-yet-read orderings); *hermes* `test_late_confirmed_approval_whose_run_failed_is_unknown_and_paused`, `test_late_confirmed_approval_whose_run_delivered_is_reported` (installed Hermes; only the lost response is simulated) | c3ed05e |
+
+No schema change: the approval's bound delivery (`deliveries.source_event_id`), the comment's
+card event (`delegation_messages.card_event_id`) and the card's own event log identify the run;
+the delegation's `event_cursor` tells which events the sync has read.
+
+Full suite: 439 tests, 0 failures, 0 skips, including 15 *hermes* integration tests (installed
+Hermes 0.21.5 in an isolated `HERMES_HOME`).
+
 ## Still to verify with real data
 
 1. **Real-sample intake evaluation** (criteria 1–4, 6, 11): one sandbox run was decided by the
