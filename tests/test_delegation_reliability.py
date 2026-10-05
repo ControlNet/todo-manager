@@ -416,7 +416,7 @@ class HermesSettingsTests(Base):
     def test_cards_already_on_the_board_are_reported(self):
         did, card = self.delivered()
         self.kb.settings_values["auto_decompose"] = True
-        gate_feedback.run_gate(self.conn, self.cfg, notion=None, kanban=self.kb, notifier=None)
+        gate_feedback.run_gate(self.conn, self.cfg, notion=None, kanban=self.kb)
         self.assertTrue([p for p in self.problems() if "auto_decompose" in p], "re-read while cards are in flight")
         self.assertEqual(self.d(did)["status"], "review", "existing work is not cancelled")
 

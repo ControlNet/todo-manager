@@ -498,7 +498,6 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
     def announce(dlv: str, text: str) -> None:
         if not quiet:
             effects.task_comment(conn, d["task_id"], f"dlv:{dlv}", text)
-            effects.notify(conn, cfg, f"dlv:{dlv}", text, task_id=d["task_id"])
 
     for ev in snap["events"]:
         cursor = max(cursor, ev["id"])
@@ -620,7 +619,6 @@ def _hold_unknown_external_action(conn: sqlite3.Connection, cfg: Config, d: dict
         text = i18n.t("dlg.approval_unknown_stopped" if stopped else "dlg.approval_unknown",
                       action=a["action"], title=d["title"], event=event)
         effects.task_comment(conn, d["task_id"], f"approval-unknown:{a['id']}", text)
-        effects.notify(conn, cfg, f"approval-unknown:{a['id']}", text, task_id=d["task_id"])
     if not now["pause_requested"] and not stopped:
         add_message(conn, d["id"], "pause", text, cause="approval_unknown")
 
@@ -1108,7 +1106,6 @@ def _raced(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], msg: dict[s
         conn.execute("UPDATE delegation_messages SET error=? WHERE id=?",
                      ("raced: applied to a newer question or version on the card", msg["id"]))
         effects.task_comment(conn, d["task_id"], f"raced:{msg['id']}", text)
-        effects.notify(conn, cfg, f"raced:{msg['id']}", text, task_id=d["task_id"])
 
 
 def _cancel_unsubmitted(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any],
@@ -1493,7 +1490,6 @@ def _send_cancel(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str,
             detail = ", ".join(f"{k}={v}" for k, v in sorted(termination.items()) if v not in (None, False))
             text = i18n.t("dlg.cancel_unconfirmed", title=d["title"], detail=detail or "-")
             effects.task_comment(conn, d["task_id"], f"cancel-unconfirmed:{d['id']}", text)
-            effects.notify(conn, cfg, f"cancel-unconfirmed:{d['id']}", text, task_id=d["task_id"])
         if not for_task_active_other(conn, d):
             _task_state(conn, d["id"], "todo", "me", i18n.t("dlg.cancelled"))
     return "sent"

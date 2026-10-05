@@ -27,7 +27,7 @@ DEFAULT_HOME = Path("~/.hermes/workspace/todo-manager").expanduser()
 
 DEFAULTS: dict[str, Any] = {
     "timezone": "UTC",   # `init` writes the system time zone into config.toml
-    # Language of everything the user reads (Notion, replies, reminders); see i18n.
+    # Language of everything the user reads (Notion pages, comments and replies); see i18n.
     # TODO_MANAGER_LANG overrides it for one process.
     "language": i18n.DEFAULT,
     "identity": {
@@ -112,11 +112,8 @@ DEFAULTS: dict[str, Any] = {
         # outcome is unknown). Rate-limit requeues are not counted by Hermes.
         "max_retries": 1,
     },
-    "notify": {
-        "matrix": False,  # short link reminders only for important deliveries/blocks/failures
-        "matrix_target": "",  # `hermes send -t` target, e.g. "matrix:<dm name>" (confirm with the user)
-        "hermes_bin": "hermes",
-        "failure_alert_after_minutes": 60,
+    "health": {
+        "gate_idle_minutes": 60,  # a gate that has not run this long is reported
     },
     "feedback": {
         "max_items_per_run": 20,
@@ -124,7 +121,7 @@ DEFAULTS: dict[str, Any] = {
         "max_attempts": 3,
         # The rendered feedback context of one run (fixed part plus the claimed items); the
         # oldest items that fit are claimed, the rest waits. Over budget even for one item:
-        # "defer" (no model run; health alerts) or "proceed" (run over budget, reported).
+        # "defer" (no model run; health reports it) or "proceed" (run over budget, reported).
         "max_context_chars": 60000,
         "over_budget": "defer",
     },

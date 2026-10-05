@@ -2,7 +2,7 @@
 
 * Intake: when even one conversation does not fit (the fixed part, rules and open tasks, is too
   large) the run is deferred by default: nothing is claimed or woken, the batch keeps its
-  attempts, and health reports and alerts it. ``wake.over_budget = "proceed"`` opts into the
+  attempts, and health reports it. ``wake.over_budget = "proceed"`` opts into the
   old behaviour (wake anyway, reported as over budget).
 * Feedback: ``feedback.max_context_chars`` bounds the rendered feedback context; a run claims
   the oldest items that fit and leaves the rest pending for the next run; an item that cannot
@@ -15,12 +15,8 @@ from todo_manager import clock, feedback, feedback_flow, gate_feedback, gate_int
 from tests.helpers import WorkspaceCase, mail
 from tests.test_intake import FakeSource, wake_of
 
-ALERTS = "SELECT payload FROM outbox WHERE dedupe_key LIKE 'notify:health:%'"
-
 
 class IntakeOverBudgetTests(WorkspaceCase):
-    overrides = {"notify": {"matrix": True, "matrix_target": "matrix:test-room"}}
-
     def setUp(self):
         super().setUp()
         self.gmail = FakeSource("gmail", "mailbox:primary")
@@ -35,15 +31,13 @@ class IntakeOverBudgetTests(WorkspaceCase):
         self.assertEqual(woke, wake_of(out))
         return out, woke
 
-    def test_an_oversize_context_defers_the_run_and_alerts(self):
+    def test_an_oversize_context_defers_the_run_and_is_reported(self):
         out, woke = self.gate()
         self.assertFalse(woke, "no model run over budget by default")
         batch = self.conn.execute("SELECT state, attempts, claimed_run FROM batches").fetchone()
         self.assertEqual((batch["state"], batch["attempts"], batch["claimed_run"]), ("mature", 0, None))
         problems = health.report(self.conn, self.cfg)["problems"]
         self.assertTrue(any("deferred" in p and "over budget" in p for p in problems), problems)
-        health.raise_alerts(self.conn, self.cfg)
-        self.assertTrue(any("over budget" in r["payload"] for r in self.conn.execute(ALERTS)))
         clock.advance(minutes=5)
         _, woke = self.gate()
         self.assertFalse(woke, "still deferred while the cause is there")
@@ -62,8 +56,6 @@ class IntakeOverBudgetTests(WorkspaceCase):
 
 
 class FeedbackBudgetTests(WorkspaceCase):
-    overrides = {"notify": {"matrix": True, "matrix_target": "matrix:test-room"}}
-
     def record(self, n, size=2000):
         for i in range(n):
             feedback.record(self.conn, origin="matrix", source_id=f"req_{i}", text=f"请求 {i} " + "x" * size,
@@ -71,7 +63,7 @@ class FeedbackBudgetTests(WorkspaceCase):
             clock.advance(seconds=1)
 
     def gate(self):
-        out, woke = gate_feedback.run_gate(self.conn, self.cfg, notion=None, kanban=None, notifier=None)
+        out, woke = gate_feedback.run_gate(self.conn, self.cfg, notion=None, kanban=None)
         run_id = out.splitlines()[0].split(": ")[1] if woke else None
         return out, woke, run_id
 

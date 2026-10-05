@@ -9,11 +9,9 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from todo_manager import clock, config, db, delegation, effects, export, gate_feedback, health, rules, runs, store
+from todo_manager import clock, config, db, delegation, effects, export, health, rules, runs, store
 from todo_manager.kanban import FakeKanban
-from todo_manager.notify import MatrixNotifier
 from tests.helpers import WorkspaceCase
-from tests.test_feedback import FakeRunner
 
 
 def sha(path: Path) -> str:
@@ -21,8 +19,6 @@ def sha(path: Path) -> str:
 
 
 class PortabilityBase(WorkspaceCase):
-    overrides = {"notify": {"matrix": True, "matrix_target": "matrix:test-room"}}
-
     def setUp(self):
         super().setUp()
         self.kb = FakeKanban()
@@ -133,7 +129,7 @@ class NoReplayTests(PortabilityBase):
         """Work that was in flight when the export/backup was taken."""
         self.task = store.create_task(self.conn, "回复 Alice", origin="cli", actor="human")
         self.waiting = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草", goal="Draft only")
-        effects.notify(self.conn, self.cfg, "dlg:x", "草稿完成，请查看")       # a reminder not yet sent
+        effects.task_comment(self.conn, self.task, "dlg:x", "草稿完成，请查看")  # a comment not yet posted
         effects.task_push(self.conn, self.task)                               # an idempotent Notion push
 
     def held(self, conn):
@@ -148,7 +144,7 @@ class NoReplayTests(PortabilityBase):
         self.assertEqual(self.kb.cards, {}, "no worker is started after a restore")
         self.assertEqual(delegation.get(conn, self.waiting)["status"], "pending_submit")
         outbox = self.held(conn)
-        self.assertEqual(outbox["matrix/notify"], {"dead"}, "a reminder is not replayed")
+        self.assertEqual(outbox["notion/comment"], {"dead"}, "a comment is not replayed")
         self.assertIn("pending", outbox["notion/push_task"], "state pushes converge and stay")
         self.assertNotIn("dead", outbox["notion/push_task"])
         problems = health.report(conn, cfg)["problems"]
@@ -161,7 +157,7 @@ class NoReplayTests(PortabilityBase):
         self.in_flight_state()
         bundle = export.export_snapshot(self.conn, self.cfg)
         export.import_bundle(bundle, self.target)
-        cfg2 = config.load(self.target, overrides={"notify": {"matrix": True, "matrix_target": "matrix:test-room"}})
+        cfg2 = config.load(self.target)
         conn2 = db.connect(cfg2.db_path)
         try:
             self.check_hold(conn2, cfg2)
@@ -173,13 +169,3 @@ class NoReplayTests(PortabilityBase):
         path = export.backup(self.conn, self.cfg)
         export.restore(self.conn, self.cfg, path)
         self.check_hold(self.conn, self.cfg)
-
-    def test_the_feedback_gate_does_not_send_held_reminders(self):
-        self.in_flight_state()
-        export.restore(self.conn, self.cfg, export.backup(self.conn, self.cfg))
-        runner = FakeRunner()
-        gate_feedback.run_gate(self.conn, self.cfg, notion=None, kanban=self.kb,
-                               notifier=MatrixNotifier(self.conn, self.cfg, runner))
-        sent = [text for _, text in runner.calls]
-        self.assertFalse(any("草稿完成" in t for t in sent), "the held reminder is not replayed")
-        self.assertTrue(any("todo-manager health" in t for t in sent), "the user is told something needs a look")

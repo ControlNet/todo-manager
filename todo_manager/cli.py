@@ -95,8 +95,7 @@ def _run_gate(entry: str, conn: Any, cfg: config.Config) -> str:
         from .sources.registry import commit_sources, conversation_sources
         return run_gate(conn, cfg, conversation_sources(cfg), commit_sources(cfg))[0]
     from .gate_feedback import run_gate as run_feedback
-    return run_feedback(conn, cfg, notion=wiring.notion_sync(conn, cfg), kanban=wiring.kanban(cfg),
-                        notifier=wiring.notifier(conn, cfg))[0]
+    return run_feedback(conn, cfg, notion=wiring.notion_sync(conn, cfg), kanban=wiring.kanban(cfg))[0]
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
@@ -107,8 +106,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     cfg, conn = _open(args)
     try:
         with file_lock(lock_path(cfg.home, "feedback"), blocking=True, timeout=120):
-            summary, problems = sync_all(conn, cfg, notion=wiring.notion_sync(conn, cfg), kanban=wiring.kanban(cfg),
-                                         notifier=wiring.notifier(conn, cfg))
+            summary, problems = sync_all(conn, cfg, notion=wiring.notion_sync(conn, cfg), kanban=wiring.kanban(cfg))
     except LockBusy:
         return _fail("BUSY", "a feedback gate run is in progress; retry shortly")
     _print(summary)
@@ -513,7 +511,7 @@ CONFIG_TEMPLATE = """\
 # Todo Manager runtime configuration. Secrets are NOT stored here: connectors name
 # environment variables (optionally loaded from notion.env_file).
 timezone = "UTC"     # IANA name; `init` fills in the system time zone
-# Language of what you read in Notion, replies and reminders: en, zh-CN.
+# Language of what you read in Notion (pages, comments, replies): en, zh-CN.
 # Notion property/option names keep the language used at `notion setup`.
 language = "en"
 
@@ -533,10 +531,6 @@ env_file = "~/.hermes/.env"
 [kanban]
 enabled = false
 board = "todo-manager"
-
-[notify]
-matrix = false
-matrix_target = ""
 
 [email]
 enabled = false

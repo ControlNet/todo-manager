@@ -342,7 +342,7 @@ class HermesKanbanIntegration(WorkspaceCase):
     # ----- an approval confirmed after the sync read the end of its run -----
 
     def sync_all(self):
-        gate_feedback.sync_all(self.conn, self.cfg, notion=None, kanban=self.kb, notifier=None)
+        gate_feedback.sync_all(self.conn, self.cfg, notion=None, kanban=self.kb)
 
     def late_confirmed_approval(self, worker):
         """The reopen lands on the installed Kanban and the simulated worker runs (``worker``);

@@ -624,7 +624,7 @@ class NotionSync:
         with tx(self.conn):
             self.conn.execute("UPDATE notion_pages SET trashed=1 WHERE page_id=?", (row["page_id"],))
             if task and task["status"] not in store.CLOSED_STATUSES and not self.is_user(editor):
-                # Not the verified user: the task stays open; the model asks the user (via Matrix).
+                # Not the verified user: the task stays open; the model asks the user (on the home page).
                 feedback.record(self.conn, origin="notion_page", source_id=row["page_id"],
                                 source_version=f"trashed:{(page or {}).get('last_edited_time') or clock.iso()}",
                                 text=reason, scope_type="task", scope_id=task["id"], kind="page_trashed",
@@ -1022,8 +1022,11 @@ class NotionSync:
                 task = store.get_task(self.conn, fb["scope_id"]) if fb["scope_type"] == "task" else None
                 text = i18n.t("sync.comment_held_resolved", title=task["title"] if task else "-",
                               text=(fb["text"] or "")[:200])
-                effects.notify(self.conn, self.cfg, f"comment-held:{cid}:{fb['id']}", text,
-                               task_id=task["id"] if task else None)
+                key = f"comment-held:{cid}:{fb['id']}"
+                if task:         # a new discussion on the page, not in the resolved one
+                    effects.task_comment(self.conn, task["id"], key, text)
+                elif (fb["payload"] or {}).get("page_id"):
+                    effects.page_comment(self.conn, fb["payload"]["page_id"], key, text)
 
     def _comment(self, c: dict[str, Any], target: dict[str, Any], user_ids: set[str]) -> str:
         author = (c.get("created_by") or {}).get("id")

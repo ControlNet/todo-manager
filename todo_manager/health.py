@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from . import clock, effects, i18n
+from . import clock
 from .config import Config
 from .db import dumps, get_meta, loads, set_meta, tx
 
@@ -47,7 +46,7 @@ def stale_sources(conn: sqlite3.Connection, sources: tuple[str, ...] | None = No
 def record_channel(conn: sqlite3.Connection, source: str, scope: str, error: str | None) -> None:
     """Persist the outcome of one of the gate's own channels (``source``/``scope`` in the
     cursors table, marked ``channel``): an error adds a consecutive failure, a clean pass
-    clears them. Shown and alerted like a failing source; never wakes the model."""
+    clears them. Reported like a failing source; never wakes the model."""
     now = clock.iso()
     with tx(conn):
         if error is None:
@@ -70,8 +69,8 @@ def record_channel(conn: sqlite3.Connection, source: str, scope: str, error: str
 
 def record_problems(conn: sqlite3.Connection, origin: str, found: list[str]) -> None:
     """Keep the problems one gate run found in ``origin`` (e.g. Notion pages it could not use)
-    until the next run replaces them: reported by ``health`` and alerted by the next run's
-    alert step. A run that finds none clears them."""
+    until the next run replaces them: reported by ``health`` and the Notion home page. A run
+    that finds none clears them."""
     key = f"health.problems.{origin}"
     found = list(dict.fromkeys(found))[:20]
     with tx(conn):
@@ -151,7 +150,7 @@ def problems(rep: dict[str, Any], cfg: Config) -> list[str]:
 def problem_items(rep: dict[str, Any], cfg: Config) -> list[tuple[str, str]]:
     """Current problems as (identity, text). The identity names what is wrong (a source scope,
     a kind of problem) and never the details that change from run to run (error text, counts,
-    minutes), so an alert for it is sent once a day however its text changes."""
+    minutes), so it stays one problem however its text changes."""
     found: list[tuple[str, str]] = []
 
     def add(key: str, text: str) -> None:
@@ -205,7 +204,7 @@ def problem_items(rep: dict[str, Any], cfg: Config) -> list[tuple[str, str]]:
         if last is None:
             continue
         age = clock.minutes_since(last["at"]) or 0
-        if age > int(cfg.get("notify.failure_alert_after_minutes", 60)):
+        if age > int(cfg.get("health.gate_idle_minutes", 60)):
             add(f"gate_idle:{entry}", f"{entry} gate has not run for {round(age)} min")
         if last["status"] == "error":
             add(f"gate_error:{entry}", f"{entry} gate error: {last['error']}")
@@ -245,17 +244,6 @@ def metrics(conn: sqlite3.Connection, days: int = 7) -> dict[str, Any]:
             key = reason.split(":", 1)[0]
             out["wake_reasons"][key] = out["wake_reasons"].get(key, 0) + 1
     return out
-
-
-def raise_alerts(conn: sqlite3.Connection, cfg: Config) -> dict[str, int]:
-    """Queue a Matrix reminder for each current problem, at most once per problem (its
-    identity from ``problem_items``) per day."""
-    rep = report(conn, cfg)
-    day = clock.local_date(cfg.tz).isoformat()
-    for key, text in zip(rep["problem_keys"], rep["problems"]):
-        kind = hashlib.sha1(key.encode()).hexdigest()[:12]
-        effects.notify(conn, cfg, f"health:{kind}:{day}", i18n.t("health.alert", text=text))
-    return {"problems": len(rep["problems"])}
 
 
 def usage(cfg: Config, job_ids: list[str], days: int = 7) -> dict[str, Any]:

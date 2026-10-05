@@ -27,7 +27,7 @@ UNKNOWN = "结果未知"
 
 class LateConfirmationBase(BindingBase):
     def sync_all(self):
-        gate_feedback.sync_all(self.conn, self.cfg, notion=None, kanban=self.kb, notifier=None)
+        gate_feedback.sync_all(self.conn, self.cfg, notion=None, kanban=self.kb)
 
     def latest(self, did):
         return delegation.deliveries(self.conn, did)[-1]["id"]

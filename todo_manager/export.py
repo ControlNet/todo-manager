@@ -16,7 +16,7 @@
   against the manifest first; nothing is written on a mismatch).
 * ``backup`` / ``restore`` use SQLite's online backup API (safe while gates run).
 * After an import or a restore, ``reconcile_after_restore`` releases claims of runs that no
-  longer exist, holds Matrix reminders and Notion comments that may already have been sent
+  longer exist, holds Notion comments that may already have been sent
   (state pushes stay: they converge), and holds delegation submissions and messages until the
   user checks the board and runs ``todo-manager delegate release-hold``.
 """
@@ -391,7 +391,7 @@ def reconcile_after_restore(conn: sqlite3.Connection, reason: str) -> dict[str, 
         conn.execute("UPDATE daily_jobs SET updated_at='1970-01-01T00:00:00.000Z' WHERE state='claimed'")
         report["held_effects"] = conn.execute(
             "UPDATE outbox SET status='dead', last_error=?, updated_at=? WHERE status IN"
-            " ('pending','in_flight','uncertain','failed') AND (target='matrix' OR op='comment')",
+            " ('pending','in_flight','uncertain','failed') AND op='comment'",
             (f"held after {reason}: not replayed because it may already have been sent; re-send by hand if needed",
              now)).rowcount
         delegation.hold(conn, reason)

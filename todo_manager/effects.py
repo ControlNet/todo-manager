@@ -10,7 +10,6 @@ from __future__ import annotations
 import sqlite3
 
 from . import ids, outbox
-from .config import Config
 
 
 def task_push(conn: sqlite3.Connection, task_id: str) -> str | None:
@@ -43,11 +42,3 @@ def page_comment(conn: sqlite3.Connection, page_id: str, key: str, text: str, di
     outbox.enqueue(conn, target="notion", op="comment", entity_type="page", entity_id=page_id,
                    dedupe_key=f"comment:{key}", payload={"page_id": page_id, "text": text,
                                                           "discussion_id": discussion_id, "key": key})
-
-
-def notify(conn: sqlite3.Connection, cfg: Config, key: str, text: str, task_id: str | None = None) -> None:
-    """A short Matrix reminder; the task's Notion link is appended when it is sent."""
-    if not cfg.get("notify.matrix"):
-        return
-    outbox.enqueue(conn, target="matrix", op="notify", dedupe_key=f"notify:{key}",
-                   payload={"text": text, "task_id": task_id})

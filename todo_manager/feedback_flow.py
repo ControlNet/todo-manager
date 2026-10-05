@@ -472,20 +472,26 @@ def apply_ops(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any], ops: li
     return report
 
 
-def _queue_reply(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any], text: str) -> None:
-    if fb["origin"] in ("matrix", "notion_page", "notion_property"):
-        # No comment thread to answer in (or the page may be in the trash): reach the user on Matrix.
-        effects.notify(conn, cfg, f"reply:{fb['id']}", text,
-                       task_id=fb["scope_id"] if fb["scope_type"] == "task" else None)
-        return
-    if fb["origin"] != "notion_comment":
-        return  # CLI: the caller prints the result
-    p = fb["payload"]
+def _queue_reply(conn: sqlite3.Connection, fb: dict[str, Any], text: str) -> None:
+    """The reply goes to the comment thread it answers, else to the task's page; when there is
+    no such page (chat/CLI feedback without a task, or the task's page is in the trash) to the
+    Notion home page. It is also kept in the feedback result."""
     key = f"reply:{fb['id']}"
-    if fb["scope_type"] == "task" and fb["scope_id"]:
-        effects.task_comment(conn, fb["scope_id"], key, text, discussion_id=fb.get("reply_to"))
-    elif p.get("page_id"):
-        effects.page_comment(conn, p["page_id"], key, text, discussion_id=fb.get("reply_to"))
+    comment = fb["origin"] == "notion_comment"
+    thread = fb.get("reply_to") if comment else None
+    task = fb["scope_id"] if fb["scope_type"] == "task" else None
+    if task:
+        trashed = conn.execute("SELECT 1 FROM notion_pages WHERE entity_type='task' AND entity_id=? AND trashed=1",
+                               (task,)).fetchone()
+        if not trashed:
+            effects.task_comment(conn, task, key, text, discussion_id=thread)
+            return
+    elif comment and (fb["payload"] or {}).get("page_id"):
+        effects.page_comment(conn, fb["payload"]["page_id"], key, text, discussion_id=thread)
+        return
+    home = get_meta(conn, "notion.home_page_id")
+    if home:
+        effects.page_comment(conn, home, key, text)
 
 
 def page_body_unread(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any]) -> bool:
@@ -560,7 +566,7 @@ def apply_decisions(conn: sqlite3.Connection, cfg: Config, run_id: str, decision
                 result = apply_ops(conn, cfg, fb, item.get("ops") or [])
                 reply = (item.get("reply") or "").strip()
                 if reply:
-                    _queue_reply(conn, cfg, fb, reply)
+                    _queue_reply(conn, fb, reply)
                     result["reply"] = reply
                 result["reason"] = item.get("reason")
                 feedback.resolve(conn, fb["id"], item["outcome"], result)

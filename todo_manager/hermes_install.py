@@ -212,7 +212,7 @@ class Installer:
     log: list[str] = field(default_factory=list)
 
     def hermes(self, *args: str) -> str:
-        cmd = [self.cfg.get("notify.hermes_bin", "hermes"), *args]
+        cmd = [self.cfg.get("hermes.bin", "hermes"), *args]
         proc = self.runner(cmd, capture_output=True, text=True, timeout=120)
         if proc.returncode != 0:
             raise RuntimeError(f"{' '.join(cmd[:3])} failed (exit {proc.returncode}): {(proc.stdout or '')[-300:]}")
@@ -277,11 +277,7 @@ class Installer:
     def job_args(self, entry: str, existing: dict[str, Any] | None) -> list[str]:
         spec = JOBS[entry]
         args = ["--name", spec["name"], "--prompt", asset(f"cron/{entry}.md").strip(),
-                "--script", self.paths.script(entry).name, "--interpreter", self.paths.python,
-                "--deliver", "local"]
-        failure = self.cfg.get("hermes.failure_deliver") or self.cfg.get("notify.matrix_target")
-        if failure:
-            args += ["--failure-deliver", failure]
+                "--script", self.paths.script(entry).name, "--interpreter", self.paths.python]
         for key, flag in (("hermes.model", "--model"), ("hermes.provider", "--provider"),
                           ("hermes.reasoning_effort", "--reasoning-effort")):
             if self.cfg.get(key):
@@ -296,8 +292,9 @@ class Installer:
         args = self.job_args(entry, existing)
         if existing is None:
             prompt = asset(f"cron/{entry}.md").strip()
+            # Delivery is the job's own Hermes setting: local (nothing sent) until the user changes it in Hermes.
             cmd = ["cron", "create", "--paused", "--paused-reason", "installed by todo-manager; resume after review",
-                   *_without(args, "--prompt"), spec["schedule"], prompt]
+                   *_without(args, "--prompt"), "--deliver", "local", spec["schedule"], prompt]
             return Action("create", spec["name"], f"create cron job (paused), schedule {spec['schedule']}",
                           run=lambda: self.hermes(*cmd))
         changes = []
@@ -308,8 +305,6 @@ class Installer:
         sched = (existing.get("schedule") or {}).get("expr")
         if sched != spec["schedule"]:
             changes.append("schedule")
-        if existing.get("deliver") != "local":
-            changes.append("deliver")
         if existing.get("workdir"):
             changes.append("workdir (cleared: no AGENTS.md for this job)")
         cmd = ["cron", "edit", existing["id"], "--schedule", spec["schedule"], *args]

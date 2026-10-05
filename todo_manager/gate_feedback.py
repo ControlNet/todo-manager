@@ -5,11 +5,14 @@ Deterministic steps, each isolated so one failing system does not stall the othe
 1. Notion: pull human property/page edits (projects, then tasks) and poll comments.
 2. Kanban: send queued messages (answers/supplements/pauses), submit new delegations,
    read card events (questions, deliveries, failures).
-3. Dirty scan + outbox: push local changes to Notion, post bot comments, Matrix reminders.
+3. Dirty scan + outbox: push local changes to Notion, post bot comments.
 4. Home page freshness callout (rewritten only when its content changes).
 5. Claim pending feedback that needs interpretation and wake the model for it.
 
 Stdout carries only ids and counts (never comment text) and ends with ``{"wakeAgent": ...}``.
+Nothing is sent from here: the user reads results and problems in Notion (task comments, the
+home page freshness box); what a woken run reports is delivered by the Hermes cron job's own
+``deliver`` setting.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ SOURCE_SCOPES = ("gmail", "slack", "github", "commit", "notion", "kanban")
 # ``comments``) since a partly failed pass does not raise.
 CHANNELS = {"claims": ("gate", "claims"), "kanban_settings": ("kanban", "settings"),
             "kanban_messages": ("kanban", "messages"), "kanban_submit": ("kanban", "submit"),
-            "kanban_cards": ("kanban", "cards"), "alerts": ("gate", "alerts"), "dirty": ("notion", "dirty"),
+            "kanban_cards": ("kanban", "cards"), "dirty": ("notion", "dirty"),
             "outbox": ("gate", "outbox"), "home": ("notion", "home")}
 
 
@@ -60,9 +63,9 @@ def fail_exhausted_claims(conn: sqlite3.Connection, cfg: Config) -> dict[str, in
     with tx(conn):
         for r in rows:
             feedback.resolve(conn, r["id"], "failed", error=f"not applied after {max_attempts} model runs")
-            effects.notify(conn, cfg, f"feedback-failed:{r['id']}",
-                           i18n.t("fb.failed_alert", n=max_attempts, id=r["id"]),
-                           task_id=r["scope_id"] if r["scope_type"] == "task" else None)
+            if r["scope_type"] == "task" and r["scope_id"]:
+                effects.task_comment(conn, r["scope_id"], f"feedback-failed:{r['id']}",
+                                     i18n.t("fb.failed_alert", n=max_attempts, id=r["id"]))
     return {"failed": len(rows)}
 
 
@@ -98,8 +101,8 @@ def freshness_sections(conn: sqlite3.Connection, cfg: Config, lang: str | None =
     return {"extra": [(t("home.status"), status), *lines, (t("home.last_checked"), f"{local:%Y-%m-%d %H}:00")]}
 
 
-def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanban: Any | None,
-             notifier: Any | None) -> tuple[dict[str, Any], list[str]]:
+def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None,
+             kanban: Any | None) -> tuple[dict[str, Any], list[str]]:
     """Steps 1-4 (no model). ``notion``: a NotionSync or None; ``kanban``: a Kanban client or None."""
     summary: dict[str, Any] = {}
     problems: list[str] = []
@@ -120,17 +123,14 @@ def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanba
         step("kanban_messages", lambda: delegation.send_messages(conn, cfg, kanban))
         step("kanban_submit", lambda: delegation.submit_pending(conn, cfg, kanban))
         step("kanban_cards", lambda: delegation.sync_cards(conn, cfg, kanban))
-    step("alerts", lambda: health.raise_alerts(conn, cfg))
     handlers: dict[tuple[str, str], Any] = {}
     if notion is not None:
         step("dirty", notion.enqueue_dirty)
         handlers.update(notion.handlers())
-    if notifier is not None:
-        handlers[("matrix", "notify")] = notifier
     step("outbox", lambda: outbox.process(conn, handlers))
     if notion is not None:
         step("home", lambda: notion.sync_home(freshness_sections(conn, cfg, notion.state.language)))
-        # Kept until the next run replaces them: shown by `health`, alerted by the next alert step.
+        # Kept until the next run replaces them: shown by `health` and the next home page refresh.
         health.record_problems(conn, "notion", notion.problems)
         if notion.problems:
             summary["notion_problems"] = notion.problems[:20]
@@ -152,12 +152,12 @@ def fit_context(conn: sqlite3.Connection, cfg: Config, run_id: str,
     return [], 0
 
 
-def run_gate(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanban: Any | None,
-             notifier: Any | None) -> tuple[str, bool]:
+def run_gate(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None,
+             kanban: Any | None) -> tuple[str, bool]:
     run_id = runs.start(conn, "feedback")
     summary: dict[str, Any] = {}
     try:
-        summary, _ = sync_all(conn, cfg, notion=notion, kanban=kanban, notifier=notifier)
+        summary, _ = sync_all(conn, cfg, notion=notion, kanban=kanban)
         items = feedback.pending(conn, stale_minutes=int(cfg.get("feedback.stale_claim_minutes", 60)))
         waiting = [f["id"] for f in items if feedback_flow.not_ready(conn, cfg, f)]
         if waiting:
@@ -172,7 +172,7 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanba
         if context_chars > budget:
             summary["context_over_budget"] = context_chars
             if cfg.get("feedback.over_budget", "defer") != "proceed":
-                summary["deferred_over_budget"] = budget   # nothing claimed; health reports and alerts it
+                summary["deferred_over_budget"] = budget   # nothing claimed; health reports it
                 runs.finish(conn, run_id, status="idle", summary=summary)
                 return '{"wakeAgent": false}', False
         ids = [f["id"] for f in items]

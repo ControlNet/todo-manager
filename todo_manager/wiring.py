@@ -26,10 +26,3 @@ def kanban(cfg: Config) -> Any | None:
         return None
     from .kanban import BridgeKanban
     return BridgeKanban.from_config(cfg)
-
-
-def notifier(conn: sqlite3.Connection, cfg: Config) -> Any | None:
-    if not cfg.get("notify.matrix"):
-        return None
-    from .notify import MatrixNotifier
-    return MatrixNotifier(conn, cfg)

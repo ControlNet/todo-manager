@@ -226,6 +226,24 @@ class HermesInstallTests(CliCase):
             self.assertNotIn("resume", c)
         self.assertFalse(any(c[:2] == ["cron", "create"] for c in self.fake.calls))
 
+    def test_delivery_is_left_to_the_hermes_job(self):
+        inst = self.installer()
+        inst.apply(inst.plan())
+        data = json.loads(self.fake.jobs_file.read_text())
+        for j in data["jobs"]:
+            j["deliver"] = "matrix"                  # set in Hermes: deliver run results to the home channel
+        self.fake.jobs_file.write_text(json.dumps(data))
+        self.fake.calls.clear()
+        inst = self.installer()
+        actions = inst.plan()
+        inst.apply(actions)
+        edits = [c for c in self.fake.calls if c[:2] == ["cron", "edit"]]
+        self.assertEqual(len(edits), 2)
+        for c in edits:
+            self.assertNotIn("--deliver", c)
+            self.assertNotIn("--failure-deliver", c)
+        self.assertFalse([a for a in actions if "deliver" in a.summary])
+
     def test_foreign_launcher_is_left_alone(self):
         self.paths.launcher.parent.mkdir(parents=True, exist_ok=True)
         self.paths.launcher.write_text("#!/bin/sh\necho someone else\n")

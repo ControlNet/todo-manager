@@ -1,11 +1,12 @@
 """B12/B13: failures of the feedback gate's own channels (Notion comments and page bodies, the
-Kanban steps, any step that raises) are kept as persistent health, cleared by the next clean
-run, and reach the Matrix alerts; Notion problems found by a run (an inaccessible page, a
-duplicate page) are alerted too. None of this creates feedback or wakes the model.
+Kanban steps, any step that raises) are kept as persistent health and cleared by the next clean
+run; Notion problems found by a run (an inaccessible page, a duplicate page) are reported too.
+None of this creates feedback, wakes the model or sends anything: problems are read in
+``todo-manager health`` and the Notion home page.
 
 A source read on its own schedule (the daily commit digest) is stale only once its next read
-was due and did not happen, never in between; an alert is identified by what is wrong (the
-source scope, the kind of problem), not by its changing text, so it is sent at most once a day.
+was due and did not happen, never in between; a problem is identified by what is wrong (the
+source scope, the kind of problem), not by its changing text.
 
 Notion is ``FakeNotion`` and Kanban is ``FakeKanban`` (test doubles); the commit adapter is
 ``FakeSource`` (test double).
@@ -30,8 +31,9 @@ def channel(conn, source, scope):
     return dict(row) if row else None
 
 
-def health_alerts(conn):
-    return [r["dedupe_key"] for r in conn.execute("SELECT dedupe_key FROM outbox WHERE dedupe_key LIKE 'notify:health:%'")]
+def sent_elsewhere(conn):
+    """Effects queued for anything but Notion or the board (there is no other channel)."""
+    return [dict(r) for r in conn.execute("SELECT target, op FROM outbox WHERE target NOT IN ('notion', 'kanban')")]
 
 
 class ChannelHealthTests(GateCase):
@@ -42,7 +44,7 @@ class ChannelHealthTests(GateCase):
         self.assertFalse(woke, "an API failure never wakes the model")
         self.assertEqual(feedback.pending(self.conn, include_claimed=True), [])
 
-    def test_a_failed_comment_poll_is_kept_alerted_and_cleared(self):
+    def test_a_failed_comment_poll_is_kept_and_cleared(self):
         self.fake.fail_next[("GET", "/comments")] = RESTRICTED
         _, woke, _ = self.gate()
         self.assert_no_wake(woke)
@@ -50,7 +52,7 @@ class ChannelHealthTests(GateCase):
         self.assertEqual(row["consecutive_failures"], 1)
         self.assertIn("Insufficient permissions", row["last_error"])
         self.assertTrue(any(p.startswith("source notion:comments") for p in self.problems()), self.problems())
-        self.assertEqual(len(health_alerts(self.conn)), 1)
+        self.assertEqual(sent_elsewhere(self.conn), [])
         clock.advance(minutes=5)
         self.gate()
         self.assertEqual(channel(self.conn, "notion", "comments")["consecutive_failures"], 0)
@@ -93,7 +95,7 @@ class ChannelHealthTests(GateCase):
         row = channel(self.conn, "kanban", "messages")
         self.assertEqual(row["consecutive_failures"], 1)
         self.assertIn("RuntimeError", row["last_error"])
-        self.assertEqual(len(health_alerts(self.conn)), 1)
+        self.assertEqual(sent_elsewhere(self.conn), [])
 
     def test_a_channel_is_not_stale_merely_because_its_step_had_nothing_to_do(self):
         self.gate()
@@ -101,7 +103,7 @@ class ChannelHealthTests(GateCase):
         self.assertFalse([p for p in self.problems() if p.startswith("source kanban") or p.startswith("source notion:")
                           and ("comments" in p or "bodies" in p)])
 
-    def test_an_inaccessible_page_is_alerted_not_counted_as_a_channel_failure(self):
+    def test_an_inaccessible_page_is_reported_not_counted_as_a_channel_failure(self):
         saved = self.fake.pages.pop(self.page)
         self.gate()
         clock.advance(minutes=5)
@@ -109,31 +111,28 @@ class ChannelHealthTests(GateCase):
         self.assertEqual(channel(self.conn, "notion", "comments")["consecutive_failures"], 0)
         lines = [p for p in self.problems() if "no longer accessible" in p]
         self.assertEqual(len(lines), 1, self.problems())
-        alerts = [r["payload"] for r in self.conn.execute(
-            "SELECT payload FROM outbox WHERE dedupe_key LIKE 'notify:health:%'")]
-        self.assertTrue(any("no longer accessible" in a for a in alerts), alerts)
         self.fake.pages[self.page] = saved
         clock.advance(minutes=5)
         self.gate()
         self.assertFalse([p for p in self.problems() if "no longer accessible" in p], "cleared once the page is back")
 
 
-class AlertIdentityTests(WorkspaceCase):
-    overrides = {"notify": {"matrix": True, "matrix_target": "matrix:test-room"}}
+class ProblemIdentityTests(WorkspaceCase):
+    def keys(self):
+        return health.report(self.conn, self.cfg)["problem_keys"]
 
-    def test_the_same_failing_scope_with_changing_text_is_alerted_once_a_day(self):
+    def test_the_same_failing_scope_with_changing_text_is_one_problem(self):
         record_fetch_error(self.conn, "gmail", "mailbox:x", "HTTP 503 backend error")
-        health.raise_alerts(self.conn, self.cfg)
+        before = self.keys()
         clock.advance(minutes=7)
         record_fetch_error(self.conn, "gmail", "mailbox:x", "timed out after 60s")
-        health.raise_alerts(self.conn, self.cfg)
-        self.assertEqual(len(health_alerts(self.conn)), 1)
+        self.assertEqual(self.keys(), before)
+        self.assertEqual(len(before), 1)
 
-    def test_scopes_that_differ_only_in_digits_are_separate_alerts(self):
+    def test_scopes_that_differ_only_in_digits_are_separate_problems(self):
         record_fetch_error(self.conn, "slack", "conversation:C01", "not_in_channel")
         record_fetch_error(self.conn, "slack", "conversation:C02", "not_in_channel")
-        health.raise_alerts(self.conn, self.cfg)
-        self.assertEqual(len(health_alerts(self.conn)), 2)
+        self.assertEqual(len(self.keys()), 2)
 
 
 def commit(sha):

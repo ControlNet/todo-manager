@@ -1,41 +1,21 @@
 """Entry point B: gate + feedback interpretation (model decisions are written by the test)."""
 
 import json
-import subprocess
 from datetime import timedelta
 
-from todo_manager import clock, delegation, effects, feedback, feedback_flow, gate_feedback, outbox, rules, store
+from todo_manager import clock, delegation, feedback, feedback_flow, gate_feedback, rules, store
 from todo_manager.db import rules_version
 from todo_manager.feedback_flow import FeedbackDecisionError
 from todo_manager.kanban import FakeKanban
 from todo_manager.net import HttpError
-from todo_manager.notify import MatrixNotifier
 from tests.fake_notion import BOT_ID
 from tests.test_notion import NotionCase
 
 
-class FakeRunner:
-    """Test double for ``subprocess.run`` of ``hermes send``."""
-
-    def __init__(self, fail: Exception | None = None, returncode: int = 0):
-        self.calls = []
-        self.fail = fail
-        self.returncode = returncode
-
-    def __call__(self, cmd, **kw):
-        self.calls.append((cmd, kw.get("input")))
-        if self.fail:
-            raise self.fail
-        return subprocess.CompletedProcess(cmd, self.returncode, "", "warning: unrelated")
-
-
 class GateCase(NotionCase):
-    overrides = {**NotionCase.overrides, "notify": {"matrix": True, "matrix_target": "matrix:test-room"}}
-
     def setUp(self):
         super().setUp()
         self.kb = FakeKanban()
-        self.runner = FakeRunner()
         self.task = store.create_task(self.conn, "回复 Bob 的合作邮件", origin="intake", responsibility="Bob 直接问我",
                                       due_date="2026-10-09")
         self.push(self.task)
@@ -43,8 +23,7 @@ class GateCase(NotionCase):
 
     def gate(self):
         self.sync = self.new_sync()
-        out, woke = gate_feedback.run_gate(self.conn, self.cfg, notion=self.sync, kanban=self.kb,
-                                           notifier=MatrixNotifier(self.conn, self.cfg, self.runner))
+        out, woke = gate_feedback.run_gate(self.conn, self.cfg, notion=self.sync, kanban=self.kb)
         self.assertEqual(json.loads(out.splitlines()[-1]), {"wakeAgent": woke})
         run_id = out.splitlines()[0].split(": ")[1] if woke else None
         return out, woke, run_id
@@ -55,6 +34,9 @@ class GateCase(NotionCase):
 
     def bot_comments(self):
         return [c for c in self.fake.comments if c["created_by"]["id"] == BOT_ID]
+
+    def bot_texts(self, page):
+        return [c["rich_text"][0]["plain_text"] for c in self.bot_comments() if c["parent"]["page_id"] == page]
 
 
 class GateTests(GateCase):
@@ -136,7 +118,7 @@ class GateTests(GateCase):
             {"op": "update_task", "task": self.task, "based_on_version": version, "set": {"due_date": "2026-10-15"}}]}])
         self.assertEqual(store.get_task(self.conn, self.task)["due_date"], "2026-10-20")
 
-    def test_unapplied_claim_is_retried_then_failed_with_notification(self):
+    def test_unapplied_claim_is_retried_then_failed_and_the_task_page_says_so(self):
         self.fake.user_comment(self.page, "请看一下")
         for attempt in range(3):
             _, woke, _ = self.gate()
@@ -146,7 +128,7 @@ class GateTests(GateCase):
         self.assertFalse(woke)
         row = self.conn.execute("SELECT status FROM feedback WHERE origin='notion_comment'").fetchone()
         self.assertEqual(row["status"], "failed")
-        self.assertTrue(any("连续 3 次未能处理" in (inp or "") for _, inp in self.runner.calls))
+        self.assertTrue(any("连续 3 次未能处理" in t for t in self.bot_texts(self.page)), self.bot_texts(self.page))
 
     def test_notion_failure_does_not_stop_kanban_and_never_wakes(self):
         did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草回复", goal="draft")
@@ -191,7 +173,7 @@ class DelegationFeedbackTests(GateCase):
 
     def test_answer_in_question_thread_unblocks_card(self):
         q = self.ask("收件人是 Bob 还是 Bob 的助理？")
-        self.assertTrue(any("收件人" in (inp or "") for _, inp in self.runner.calls), "Matrix reminder sent")
+        self.assertIn("收件人", q["rich_text"][0]["plain_text"], "the question is on the task page")
         self.fake.user_comment(self.page, "Bob 本人", discussion_id=q["discussion_id"])
         _, _, run_id = self.gate()
         fb = feedback.claimed_by(self.conn, run_id)[0]
@@ -276,7 +258,7 @@ class BodyEditFeedbackTests(GateCase):
         self.assertNotIn("其实是导师转给我的", md)
 
 
-class DirectAndNotifyTests(GateCase):
+class DirectAndReplyTests(GateCase):
     def test_matrix_direct_feedback_is_recorded_and_applied_once(self):
         version = store.get_task(self.conn, self.task)["version"]
         ops = [{"op": "update_task", "task": self.task, "based_on_version": version, "set": {"focus": True}},
@@ -296,18 +278,30 @@ class DirectAndNotifyTests(GateCase):
         self.assertIsNone(self.conn.execute("SELECT 1 FROM feedback WHERE source_id='$event2'").fetchone(),
                           "an invalid direct request leaves no pending row for gate B")
 
-    def test_notifier_appends_link_and_is_at_most_once(self):
-        effects.notify(self.conn, self.cfg, "k1", "📦 交付 v1", task_id=self.task)
-        notifier = MatrixNotifier(self.conn, self.cfg, FakeRunner(fail=subprocess.TimeoutExpired("hermes", 60)))
-        stats = outbox.process(self.conn, {("matrix", "notify"): notifier})
-        self.assertEqual(stats["uncertain"], 1)
-        clock.advance(minutes=2)
-        runner = FakeRunner()
-        outbox.process(self.conn, {("matrix", "notify"): MatrixNotifier(self.conn, self.cfg, runner)})
-        self.assertEqual(runner.calls, [], "unknown outcome is not resent")
-        effects.notify(self.conn, self.cfg, "k2", "❓ 需要补充", task_id=self.task)
-        outbox.process(self.conn, {("matrix", "notify"): MatrixNotifier(self.conn, self.cfg, runner)})
-        cmd, text = runner.calls[0]
-        self.assertEqual(cmd[:4], ["hermes", "send", "-t", "matrix:test-room"])
-        url = self.conn.execute("SELECT url FROM notion_pages WHERE entity_id=?", (self.task,)).fetchone()["url"]
-        self.assertTrue(url and text.endswith("\n" + url))
+    def test_a_reply_about_a_page_in_the_trash_goes_to_the_home_page(self):
+        clock.advance(minutes=1)
+        self.fake.user_trash(self.page, author="user-9999")      # not the verified user
+        self.push(self.task)
+        _, woke, run_id = self.gate()
+        self.assertTrue(woke)
+        [fb] = feedback.claimed_by(self.conn, run_id)
+        self.assertEqual(fb["kind"], "page_trashed")
+        self.decide(run_id, [{"feedback": fb["id"], "outcome": "clarify", "reply": "要取消这个任务吗？"}])
+        self.gate()
+        [reply] = [c for c in self.bot_comments() if c["rich_text"][0]["plain_text"] == "要取消这个任务吗？"]
+        self.assertEqual(reply["parent"]["page_id"], self.sync.state.home_page_id)
+
+    def test_a_reply_to_page_notes_is_a_new_comment_on_the_task_page(self):
+        original = self.fake.markdown[self.page]
+        self.fake.user_set_markdown(self.page, original + "\n\n记得附上数据")
+        clock.advance(minutes=1)
+        _, woke, run_id = self.gate()
+        self.assertTrue(woke)
+        [fb] = feedback.claimed_by(self.conn, run_id)
+        self.assertNotEqual(fb["origin"], "notion_comment")
+        self.decide(run_id, [{"feedback": fb["id"], "outcome": "clarify", "reply": "附上哪份数据？"}])
+        self.gate()
+        [reply] = [c for c in self.bot_comments() if c["rich_text"][0]["plain_text"] == "附上哪份数据？"]
+        self.assertEqual(reply["parent"]["page_id"], self.page)
+        self.assertFalse([c for c in self.fake.comments if c is not reply and c["discussion_id"] == reply["discussion_id"]],
+                         "a new discussion")
