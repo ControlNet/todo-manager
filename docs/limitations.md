@@ -142,6 +142,9 @@ verified and how.
 - A cancel takes priority: messages queued for the delegation that have not taken effect are
   voided (one notice lists them), and while it is pending answers, revisions, resumes, accepts
   and approvals are refused. An accept that completed the card before the cancel ran stands.
+  A cancel does not show that an approved external action was not done: an approval whose run
+  was still going (or waiting for an answer) when the card was archived is `unknown` and you are
+  told; only when no run claimed the card after the approval is it `not_run`.
 - Approvals are per delivered version and go out together with one reopen; one that arrives
   after that version was sent back (or while others for it are in flight) is refused, so
   approve again for the next version.

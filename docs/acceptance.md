@@ -183,6 +183,19 @@ the delegation's `event_cursor` tells which events the sync has read.
 Full suite: 439 tests, 0 failures, 0 skips, including 15 *hermes* integration tests (installed
 Hermes 0.21.5 in an isolated `HERMES_HOME`).
 
+## Follow-up: a cancel settles approvals already handed to a run (baseline 2480453)
+
+| Item | Root cause | Fix | Tests | Commit |
+|---|---|---|---|---|
+| Cancel left handed approvals unsettled | the cancel is processed first; after the archive it read only the events after the sync cursor and applied them `quiet`, which skipped the unknown hold for a run end; cancelled delegations are not synced again. An approval delivered normally (`consumed_at` set) whose run crashed, or was still going, before the sync read it kept `outcome` NULL with no notice (a result already became `reported`) | after the archive the cancel reads all of the card's events and settles every handed approval whose outcome is open, for the run it went to (same matching as the late confirmation): result → `reported`; run end without one, or a run still going or waiting for an answer when archived → `unknown` (notice once, no pause, nothing resumed or replayed); no run claimed the card after the approval reached it → `not_run`. Settled outcomes are kept. If the card cannot be read after the archive, the cancel is finished by the retry (archive is idempotent). A run end read while a cancel is pending also settles approvals. The notice for a stopped delegation no longer says it was paused | `test_cancel_settles_approvals` (FakeKanban through `sync_all`: crash, result with the Task cancelled, two approvals, a run still going or blocked, never claimed, earlier failed run, settled outcome kept, repeated ticks and a reopened database, lost archive response, unreadable card after the archive, process killed after the archive, queued pause); *hermes* `test_cancel_after_an_unread_crash_settles_the_approval_unknown`, `test_cancel_after_an_unread_result_settles_the_approval_reported`, `test_cancel_while_the_run_is_going_settles_the_approval_unknown`, `test_cancel_before_any_run_claimed_the_card_is_not_run` | a3101d0 |
+
+Hermes archive behaviour (installed 0.21.5, isolated `HERMES_HOME`): archiving closes the active
+run as `reclaimed` and names it on the `archived` event (`run_id`; None when no run was
+active); there is no separate run-end event; a worker is only started after a `claimed` event.
+No schema change: `approvals.outcome` gains the value `not_run` (free text column).
+
+Full suite: 457 tests, 0 failures, 0 skips, including 19 *hermes* integration tests.
+
 ## Still to verify with real data
 
 1. **Real-sample intake evaluation** (criteria 1–4, 6, 11): one sandbox run was decided by the
