@@ -48,6 +48,7 @@
   "dlg.reason.not_in_review": "the delegation is no longer under review",
   "dlg.reason.requirement_changed": "the requirements changed after that version",
   "dlg.reason.revoked": "revoked",
+  "dlg.reason.sent_back_without_it": "the version was sent back to the worker before this approval reached the card",
   "dlg.reason.unbound": "not linked to an approval record",
   "dlg.reason.used": "already used once",
   "dlg.reopened_withdraw": "task reopened before the message was sent",

@@ -568,14 +568,16 @@ def _void_approval(conn: sqlite3.Connection, d: dict[str, Any], a: sqlite3.Row, 
 def _hold_unknown_external_action(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], event: str) -> None:
     """A run that was handed an approval ended without reporting back: the external action
     may or may not have happened. Pause the card so it is not retried automatically, and ask."""
-    a = conn.execute("SELECT * FROM approvals WHERE delegation_id=? AND consumed_at IS NOT NULL AND outcome IS NULL"
-                     " ORDER BY consumed_at DESC LIMIT 1", (d["id"],)).fetchone()
-    if a is None:
+    handed = conn.execute("SELECT * FROM approvals WHERE delegation_id=? AND consumed_at IS NOT NULL AND outcome IS NULL"
+                          " ORDER BY consumed_at, rowid", (d["id"],)).fetchall()
+    if not handed:
         return
-    conn.execute("UPDATE approvals SET outcome='unknown' WHERE id=?", (a["id"],))
-    text = i18n.t("dlg.approval_unknown", action=a["action"], title=d["title"], event=event)
-    effects.task_comment(conn, d["task_id"], f"approval-unknown:{a['id']}", text)
-    effects.notify(conn, cfg, f"approval-unknown:{a['id']}", text, task_id=d["task_id"])
+    text = ""
+    for a in handed:                       # approvals of one version go out to the same run
+        conn.execute("UPDATE approvals SET outcome='unknown' WHERE id=?", (a["id"],))
+        text = i18n.t("dlg.approval_unknown", action=a["action"], title=d["title"], event=event)
+        effects.task_comment(conn, d["task_id"], f"approval-unknown:{a['id']}", text)
+        effects.notify(conn, cfg, f"approval-unknown:{a['id']}", text, task_id=d["task_id"])
     if not d["pause_requested"]:
         add_message(conn, d["id"], "pause", text, cause="approval_unknown")
 
@@ -752,24 +754,49 @@ def on_task_closed(conn: sqlite3.Connection, task_id: str, status: str, reason: 
 
 
 def record_approval(conn: sqlite3.Connection, delegation_id: str, delivery_id: str, action: str, detail: str,
-                    feedback_id: str | None) -> str:
-    row = conn.execute("SELECT * FROM deliveries WHERE id=? AND delegation_id=?", (delivery_id, delegation_id)).fetchone()
-    if row is None:
-        raise DelegationError("approval must name a delivery of this delegation")
-    latest = _latest_result(conn, delegation_id)
-    if latest is None or latest["id"] != delivery_id:
-        raise DelegationError("approval must name the latest delivered version")
-    d = get(conn, delegation_id)
-    if row["requirement_version"] != d["requirement_version"]:
-        raise DelegationError("the requirements changed after this version; wait for the next delivery")
-    aid = ids.new_id("approval")
+                    feedback_id: str | None, op_key: str | None = None) -> str:
+    """Record one approval with its own message. ``op_key`` (feedback id + op index) makes a
+    retried op return its approval; an identical approval that has not gone out yet is the same
+    approval. All approvals of a version go to the worker together (``_send_approvals``), so an
+    approval is refused here - not dropped later - once that version's run has been started
+    or is being started."""
     with tx(conn):
+        if op_key:
+            mine = conn.execute("SELECT approval_id FROM delegation_messages WHERE op_key=?", (op_key,)).fetchone()
+            if mine and mine["approval_id"]:
+                return mine["approval_id"]
+        row = conn.execute("SELECT * FROM deliveries WHERE id=? AND delegation_id=?",
+                           (delivery_id, delegation_id)).fetchone()
+        if row is None:
+            raise DelegationError("approval must name a delivery of this delegation")
+        latest = _latest_result(conn, delegation_id)
+        if latest is None or latest["id"] != delivery_id:
+            raise DelegationError("approval must name the latest delivered version")
+        d = get(conn, delegation_id)
+        if row["requirement_version"] != d["requirement_version"]:
+            raise DelegationError("the requirements changed after this version; wait for the next delivery")
+        if d["status"] != "review":
+            raise DelegationError(f"the delegation is {d['status']}: this version is no longer waiting for review;"
+                                  " approve the next version")
+        if conn.execute("SELECT 1 FROM delegation_messages WHERE delegation_id=? AND kind='approval'"
+                        " AND status='sending'", (delegation_id,)).fetchone():
+            raise DelegationError("approvals for this version are being delivered to the worker; approve the next"
+                                  " version")
+        same = conn.execute("SELECT a.id FROM approvals a JOIN delegation_messages m ON m.approval_id=a.id"
+                            " WHERE a.delegation_id=? AND a.delivery_id=? AND a.action=? AND a.detail=?"
+                            " AND a.consumed_at IS NULL AND a.revoked_at IS NULL"
+                            " AND m.status IN ('pending','waiting_capacity')",
+                            (delegation_id, delivery_id, action, detail)).fetchone()
+        if same:
+            return same["id"]
+        aid = ids.new_id("approval")
         conn.execute("INSERT INTO approvals(id, delegation_id, delivery_id, action, detail, feedback_id, granted_at)"
                      " VALUES (?,?,?,?,?,?,?)", (aid, delegation_id, delivery_id, action, detail, feedback_id,
                                                  clock.iso()))
+        # Its own message even when one feedback item approves several actions.
         add_message(conn, delegation_id, "approval",
                     f"APPROVED {action} for delivery {delivery_id} (v{row['seq']}). {detail}".strip(), feedback_id,
-                    approval_id=aid)
+                    approval_id=aid, op_key=op_key or f"approval:{aid}")
     return aid
 
 
@@ -970,12 +997,6 @@ def _transition_target(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[st
     if kind == "revision" and msg.get("target_seq"):
         # The version it was written for, whatever our cache says: the card decides.
         return "reopen_review", msg.get("target_event_id")
-    if kind == "approval" and status == "review":
-        latest = _latest_result(conn, d["id"])
-        if msg.get("approval_id"):
-            latest = conn.execute("SELECT dl.* FROM deliveries dl JOIN approvals a ON a.delivery_id=dl.id WHERE a.id=?",
-                                  (msg["approval_id"],)).fetchone()
-        return "reopen_review", latest["source_event_id"] if latest else None
     return None
 
 
@@ -1015,17 +1036,8 @@ def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any
     kind, mid = msg["kind"], msg["id"]
     attempted = msg["status"] == "sending"
     status = d["status"]
-    if kind == "approval" and not attempted:
-        problem = _approval_problem(conn, d, msg)
-        if problem:
-            a = conn.execute("SELECT * FROM approvals WHERE id=?", (msg["approval_id"],)).fetchone() \
-                if msg.get("approval_id") else None
-            with tx(conn):
-                if a is not None and problem != "used":
-                    _void_approval(conn, d, a, problem)
-                conn.execute("UPDATE delegation_messages SET status='superseded', error=? WHERE id=?",
-                             (f"approval void: {problem}", mid))
-            return "superseded"
+    if kind == "approval":
+        return _send_approvals(conn, cfg, kb, d, msg)
     if kind == "cancel":
         return _send_cancel(conn, cfg, kb, d, msg)
     if not attempted and _newer_than_bound(conn, d, msg):
@@ -1148,6 +1160,82 @@ def _send_requirement_change(conn: sqlite3.Connection, cfg: Config, kb: Kanban, 
         if held_back:
             return held_back
     return _apply_transition(conn, cfg, kb, d, msg, "reopen_review", parked)
+
+
+def _refuse_approval(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str, Any], problem: str) -> None:
+    a = conn.execute("SELECT * FROM approvals WHERE id=?", (msg["approval_id"],)).fetchone() \
+        if msg.get("approval_id") else None
+    with tx(conn):
+        if a is not None and problem != "used":
+            _void_approval(conn, d, a, problem)
+        conn.execute("UPDATE delegation_messages SET status='superseded', error=? WHERE id=?",
+                     (f"approval void: {problem}", msg["id"]))
+
+
+def _send_approvals(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any],
+                    msg: dict[str, Any]) -> str:
+    """All valid approvals for the version ``msg`` approves go to the worker together: a comment
+    each, then one reopen of that version's review. One reopen per approval would start a run
+    with only the first, and leave the others no version in review to go to. A retry (some in
+    ``sending``) asks the card first: once the review was reopened, the approvals that were
+    posted before it are sent; one that was not is void (that run started without it)."""
+    a = conn.execute("SELECT * FROM approvals WHERE id=?", (msg["approval_id"],)).fetchone() \
+        if msg.get("approval_id") else None
+    if a is None:
+        _refuse_approval(conn, d, msg, "unbound")
+        return "superseded"
+    group = []
+    for m in conn.execute("SELECT m.* FROM delegation_messages m JOIN approvals a ON a.id=m.approval_id"
+                          " WHERE m.delegation_id=? AND m.kind='approval' AND a.delivery_id=?"
+                          " AND m.status IN ('pending','sending','waiting_capacity') ORDER BY m.created_at, m.rowid",
+                          (d["id"], a["delivery_id"])).fetchall():
+        m = dict(m)
+        problem = None if m["status"] == "sending" else _approval_problem(conn, d, m)
+        if problem:
+            _refuse_approval(conn, d, m, problem)
+        else:
+            group.append(m)
+    if not group:
+        return "superseded"
+    anchor = conn.execute("SELECT source_event_id FROM deliveries WHERE id=?", (a["delivery_id"],)).fetchone()[0]
+    attempted = any(m["status"] == "sending" for m in group)
+    snap = kb.snapshot(d["card_id"], after_event=0)
+    verdict = transition_verdict(snap["task"]["status"], snap["events"], "reopen_review", anchor)
+    if verdict == "already":
+        for m in group:
+            if m["status"] == "sending" or _has_marker(snap, m["id"]):
+                if _has_marker(snap, m["id"]):                    # records its place; nothing is posted
+                    _post_comment(conn, kb, d, m, f"[{i18n.t('dlg.msg.approval')}] {m['body']}", snap)
+                _sent_transition(conn, d, m, reserved=False)
+            else:
+                _refuse_approval(conn, d, m, "sent_back_without_it")
+        return "sent"
+    if verdict == "mismatch":
+        newer = any(e["kind"] == "review_requested" and int(e["id"]) > int(anchor) for e in snap["events"])
+        for m in group:
+            _refuse_approval(conn, d, m, "newer_version" if newer else "not_in_review")
+        return "superseded"
+    if d["pause_requested"] or (not attempted and capacity(conn, cfg, exclude=d["id"]) <= 0):
+        with tx(conn):
+            for m in group:
+                conn.execute("UPDATE delegation_messages SET status='waiting_capacity', error=? WHERE id=?",
+                             ("paused by user" if d["pause_requested"] else None, m["id"]))
+        return "waiting"
+    for m in group:
+        _sending(conn, m["id"])
+    for m in group:
+        _post_comment(conn, kb, d, m, f"[{i18n.t('dlg.msg.approval')}] {m['body']}", snap)
+        snap = kb.snapshot(d["card_id"], after_event=0)   # the next one is placed after this one
+    result = kb.transition(d["card_id"], "reopen_review", anchor)
+    if result["outcome"] == "mismatch":
+        for m in group:
+            _refuse_approval(conn, d, m, "not_in_review")
+        return "superseded"
+    for n, m in enumerate(group):
+        _sent_transition(conn, d, m, reserved=n == 0 and result["outcome"] in ("done", "raced"))
+    if result["outcome"] == "raced":
+        _raced(conn, cfg, d, msg)
+    return "sent"
 
 
 def _sent_transition(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str, Any], reserved: bool) -> str:

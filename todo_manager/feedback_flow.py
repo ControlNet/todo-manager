@@ -267,6 +267,9 @@ def _validate_ops(conn: sqlite3.Connection, fb: dict[str, Any], ops: list[dict[s
             if latest is None or latest["id"] != op.get("delivery"):
                 errors.append(f"{at}: approval must name the latest delivered version"
                               + (f" ({latest['id']})" if latest else ""))
+            d = delegation.get(conn, op.get("delegation", ""))
+            if d is not None and d["status"] != "review":
+                errors.append(f"{at}: delegation is {d['status']}; only a version waiting for review can be approved")
             names = delegation.action_names([op.get("action") or ""])
             if len(names) != 1 or not names <= delegation.KNOWN_ACTIONS:
                 errors.append(f"{at}: unknown action")
@@ -404,7 +407,7 @@ def apply_ops(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any], ops: li
                                                       delivery_id=_replied_delivery(fb, op), op_key=op_key)
         elif kind == "approve":
             entry["approval"] = delegation.record_approval(conn, op["delegation"], op["delivery"], op["action"],
-                                                           op.get("detail") or "", fb["id"])
+                                                           op.get("detail") or "", fb["id"], op_key=op_key)
         elif kind == "rule":
             status = op.get("status", "suggested")
             entry["rule"] = rules.add_rule(conn, title=op["title"], body=op["body"],
