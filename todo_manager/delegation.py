@@ -310,8 +310,9 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[st
                                      ).fetchone()[0]
         return stats
     with file_lock(lock_path(cfg.home, "kanban-submit"), blocking=True, timeout=60):
-        rows = conn.execute("SELECT id FROM delegations WHERE status IN ('pending_submit','reconcile')"
-                            " AND pause_requested=0 ORDER BY created_at").fetchall()
+        # A pause holds back a create, never the read-only lookup of one that may have happened.
+        rows = conn.execute("SELECT id FROM delegations WHERE status='reconcile'"
+                            " OR (status='pending_submit' AND pause_requested=0) ORDER BY created_at").fetchall()
         for row in rows:
             d = get(conn, row["id"])
             task = store.get_task(conn, d["task_id"])
@@ -339,12 +340,15 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[st
             if matches:
                 card = matches[0]
                 with tx(conn):
+                    # Our pause has not reached this card yet: a block on it is the worker's.
                     status = "cancelled" if card["status"] == "archived" else _status_from_card(card["status"], d)
                     _set(conn, d["id"], card_id=card["id"], card_status=card["status"], status=status, last_error=None)
                 stats["linked"] += 1
+                if d["pause_requested"]:
+                    _pause_linked(conn, cfg, kb, d["id"], stats)
                 continue
-            if task is None or task["status"] in store.CLOSED_STATUSES or closing:
-                # An uncertain create that did not happen, for a Task closed meanwhile.
+            if task is None or task["status"] in store.CLOSED_STATUSES or closing or d["pause_requested"]:
+                # An uncertain create that did not happen, for a Task closed or paused meanwhile.
                 with tx(conn):
                     _set(conn, d["id"], status="pending_submit", last_error=None)
                 stats["held"] += 1
@@ -392,6 +396,22 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[st
     return stats
 
 
+def _pause_linked(conn: sqlite3.Connection, cfg: Config, kb: Kanban, delegation_id: str,
+                  stats: dict[str, Any]) -> None:
+    """A card found after a lost create response, for a delegation the user paused meanwhile:
+    apply the pause now, before a ready card is picked up (a failure leaves it to send_messages)."""
+    for msg in conn.execute("SELECT * FROM delegation_messages WHERE delegation_id=? AND kind='pause'"
+                            " AND status IN ('pending','sending') ORDER BY created_at", (delegation_id,)).fetchall():
+        try:
+            _deliver(conn, cfg, kb, get(conn, delegation_id), dict(msg))
+        except KanbanError as exc:
+            with tx(conn):
+                conn.execute("UPDATE delegation_messages SET status=?, error=? WHERE id=?",
+                             ("sending" if exc.uncertain or msg["status"] == "sending" else "pending",
+                              str(exc)[:500], msg["id"]))
+            _failed(stats, "errors", f"pause not delivered: {exc}")
+
+
 def _notion_url(conn: sqlite3.Connection, task: dict[str, Any]) -> str | None:
     row = conn.execute("SELECT page_id, url FROM notion_pages WHERE entity_type='task' AND entity_id=?",
                        (task["id"],)).fetchone()
@@ -400,13 +420,17 @@ def _notion_url(conn: sqlite3.Connection, task: dict[str, Any]) -> str | None:
     return row["url"] or f"https://www.notion.so/{row['page_id'].replace('-', '')}"
 
 
-def _status_from_card(card_status: str, d: dict[str, Any]) -> str:
+def _status_from_card(card_status: str, d: dict[str, Any], paused_block: bool | None = None) -> str:
+    """``paused_block``: whether the newest block event seen is our pause (None: no block seen
+    now, the earlier state holds). A requested pause alone is not "paused": a card blocked by
+    the worker's question stays blocked."""
     if card_status in ("ready", "todo", "scheduled"):
         return "queued"
     if card_status == "running":
         return "running"
     if card_status in ("blocked", "triage"):
-        return "paused" if d.get("pause_requested") else "blocked"
+        ours = paused_block if paused_block is not None else d.get("status") == "paused"
+        return "paused" if ours else "blocked"
     if card_status == "review":
         return "review"
     if card_status == "done":
@@ -464,6 +488,7 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
     block_reason = d["block_reason"]
     block_event = d["block_event_id"]
     pause_event = d["pause_event_id"]
+    paused_block: bool | None = None   # whether the newest block seen now is our pause
 
     def announce(dlv: str, text: str) -> None:
         if not quiet:
@@ -476,7 +501,8 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
         payload = ev.get("payload") or {}
         if kind in ("blocked", "block_loop_detected"):
             reason = payload.get("reason") or ""
-            if reason.startswith(PAUSE_MARK):
+            paused_block = reason.startswith(PAUSE_MARK)
+            if paused_block:
                 pause_event = ev["id"]
                 continue
             block_seq += 1
@@ -494,6 +520,7 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
         elif kind in RUN_ENDED_EVENTS:
             if kind == "gave_up":
                 # The failure breaker parked the card (blocked, untyped): the user decides retry/cancel.
+                paused_block = False
                 block_seq += 1
                 block_event = ev["id"]
                 block_reason = i18n.t("dlg.failure_reason",
@@ -530,7 +557,7 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
         _set(conn, d["id"], event_cursor=cursor, card_status=card_status, block_seq=block_seq,
              block_reason=block_reason, block_event_id=block_event, pause_event_id=pause_event)
         return
-    new_status = _status_from_card(card_status, {**d, "status": d["status"]})
+    new_status = _status_from_card(card_status, d, paused_block)
     if card_status == "done" and d["status"] != "ended":
         new_status = "ended"
     _set(conn, d["id"], event_cursor=cursor, card_status=card_status, status=new_status, block_seq=block_seq,
@@ -1067,6 +1094,8 @@ def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any
         return _unused(conn, d, msg, "newer_version")
     if kind == "accept":
         return _send_accept(conn, cfg, kb, d, msg)
+    if kind in ("pause", "resume") and status in ("ended", "cancelled") and not attempted:
+        return _unused(conn, d, msg, "card_moved", status=d.get("card_status") or status)
     if kind == "pause":
         if status in EXECUTING:
             snap = kb.snapshot(d["card_id"], after_event=0)
@@ -1414,7 +1443,8 @@ def _accepted(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str, Any], 
 
 
 def summary_line(d: dict[str, Any]) -> str:
-    return f"{d['id']} [{d['status']}] {d['title']} card={d.get('card_id') or '-'}"
+    requested = ", pause requested" if d.get("pause_requested") and d["status"] != "paused" else ""
+    return f"{d['id']} [{d['status']}{requested}] {d['title']} card={d.get('card_id') or '-'}"
 
 
 def to_json(d: dict[str, Any]) -> str:
