@@ -203,6 +203,11 @@ class NotionClient:
     def list_comments(self, block_id: str) -> list[dict[str, Any]]:
         return list(self.paginate("GET", "/comments", params={"block_id": block_id}))
 
+    def retrieve_comment(self, comment_id: str) -> dict[str, Any]:
+        """``GET /v1/comments/{id}``: documented with 404 for an id that does not exist; what it
+        answers for a deleted or a resolved comment is not documented (see poll_comments)."""
+        return self.get(f"/comments/{comment_id}")
+
     def create_comment(self, *, markdown: str, page_id: str | None = None, discussion_id: str | None = None,
                        block_id: str | None = None) -> dict[str, Any]:
         targets = [t for t in (page_id, discussion_id, block_id) if t]

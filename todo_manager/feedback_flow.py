@@ -503,6 +503,16 @@ def page_body_unread(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any]) 
     return notion_body.edit_unread(row["last_edited_time"], row["last_edited_by"], row["body_read_at"], bot)
 
 
+def not_ready(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any]) -> str | None:
+    """Why an item must not be claimed or applied now (None: it may): held (e.g. its comment is
+    no longer listed in Notion), or its page body has an edit not read yet."""
+    if fb.get("hold_reason"):
+        return f"held: {fb['hold_reason']}"
+    if page_body_unread(conn, cfg, fb):
+        return "the page body has an edit not read yet"
+    return None
+
+
 def apply_decisions(conn: sqlite3.Connection, cfg: Config, run_id: str, decisions: dict[str, Any]) -> dict[str, Any]:
     """Apply a run's decisions exactly once: checks and writes happen in one transaction that
     also records the run as applied (a repeat after a lost response returns the first report)."""
@@ -528,7 +538,7 @@ def apply_decisions(conn: sqlite3.Connection, cfg: Config, run_id: str, decision
                 "SELECT id FROM feedback WHERE claimed_run=? AND status='superseded'", (run_id,))}
             if not claimed and not superseded:
                 raise FeedbackDecisionError("STALE_RUN", ["this run holds no pending feedback (released)"])
-            deferred = {f["id"] for f in claimed if page_body_unread(conn, cfg, f)}
+            deferred = {f["id"] for f in claimed if not_ready(conn, cfg, f)}
             errors = _validate(conn, decisions, [f for f in claimed if f["id"] not in deferred], superseded | deferred)
             if errors:
                 raise FeedbackDecisionError("INVALID", errors)

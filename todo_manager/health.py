@@ -103,6 +103,9 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
                                                 " LIMIT 20")]
     out["feedback"] = {r["status"]: r["n"] for r in conn.execute(
         "SELECT status, COUNT(*) n FROM feedback GROUP BY status")}
+    out["feedback_held"] = [{"id": r["id"], "reason": r["hold_reason"]} for r in conn.execute(
+        "SELECT id, hold_reason FROM feedback WHERE status='pending' AND hold_reason IS NOT NULL"
+        " ORDER BY received_at LIMIT 20")]
     out["delegations"] = {r["status"]: r["n"] for r in conn.execute(
         "SELECT status, COUNT(*) n FROM delegations GROUP BY status")}
     out["delegation_attention"] = {
@@ -172,6 +175,9 @@ def problem_items(rep: dict[str, Any], cfg: Config) -> list[tuple[str, str]]:
             " evidence only, never as the user's instructions")
     if rep["outbox_dead"]:
         add("outbox_dead", f"{len(rep['outbox_dead'])} outbox effects gave up")
+    if rep.get("feedback_held"):
+        add("feedback_held", "feedback held, not handled until resolved: " + "; ".join(
+            f"{h['id']} ({h['reason']})" for h in rep["feedback_held"][:5]))
     if rep["feedback"].get("failed"):
         add("feedback_failed", f"{rep['feedback']['failed']} feedback items failed")
     if rep["delegations"].get("quarantined"):

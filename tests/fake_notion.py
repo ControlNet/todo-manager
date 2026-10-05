@@ -124,10 +124,15 @@ class FakeNotion:
                 c["rich_text"] = [{"type": "text", "text": {"content": text}, "plain_text": text}]
                 c["last_edited_time"] = _minute(clock.iso())
 
-    def resolve_discussion(self, discussion_id: str) -> None:
+    def resolve_discussion(self, discussion_id: str, resolved: bool = True) -> None:
         for c in self.comments:
             if c["discussion_id"] == discussion_id:
-                c["resolved"] = True
+                c["resolved"] = resolved
+
+    def user_delete_comment(self, comment_id: str) -> None:
+        """ASSUMPTION (not verified against the real API): a deleted comment disappears from the
+        list and ``GET /v1/comments/{id}`` answers 404; a resolved one is unlisted but retrievable."""
+        self.comments = [c for c in self.comments if c["id"] != comment_id]
 
     def user_set_markdown(self, page_id: str, markdown: str, author: str = USER_ID) -> None:
         self.markdown[page_id] = markdown
@@ -252,6 +257,11 @@ class FakeNotion:
             items = [copy.deepcopy(c) for c in self.comments
                      if c["parent"].get("page_id") == block and not c.get("resolved")]
             return self._paged(items, params)
+        if len(parts) == 2 and parts[0] == "comments" and method == "GET":
+            found = [c for c in self.comments if c["id"] == parts[1]]
+            if not found:
+                raise HttpError(404, "not found", body={"code": "object_not_found", "message": "not found"})
+            return {k: v for k, v in copy.deepcopy(found[0]).items() if k != "resolved"}
         if parts == ["comments"] and method == "POST":
             page_id = (body.get("parent") or {}).get("page_id")
             if body.get("discussion_id"):

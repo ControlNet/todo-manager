@@ -191,6 +191,7 @@
   "setup.relation": "; \"{project}\" is a two-way relation that adds a \"{back}\" column to Projects",
   "setup.view": "Insert linked view \"{name}\" ({type}) under section \"{heading}\"",
   "sync.closed_in_notion": "You marked the task as {status} in Notion",
+  "sync.comment_held_resolved": "⏸️ Your comment on \"{title}\" was not handled: its discussion was resolved before Todo Manager got to it. Reopen the discussion to have it handled, or delete the comment to drop it: {text}",
   "sync.restored": "Page was restored from the Notion trash",
   "sync.set_to_agent": "You set \"{field}\" to Agent",
   "sync.trash_reason": "Page was deleted in Notion",

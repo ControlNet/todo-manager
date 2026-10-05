@@ -159,9 +159,9 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanba
     try:
         summary, _ = sync_all(conn, cfg, notion=notion, kanban=kanban, notifier=notifier)
         items = feedback.pending(conn, stale_minutes=int(cfg.get("feedback.stale_claim_minutes", 60)))
-        waiting = [f["id"] for f in items if feedback_flow.page_body_unread(conn, cfg, f)]
+        waiting = [f["id"] for f in items if feedback_flow.not_ready(conn, cfg, f)]
         if waiting:
-            summary["waiting_body_read"] = len(waiting)   # claimed once a body read covers the last edit
+            summary["not_ready"] = len(waiting)   # held, or waiting for a body read that covers the last edit
         items = [f for f in items if f["id"] not in waiting][: int(cfg.get("feedback.max_items_per_run", 20))]
         if not items:
             runs.finish(conn, run_id, status="idle", summary=summary)

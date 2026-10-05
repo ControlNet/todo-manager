@@ -912,7 +912,7 @@ class NotionSync:
         """Read the comments of the pages due. A page that is gone is a problem of that page
         (``problems``); any other failure marks the ``comments`` channel failing until a run
         reads every due page."""
-        stats = {"pages": 0, "new": 0, "edited": 0, "errors": 0, "missing": 0}
+        stats = {"pages": 0, "new": 0, "edited": 0, "errors": 0, "missing": 0, "deleted": 0, "held": 0}
         user_ids = set(self.cfg.get("identity.notion_user_ids") or [])
         failure: str | None = None
         try:
@@ -933,6 +933,9 @@ class NotionSync:
                     outcome = self._comment(c, target, user_ids)
                     if outcome in ("new", "edited"):
                         stats[outcome] += 1
+                # The list is complete here (paginate raises rather than return part of it).
+                error = self._check_unlisted(target, {c["id"] for c in comments}, stats)
+                failure = failure or error
                 if target["entity_type"] != "home":
                     with tx(self.conn):
                         self.conn.execute("UPDATE notion_pages SET comments_checked_at=? WHERE page_id=?",
@@ -958,6 +961,69 @@ class NotionSync:
             if row and not row["trashed"]:
                 self.page_trashed(row, page)
         return None
+
+    def _check_unlisted(self, target: dict[str, Any], listed: set[str], stats: dict[str, int]) -> str | None:
+        """Comments whose feedback is still pending but that a complete list of their page no
+        longer has. The list only returns unresolved comments; retrieved by id, a 404 is taken
+        as deleted (the page itself was just listed, so it is not a loss of access): its pending
+        feedback is withdrawn. Found but unlisted is taken as a resolved discussion, and anything
+        else cannot be told: the feedback is held (not claimed, not applied, shown by health)
+        and checked again next run. A comment listed again releases the hold. Feedback already
+        handled is history either way. (The real API's answers for deleted/resolved comments
+        are not documented; see docs/limitations.md.) Returns the error of a failed check."""
+        page_id = target["page_id"]
+        failure: str | None = None
+        rows = self.conn.execute(
+            "SELECT c.comment_id, c.presence FROM notion_comments c WHERE c.page_id=? AND c.is_bot=0 AND"
+            " (c.presence != 'listed' OR EXISTS (SELECT 1 FROM feedback f WHERE f.origin='notion_comment'"
+            " AND f.source_id=c.comment_id AND f.status='pending'))", (page_id,)).fetchall()
+        for r in rows:
+            cid = r["comment_id"]
+            if cid in listed:
+                if r["presence"] != "listed":
+                    self._comment_presence(cid, "listed", None)
+                continue
+            if r["presence"] == "deleted":
+                continue
+            if not self.conn.execute("SELECT 1 FROM feedback WHERE origin='notion_comment' AND source_id=?"
+                                     " AND status='pending'", (cid,)).fetchone():
+                continue
+            try:
+                self.client.retrieve_comment(cid)
+            except NotionError as exc:
+                if exc.status == 404 or exc.not_found:
+                    self._comment_presence(cid, "deleted", None)
+                    stats["deleted"] += 1
+                    continue
+                self._comment_presence(cid, "missing", f"not listed any more and could not be checked: {exc}")
+                stats["held"] += 1
+                failure = failure or f"comment {cid}: {exc}"
+                continue
+            if r["presence"] != "resolved":
+                self._comment_presence(cid, "resolved", "its discussion was resolved before it was handled;"
+                                                        " reopen the discussion to have it handled", target)
+            stats["held"] += 1
+        return failure
+
+    def _comment_presence(self, cid: str, presence: str, hold: str | None,
+                          target: dict[str, Any] | None = None) -> None:
+        with tx(self.conn):
+            self.conn.execute("UPDATE notion_comments SET presence=?, presence_at=? WHERE comment_id=?",
+                              (presence, clock.iso(), cid))
+            pending = [r["id"] for r in self.conn.execute(
+                "SELECT id FROM feedback WHERE origin='notion_comment' AND source_id=? AND status='pending'", (cid,))]
+            if presence == "deleted":
+                feedback.supersede(self.conn, pending, "withdrawn: the comment was deleted before it was handled")
+                return
+            for fid in pending:
+                self.conn.execute("UPDATE feedback SET hold_reason=? WHERE id=?", (hold, fid))
+            if presence == "resolved" and pending:
+                fb = feedback.get(self.conn, pending[-1])
+                task = store.get_task(self.conn, fb["scope_id"]) if fb["scope_type"] == "task" else None
+                text = i18n.t("sync.comment_held_resolved", title=task["title"] if task else "-",
+                              text=(fb["text"] or "")[:200])
+                effects.notify(self.conn, self.cfg, f"comment-held:{cid}:{fb['id']}", text,
+                               task_id=task["id"] if task else None)
 
     def _comment(self, c: dict[str, Any], target: dict[str, Any], user_ids: set[str]) -> str:
         author = (c.get("created_by") or {}).get("id")
