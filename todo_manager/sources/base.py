@@ -129,6 +129,8 @@ def persist_fetch(conn: sqlite3.Connection, source: str, result: FetchResult) ->
             if item.route == "batch" and _copy_of_github_event(conn, item):
                 item = replace(item, route="superseded")
             inserted_id = _insert_item(conn, item, now)
+            if inserted_id is None and item.route == "batch":
+                inserted_id = _promote_context(conn, item)
             if inserted_id is None:
                 stats["duplicate"] += 1
                 continue
@@ -147,6 +149,22 @@ def persist_fetch(conn: sqlite3.Connection, source: str, result: FetchResult) ->
             " last_error=NULL, consecutive_failures=0, meta=excluded.meta",
             (source, result.scope, result.cursor, now, now, dumps(meta)))
     return stats
+
+
+def _promote_context(conn: sqlite3.Connection, item: Item) -> str | None:
+    """The same item stored earlier as context only (history, a bot's turn, a matter without an
+    open task) that is news now: it joins a batch once instead of being dropped as a duplicate."""
+    row = conn.execute("SELECT id, meta, state, processed_run FROM source_items WHERE source=? AND account=?"
+                       " AND external_id=? AND version=?",
+                       (item.source, item.account, item.external_id, item.version)).fetchone()
+    if row is None or row["state"] != "processed" or row["processed_run"] is not None:
+        return None
+    meta = loads(row["meta"], {})
+    if meta.get("route") != "context":
+        return None
+    meta.update(route="batch", promoted_from="context")
+    conn.execute("UPDATE source_items SET meta=?, state='pending' WHERE id=?", (dumps(meta), row["id"]))
+    return row["id"]
 
 
 def _copy_of_github_event(conn: sqlite3.Connection, item: Item) -> bool:

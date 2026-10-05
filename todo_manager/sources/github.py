@@ -17,8 +17,10 @@ then gets updated; otherwise it is stored as context.
 Reading notifications never marks them as read.
 
 Context: the cursor keeps a bounded cache per issue/PR (body digest, last seen). Activity on a
-matter seen for the first time, or again after ``REACTIVATE_DAYS``, brings its original body and
-the last ``CONTEXT_COMMENTS`` earlier comments as context-only items. On a known matter a
+matter seen for the first time, or again after ``REACTIVATE_DAYS``, is split at the start of the
+read window (the cursor's since): a person's comment inside it is news (batch) even when bots
+commented after it, and the opening post too when a person wrote it inside the window; before
+it, the original body and the last ``CONTEXT_COMMENTS`` comments are context-only. On a known matter a
 notification brings EVERY comment since the previous view (read from ``WATERMARK_OVERLAP``
 before it; repeats are dropped by id/version when stored): a person's comment is news (batch),
 a bot's is context, and the intake budget segments a long discussion. An edit of an older
@@ -135,6 +137,12 @@ def _dump_state(since: str, seen: dict[str, Any]) -> str:
 
 def _digest(body: str | None) -> str:
     return hashlib.sha256((body or "").strip().encode("utf-8")).hexdigest()[:16]
+
+
+def _not_before(value: str, start: str) -> bool:
+    """``value`` (a GitHub time) is at or after ``start``, compared as times, not strings."""
+    a, b = clock.parse(value), clock.parse(start)
+    return a is not None and b is not None and a >= b
 
 
 def _needs_context(entry: dict[str, Any] | None, now: datetime) -> bool:
@@ -370,7 +378,8 @@ class GitHubNotificationSource:
             if thread:
                 latest_id = str((latest or {}).get("id")) if latest is not thread and latest else ""
                 items.extend(self._context(repo, number, key, thread, latest_id, title, html_url, meta,
-                                           seen.get(key), note.get("updated_at") or clock.iso(started), started))
+                                           seen.get(key), note.get("updated_at") or clock.iso(started), started,
+                                           window=since, opened_in_note=latest is thread))
                 # Comments delivered as a notification's latest comment are not repeated as
                 # comments when the next view re-reads the overlap before its watermark.
                 delivered = [*(seen.get(key) or {}).get("n", []), *([latest_id] if latest_id else [])][-5:]
@@ -381,10 +390,14 @@ class GitHubNotificationSource:
 
     def _context(self, repo: str, number: int, key: str, thread: dict[str, Any], latest_id: str, title: str,
                  url: str, meta: dict[str, Any], entry: dict[str, Any] | None, before: str,
-                 now: datetime) -> list[Item]:
-        """First sight / reactivation: original body and the last earlier comments. Known matter:
-        the comments since the previous notification. Both as context; a body edit as
-        ``if_open_task``. The latest comment is already in the notification."""
+                 now: datetime, window: str = "", opened_in_note: bool = False) -> list[Item]:
+        """First sight / reactivation: what happened inside this read's window (``window``: the
+        cursor's since, the lookback on a first run) is news - a person's comment is batch even
+        when bots commented after it, the opening post too when a person wrote it in the window
+        and it is not the notification's own text - and only what came before is history: the
+        opening post and the last earlier comments, as context. Known matter: the comments since
+        the previous view. A body edit is ``if_open_task``. The latest comment is already in the
+        notification."""
         kind = "pull" if "/pull/" in url else "issue"
         found: list[Item] = []
 
@@ -399,14 +412,25 @@ class GitHubNotificationSource:
         total = int(thread.get("comments") or 0)
         exclude = {latest_id} if latest_id else set()
         if _needs_context(entry, now):
-            found.append(item(f"{kind}:{thread.get('id')}", "opened", thread.get("user"),
-                              thread.get("created_at") or before, thread.get("body") or ""))
-            comments = _earlier_comments(self.client, repo, number, total, before, exclude)
-            for c in comments:
+            start = window or before
+            opened_at = thread.get("created_at") or before
+            news = _not_before(opened_at, start) and not opened_in_note and not self._is_bot(thread.get("user"))
+            found.append(item(f"{kind}:{thread.get('id')}", "opened", thread.get("user"), opened_at,
+                              thread.get("body") or "", route="batch" if news else "context"))
+            recent = self.client.paged(f"repos/{repo}/issues/{number}/comments", {"since": start}) if total else []
+            delivered = {str(n) for n in (entry or {}).get("n", [])}   # news already (a notification's latest)
+            for c in recent:
+                if str(c.get("id")) in exclude | delivered or not _not_before(c.get("created_at") or "", start):
+                    continue          # edited older comments are history, given below if recent enough
+                edited = c.get("updated_at") if c.get("updated_at") != c.get("created_at") else ""
+                found.append(item(f"comment:{c['id']}", "comment", c.get("user"), c.get("created_at") or before,
+                                  c.get("body") or "", version=edited or "",
+                                  route="context" if self._is_bot(c.get("user")) else "batch"))
+            for c in _earlier_comments(self.client, repo, number, total, start, exclude):
                 edited = c.get("updated_at") if c.get("updated_at") != c.get("created_at") else ""
                 found.append(item(f"comment:{c['id']}", "comment", c.get("user"), c.get("created_at") or before,
                                   c.get("body") or "", version=edited or ""))
-            return found
+            return sorted(found, key=lambda i: i.occurred_at or "")
         seen_at = clock.parse(entry.get("at"))
         watermark = clock.iso(seen_at - WATERMARK_OVERLAP).replace(".000Z", "Z") if seen_at else entry.get("at")
         listed = self.client.paged(f"repos/{repo}/issues/{number}/comments", {"since": watermark}) if total else []
