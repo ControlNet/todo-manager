@@ -32,16 +32,19 @@ through a Hermes Kanban board.
 
 Requires Python ≥ 3.11 (standard library only) and Hermes with cron and Kanban.
 
+First create an empty top-level Notion page (the future home page) and add your Notion
+integration to it (··· → Connections). Then:
+
 ```bash
 git clone <repository url> ~/src/todo-manager && cd ~/src/todo-manager
 python3 -m unittest discover -s tests -t .      # expect OK
-./bin/todo-manager init --language en           # creates ~/.hermes/workspace/todo-manager
-$EDITOR ~/.hermes/workspace/todo-manager/config.toml
-./bin/todo-manager notion plan --home-page <id of an empty page shared with your integration>
-./bin/todo-manager notion setup --home-page <page id> --yes
-./bin/todo-manager hermes install               # jobs are created paused
-./bin/todo-manager hermes resume --yes
+./bin/todo-manager install
 ```
+
+`install` infers the rest from Hermes (language, time zone, mailboxes, Slack, GitHub, Notion
+and Kanban settings), asks only real choices (the home page, which mailboxes when there are
+several) and shows every change outside the workspace before making it. It is safe to re-run;
+see [docs/operations.md](docs/operations.md#install).
 
 Runtime data (database, runs, exports, backups) lives only in the workspace
 (`TODO_HOME`, default `~/.hermes/workspace/todo-manager`); the tool refuses a workspace inside

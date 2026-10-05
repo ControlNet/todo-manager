@@ -208,6 +208,21 @@ alerts and automated security fixes are off (checked 2026-10-05), so nothing was
 
 Full suite: 462 tests, 0 failures, 0 skips, including the *hermes* integration tests.
 
+## Follow-up: one install command (baseline e8f06e4)
+
+| Item | Root cause | Fix | Tests | Commit |
+|---|---|---|---|---|
+| Install was six manual commands plus hand-editing config.toml | identities, mailboxes, tokens and the Notion page id had to be copied into config.toml by hand, although Hermes already holds them | `todo-manager install`: workspace, email, slack, github, notion, kanban, hermes, schedule; values inferred from Hermes (`hermes config get`, himalaya Gmail accounts + Gmail profile, Slack `auth.test`, `gh` + `GET /user`, Notion users); asked: several mailboxes, the Notion home page (always, from the top-level pages shared with the integration), several Notion people, the time zone on a UTC machine; Notion writes, global Kanban switches, the Hermes install and starting the jobs each need a yes; without a terminal JSON + exit 3 with the next command | `tests/test_install.py` (27) | 259d843 |
+| config.toml could only be rewritten whole | no TOML writer (standard library only) | `config_file.set_values`: key-by-key edits keeping comments and order, checked with `tomllib` before the atomic replace; a value the user set is kept | `tests/test_config_file.py` (10) | 259d843 |
+| A re-install always edited both cron jobs | `job_action` re-applied unchanged definitions | an up-to-date job is a `noop` (prompt, script, interpreter, schedule, skills, workdir, model settings compared) | `test_fresh_install_creates_paused_jobs_scripts_skill_and_launcher` (re-plan is all `noop`), `test_delivery_is_left_to_the_hermes_job` | 259d843 |
+
+Read-only check against the real Hermes environment (temp workspace, every step declined,
+mutating Hermes commands blocked): mailbox, Slack workspace and user, GitHub login and language
+match the hand-written production config; the time zone is asked (Hermes has none, the machine
+runs on UTC).
+
+Full suite: 499 tests, 0 failures, 0 skips, including the *hermes* integration tests.
+
 ## Still to verify with real data
 
 1. **Real-sample intake evaluation** (criteria 1–4, 6, 11): one sandbox run was decided by the
@@ -221,4 +236,6 @@ Full suite: 462 tests, 0 failures, 0 skips, including the *hermes* integration t
    on the real `todo-manager` board after you have turned `kanban.review_dispatch` and
    `kanban.auto_decompose` off (until then todo-manager creates no cards); nothing is sent.
 4. **First production Notion setup and migration** require your confirmation (see the rollout
-   plan in the workspace notes).
+   plan in the workspace notes). `todo-manager install` does the setup after you have created
+   the new top-level home page and added the integration to it; migrating the old system stays
+   the separate `migrate` command.

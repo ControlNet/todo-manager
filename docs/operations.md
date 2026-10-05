@@ -7,23 +7,52 @@ variables (for example `NOTION_API_KEY` loaded from `~/.hermes/.env`); keep any 
 
 ## Install
 
+Before the first install, in Notion: create an empty top-level page (it becomes the Todo
+Manager home page) and add your integration under ··· → Connections. An internal integration
+cannot create a top-level page itself.
+
 ```bash
 git clone <repository url> ~/src/todo-manager
 cd ~/src/todo-manager
 python3 -m unittest discover -s tests -t .        # expect "OK" (Hermes integration tests skip without Hermes)
-./bin/todo-manager init --language zh-CN          # or en; default: TODO_MANAGER_LANG / system locale
-$EDITOR ~/.hermes/workspace/todo-manager/config.toml   # identities, sources
-./bin/todo-manager notion whoami                  # checks the token (read-only)
-./bin/todo-manager notion plan --home-page <page id>   # review the writes
-./bin/todo-manager notion setup --home-page <page id> --yes
-./bin/todo-manager hermes install                 # shows the plan, asks; jobs are created PAUSED
-./bin/todo-manager hermes resume --yes            # start the two cron jobs
+./bin/todo-manager install                        # asks only what it cannot infer; every outside change needs a yes
 ```
 
-Requirements: Python ≥ 3.11 (standard library only), Hermes with cron and Kanban, and the
-Kanban settings in [board-protocol.md](board-protocol.md).
+Requirements: Python ≥ 3.11 (standard library only), Hermes with cron and Kanban.
 
-`hermes install` writes a launcher `~/.local/bin/todo-manager`, two pre-run scripts under
+`install` runs these steps in order. Each step detects what is already done, so the command is
+safe to re-run (to finish an install, or after an upgrade):
+
+| Step | Inferred from | Asked / confirmed |
+|---|---|---|
+| `workspace` | `hermes config get display.language` and `timezone`, else the system time zone | the time zone, only when Hermes has none and the machine runs on UTC |
+| `email` | himalaya accounts with a Gmail token command (`~/.config/himalaya/config.toml`); addresses from the Gmail profile | which mailboxes to read, when there are several |
+| `slack` | `~/.hermes/credentials/slack_user_token`, else `SLACK_USER_TOKEN` in Hermes' `.env`; `auth.test` gives your user id and workspace | — (DMs, group DMs and member channels are read; leave some out with `slack.exclude`) |
+| `github` | `gh auth token`; `GET /user` gives your login | — |
+| `notion` | `NOTION_API_KEY` in Hermes' `.env` (`hermes config env-path`); your user id is the workspace's only person | **the home page, always** (a list of the top-level pages shared with the integration; an id or URL is accepted too); the writes (`notion plan`) need a yes; your user, when the workspace has several people |
+| `kanban` | `kanban.review_dispatch` / `kanban.auto_decompose` and the board | a yes for `hermes config set …` (global Hermes settings) and creating the board |
+| `hermes` | — | a yes for the launcher, gate scripts, skill and cron jobs (below) |
+| `schedule` | — | a yes to start the cron jobs |
+
+What is inferred or chosen is written into `config.toml` key by key; comments and everything
+else in the file stay as they are. A key you set yourself is kept: a source whose `enabled` is
+in `config.toml` is left as configured, and identities are only added to. No token is written
+to `config.toml`, and reading the other systems is read-only (nothing is sent).
+
+Without a terminal (for example from a Hermes chat) `install` stops at the first question or
+confirmation, prints it as JSON and exits with status 3; the JSON carries the command to run next:
+
+```bash
+./bin/todo-manager install                                   # {"status": "needs_answer", "key": "notion.home_page", "options": [...], "answer_with": "..."}
+./bin/todo-manager install --answer notion.home_page=1       # an option number, a page id or a page URL
+./bin/todo-manager install --answer notion.home_page=1 --yes notion   # or --no notion; --yes all confirms every step
+```
+
+Answers are not remembered between runs until their step is done, so repeat them (the
+`answer_with` / `confirm_with` commands do). The separate commands still exist for single steps:
+`init` (workspace only), `notion plan|setup`, `hermes install|status|resume|pause`.
+
+The `hermes` step writes a launcher `~/.local/bin/todo-manager`, two pre-run scripts under
 `~/.hermes/scripts/`, the skill (only if no skill of that name exists — Hermes may evolve it;
 an existing skill is never overwritten, differences are written to
 `state/hermes/skill-proposal/` for you to review) and two cron jobs:
@@ -33,8 +62,8 @@ an existing skill is never overwritten, differences are written to
 | `todo-manager-intake` | `*/5 * * * *` | fetch sources, batch, wake the model only for mature batches, due follow-ups or the daily commit digest |
 | `todo-manager-feedback` | `2-59/5 * * * *` | Notion edits/comments, Kanban results, outbox, home freshness; wakes the model only for feedback that needs interpretation |
 
-Re-running `hermes install` updates scripts and job settings in place (keeping paused state)
-and is safe to repeat. `hermes install --dry-run` prints the plan only.
+Re-running `install` or `hermes install` updates scripts and job settings in place (keeping
+paused state) and leaves what is current untouched. `hermes install --dry-run` prints the plan only.
 
 ## Daily checks
 
