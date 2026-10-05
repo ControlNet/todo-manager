@@ -1,6 +1,6 @@
 import threading
 
-from todo_manager import db, delegation, store
+from todo_manager import db, delegation, i18n, store
 from todo_manager.kanban import FakeKanban, KanbanError
 from tests.helpers import WorkspaceCase
 
@@ -27,7 +27,7 @@ class DelegationTests(WorkspaceCase):
     def d(self, did):
         return delegation.get(self.conn, did)
 
-    def test_submit_creates_one_card_and_updates_task(self):
+    def test_submit_creates_one_card_and_hands_the_task_to_the_agent(self):
         did = self.delegate(feedback_id="fbk_1")
         self.assertEqual(self.delegate(feedback_id="fbk_1"), did, "same feedback must not create a second delegation")
         self.tick()
@@ -38,7 +38,7 @@ class DelegationTests(WorkspaceCase):
         self.assertEqual(card["idem_key"], f"todo-manager:{did}")
         self.assertEqual(self.d(did)["status"], "queued")
         task = store.get_task(self.conn, self.task)
-        self.assertEqual((task["status"], task["next_actor"]), ("in_progress", "agent"))
+        self.assertEqual((task["status"], task["next_actor"]), ("todo", "agent"), "the status stays the user's")
 
     def test_lost_create_response_is_reconciled_not_duplicated(self):
         did = self.delegate()
@@ -102,19 +102,13 @@ class DelegationTests(WorkspaceCase):
         self.conn.execute("SELECT 1")  # refresh
         self.assertIsNotNone(self.d(did)["card_id"])
 
-    def test_capacity_one_queues_second_delegation_locally(self):
+    def test_a_second_delegation_is_submitted_at_once_hermes_schedules_both(self):
         first = self.delegate()
         other = store.create_task(self.conn, "Another", origin="cli")
         second = delegation.create(self.conn, self.cfg, task_id=other, title="t2", goal="g2")
         self.tick()
-        self.assertEqual(len(self.kb.cards), 1)
-        self.assertEqual(self.d(second)["status"], "pending_submit")
-        card = self.d(first)["card_id"]
-        self.kb.worker_start(card)
-        self.kb.worker_review(card, "草稿完成", {"deliverable_markdown": "Dear Alice ..."})
-        self.tick()
-        self.tick()
-        self.assertEqual(len(self.kb.cards), 2, "second delegation submitted once the first stopped executing")
+        self.assertEqual(len(self.kb.cards), 2, "no local capacity: Hermes' dispatcher decides what runs")
+        self.assertEqual({self.d(first)["status"], self.d(second)["status"]}, {"queued"})
 
     def test_block_answer_resume_and_stale_answer(self):
         did = self.delegate()
@@ -124,7 +118,8 @@ class DelegationTests(WorkspaceCase):
         self.kb.worker_block(card, "截止日期是周四还是周五？")
         self.tick()
         self.assertEqual(self.d(did)["status"], "blocked")
-        self.assertEqual(store.get_task(self.conn, self.task)["status"], "review")
+        task = store.get_task(self.conn, self.task)
+        self.assertEqual((task["status"], task["next_actor"]), ("todo", "me"), "handed back, status untouched")
         comments = self.conn.execute("SELECT payload FROM outbox WHERE op='comment'").fetchall()
         self.assertTrue(any("截止日期" in c["payload"] for c in comments))
         # Many dispatcher ticks / a day later: still blocked, nothing dispatches it.
@@ -159,6 +154,7 @@ class DelegationTests(WorkspaceCase):
         delegation.add_message(self.conn, did, "answer", "抄送 Bob", feedback_id="fbk_a2")
         self.tick()
         self.assertEqual(self.kb.cards[card]["status"], "ready")
+        self.assertEqual(store.get_task(self.conn, self.task)["next_actor"], "agent", "the work resumed")
 
     def test_review_revision_accept_cycle(self):
         did = self.delegate()
@@ -234,3 +230,66 @@ class DelegationTests(WorkspaceCase):
         self.kb.worker_review(card, "v1", {"deliverable_markdown": "v1"})
         self.tick()
         self.assertEqual(store.get_task(self.conn, self.task)["status"], "waiting")
+
+
+class TaskLinkTests(WorkspaceCase):
+    """Agent work and the personal Task: card events never change the Task's status; the next
+    actor follows the work (agent while it runs, back to the user when it waits for them)
+    unless the user set the next actor after delegating."""
+
+    def setUp(self):
+        super().setUp()
+        self.kb = FakeKanban()
+        self.task = store.create_task(self.conn, "回复 Alice", origin="cli", status="in_progress")
+        self.did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草", goal="draft")
+        self.tick()
+        self.card = delegation.get(self.conn, self.did)["card_id"]
+
+    def tick(self):
+        delegation.send_messages(self.conn, self.cfg, self.kb)
+        delegation.submit_pending(self.conn, self.cfg, self.kb)
+        delegation.sync_cards(self.conn, self.cfg, self.kb)
+
+    def task_state(self):
+        task = store.get_task(self.conn, self.task)
+        return task["status"], task["next_actor"]
+
+    def user_sets(self, **changes):
+        version = store.get_task(self.conn, self.task)["version"]
+        store.update_task(self.conn, self.task, changes, actor="human", origin="notion", based_on_version=version)
+
+    def test_card_events_never_change_the_status(self):
+        self.assertEqual(self.task_state(), ("in_progress", "agent"))
+        self.kb.worker_start(self.card)
+        self.kb.worker_block(self.card, "周四还是周五？")
+        self.tick()
+        self.assertEqual(self.task_state(), ("in_progress", "me"))
+        self.assertEqual(store.get_task(self.conn, self.task)["change_note"], i18n.t("dlg.needs_input"))
+        delegation.add_message(self.conn, self.did, "answer", "周四", feedback_id="fbk_1")
+        self.tick()
+        self.assertEqual(self.task_state(), ("in_progress", "agent"))
+        self.kb.worker_start(self.card)
+        self.kb.worker_complete(self.card, "草稿完成", {"deliverable_markdown": "Dear Alice"})
+        self.tick()
+        self.assertEqual(delegation.get(self.conn, self.did)["status"], "ended")
+        self.assertEqual(self.task_state(), ("in_progress", "me"), "the agent's draft does not complete the Task")
+        self.assertEqual(store.get_task(self.conn, self.task)["change_note"], i18n.t("dlg.to_review"))
+        self.assertEqual([d["kind"] for d in delegation.deliveries(self.conn, self.did)], ["question", "result"])
+
+    def test_a_next_actor_the_user_set_after_delegating_is_kept(self):
+        self.user_sets(next_actor="me")
+        self.kb.worker_start(self.card)
+        self.tick()
+        self.assertEqual(self.task_state(), ("in_progress", "me"), "not taken back for the agent")
+        self.user_sets(next_actor="agent")
+        self.kb.worker_review(self.card, "草稿", {"deliverable_markdown": "Dear Alice"})
+        self.tick()
+        self.assertEqual(self.task_state(), ("in_progress", "agent"), "the user's choice wins")
+
+    def test_a_status_with_its_own_next_actor_is_left_alone(self):
+        self.user_sets(status="waiting", waiting_on="Alice")
+        self.kb.worker_start(self.card)
+        self.kb.worker_review(self.card, "草稿", {"deliverable_markdown": "Dear Alice"})
+        self.tick()
+        self.assertEqual(self.task_state(), ("waiting", "external"))
+

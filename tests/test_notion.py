@@ -75,6 +75,50 @@ class SetupTests(NotionCase):
             conn.close()
 
 
+class ViewUpgradeTests(NotionCase):
+    """Views made by the previous version (Tasks moved to "To review" on agent events then)."""
+
+    def setUp(self):
+        super().setUp()
+        from todo_manager.db import get_meta, loads
+        self.views = loads(get_meta(self.conn, "notion.views"), {})
+        tmap = loads(get_meta(self.conn, "notion.props.task"), {})
+        for key, earlier in setup._earlier_filters(tmap, "zh-CN").items():
+            self.fake.views[self.views[key]]["filter"] = earlier
+        self.conn.execute("DELETE FROM meta WHERE key='notion.views_version'")
+        self.new_filters = {s["key"]: s["filter"] for s in setup.view_specs(tmap, {p.field: p.field for p in schema.PROJECT_PROPS},
+                                                                             "zh-CN")}
+
+    def test_a_view_left_as_created_is_updated_a_changed_one_is_kept_and_reported(self):
+        mine = {"property": "x", "select": {"equals": "我的筛选"}}
+        self.fake.views[self.views["review"]]["filter"] = mine
+        updates, notes = setup.view_upgrades(self.conn, self.client)
+        self.assertEqual([u["key"] for u in updates], ["agent"])
+        self.assertEqual(len(notes), 1)
+        self.assertIn("待我验收", notes[0])
+        self.assertIn("已交付", notes[0], "says what to add")
+        setup.apply_view_upgrades(self.conn, self.client, updates)
+        self.assertEqual(self.fake.views[self.views["agent"]]["filter"], self.new_filters["agent"])
+        self.assertEqual(self.fake.views[self.views["review"]]["filter"], mine, "the user's view is never overwritten")
+        self.assertEqual(setup.view_upgrades(self.conn, self.client), ([], []), "checked once")
+
+    def test_a_removed_view_is_reported_not_recreated(self):
+        del self.fake.views[self.views["agent"]]
+        updates, notes = setup.view_upgrades(self.conn, self.client)
+        self.assertEqual([u["key"] for u in updates], ["review"])
+        self.assertTrue(any("未找到" in n for n in notes), notes)
+
+    def test_a_fresh_setup_has_the_current_views(self):
+        from todo_manager import db
+        conn = db.connect(self.tmp / "fresh.sqlite")
+        try:
+            home = self.fake._new_page({"type": "workspace"}, {}, "", USER_ID)["id"]
+            setup.apply(conn, self.client, home_page_id=home)
+            self.assertEqual(setup.view_upgrades(conn, self.client), ([], []))
+        finally:
+            conn.close()
+
+
 class PushPullTests(NotionCase):
     def setUp(self):
         super().setUp()
@@ -206,7 +250,7 @@ class WorkflowEditTests(NotionCase):
         self.assertEqual(kinds, ["delegate_request"], "a persistent property state is not a new request each run")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM delegations").fetchone()[0], 0, "no card guessed")
 
-    def test_marking_done_accepts_a_delivered_review(self):
+    def delivered(self):
         did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草", goal="draft")
         for _ in range(2):
             delegation.submit_pending(self.conn, self.cfg, self.kb)
@@ -216,12 +260,27 @@ class WorkflowEditTests(NotionCase):
         delegation.sync_cards(self.conn, self.cfg, self.kb)
         self.drain()
         clock.advance(minutes=1)
+        return did, card
+
+    def test_marking_done_stops_the_agent_work_and_never_accepts(self):
+        did, card = self.delivered()
+        self.fake.user_edit(self.page, 状态="完成")
+        self.pull()
+        delegation.send_messages(self.conn, self.cfg, self.kb)
+        self.assertEqual(self.kb.cards[card]["status"], "archived")
+        self.assertEqual(delegation.get(self.conn, did)["status"], "cancelled")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM delegation_messages WHERE delegation_id=?"
+                                           " AND kind='accept'", (did,)).fetchone()[0], 0)
+        self.assertEqual(store.get_task(self.conn, self.task)["status"], "done", "the human closed it")
+
+    def test_an_explicit_accept_before_marking_done_is_still_carried_out(self):
+        did, card = self.delivered()
+        delegation.add_message(self.conn, did, "accept", "可以", feedback_id="fbk_accept")
         self.fake.user_edit(self.page, 状态="完成")
         self.pull()
         delegation.send_messages(self.conn, self.cfg, self.kb)
         self.assertEqual(self.kb.cards[card]["status"], "done")
         self.assertEqual(delegation.get(self.conn, did)["status"], "ended")
-        self.assertEqual(store.get_task(self.conn, self.task)["status"], "done", "the human closed it")
 
 
 class CommentTests(NotionCase):

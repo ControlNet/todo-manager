@@ -285,6 +285,12 @@ class FakeNotion:
             vid = self._id("view")
             self.views[vid] = {"object": "view", "id": vid, **body}
             return copy.deepcopy(self.views[vid])
+        if parts[0] == "views" and len(parts) == 2 and method in ("GET", "PATCH"):
+            if parts[1] not in self.views:
+                raise HttpError(404, "not found", body={"code": "object_not_found", "message": "not found"})
+            if method == "PATCH":
+                self.views[parts[1]].update(copy.deepcopy(body))
+            return copy.deepcopy(self.views[parts[1]])
         raise HttpError(400, f"fake: unsupported {method} {path}", body={"code": "validation_error"})
 
     def _paged(self, items: list[Any], params: dict[str, Any]) -> dict[str, Any]:

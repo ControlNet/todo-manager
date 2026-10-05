@@ -26,12 +26,12 @@ COLORS = {
     "next_actor": {"me": "blue", "agent": "purple", "external": "yellow"},
     "project_status": {"active": "blue", "paused": "yellow", "done": "green", "archived": "gray"},
     "delegation": {"queued": "gray", "running": "blue", "blocked": "orange", "review": "purple",
-                   "paused": "yellow", "quarantined": "red"},
+                   "delivered": "green", "paused": "yellow", "quarantined": "red"},
     "source": {"gmail": "red", "slack": "purple", "github": "default", "commit": "default", "notion": "default",
                "matrix": "green", "cli": "blue", "migration": "brown"},
 }
 SELECT_VALUES = {   # values that become Notion select options (delegation ended/cancelled are body-only)
-    "delegation": ("queued", "running", "blocked", "review", "paused", "quarantined"),
+    "delegation": ("queued", "running", "blocked", "review", "delivered", "paused", "quarantined"),
 }
 
 

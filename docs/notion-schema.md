@@ -55,7 +55,7 @@ edit to them is reverted on the next push.
 | `in_progress` | In progress | 进行中 | Being worked on (by you or an agent) |
 | `waiting` | Waiting | 等待 | Someone else acts next; `waiting_on` + `follow_up_date` |
 | `decision` | To decide | 需要决定 | A real choice only you can make |
-| `review` | To review | 待我验收 | An agent delivered, or asks for your input |
+| `review` | To review | 待我验收 | Something for you to review (agent work shows its own state in "Agent work") |
 | `done` | Done | 完成 | Closed: fulfilled |
 | `cancelled` | Cancelled | 取消 | Closed: not needed |
 
@@ -68,15 +68,20 @@ is independent of the status. A real external deadline (`due_date`, with its bas
 the page body) is separate from a suggested follow-up date; deadlines are never invented.
 
 Setting "Next by" to Agent on a task without active agent work asks the model (once) to turn
-it into a delegation or ask a question. Closing a task stops its agent work deterministically:
-a delivered result waiting for review is accepted, anything else is cancelled. Moving a task
-to the trash cancels it; restoring it reopens it with its previous status.
+it into a delegation or ask a question. The status is yours: agent work never changes it.
+Delegating sets "Next by" to Agent; while the work waits for you (a question, a delivery, a
+failure) "Next by" goes back to Me, and to Agent again when the work resumes, unless you set
+"Next by" yourself after delegating. Closing a task cancels its active agent work; it never
+accepts a delivery. Moving a task to the trash cancels it; restoring it reopens it with its
+previous status.
 
 ### Agent work and source
 
 Agent work (`delegation`): `queued` Queued / 排队中, `running` Running / 执行中, `blocked` Needs my
-answer / 等我回答, `review` To review / 待我验收, `paused` Paused / 已暂停, `quarantined` Problem /
-异常. Ended and cancelled delegations clear the column.
+answer / 等我回答, `review` To review / 待我验收, `delivered` Delivered / 已交付 (the latest agent
+work ended with a result; the task stays open until you close it), `paused` Paused / 已暂停,
+`quarantined` Problem / 异常. A cancelled delegation, or one that ended without a result,
+clears the column.
 
 Source: Email / 邮件, Slack, GitHub (issues, PRs and the commit digest), Notion, Matrix, Manual /
 手动, Migrated / 迁移.
@@ -108,8 +113,8 @@ Archived / 归档. The task relation adds a back-relation column "Tasks" / "任�
 | 📁 Active projects / 活跃项目 | table | project status active |
 | ⏳ Waiting on others / 等待别人 | table | waiting, not snoozed; sorted by follow-up date |
 | 🤔 To decide / 需要决定 | list | status to decide |
-| 🤖 Agent queue / working / Agent 排队／处理中 | board by agent work | queued, running, paused, problem |
-| ✅ To review / answer / 待我验收／待我补充 | table | status to review |
+| 🤖 Agent queue / working / Agent 排队／处理中 | board by agent work | any agent work state |
+| ✅ To review / answer / 待我验收／待我补充 | table | status to review, or agent work needs my answer / to review / delivered |
 | 🕘 Recently done and notable changes / 最近完成与重要变化 | table | edited in the last week and closed, or with a change note |
 
 At the top, a small **data freshness** callout ("Data freshness (maintained by Todo Manager)" /
@@ -119,13 +124,20 @@ hour of the last check. It is rewritten only when its content changes; logs neve
 
 `todo-manager export` writes the same sections, computed locally, to `views/home.md`.
 
+Views made by an earlier version (before the "Agent work" states above) are updated by
+`todo-manager install`, after your confirmation, only while their filter is still the one Todo
+Manager created; a view you changed or removed is left alone and `install` says what to add.
+
 ## Task page body
 
 Each task page has ONE callout maintained by Todo Manager, marked "Current brief (maintained by
 Todo Manager; write your own notes outside this box)" / "当前说明（由 Todo Manager 维护；手写笔记请
 写在此框外）". It holds why the task is yours, done criteria, background, due-date basis, why it
 is in focus, sources (links), agent work and the latest delivery (collapsed). Everything outside
-the callout is yours and never touched.
+the callout is yours and never touched: your notes there are context. They are kept exactly as
+written and shown with the task to the agent (in the feedback run and in a new agent card); a
+change of them wakes nothing and is never an instruction by itself. To ask for something, write
+a comment.
 
 The callout is replaced with a search-and-replace of the exact text read just before, so
 concurrent edits elsewhere survive. If you edit text inside the callout, the edit is held and
@@ -135,7 +147,7 @@ If you delete the callout, it is re-inserted at the top.
 ## Comments
 
 Your comments on task pages are feedback: supplements, answers to agent questions, revision
-requests, approvals, corrections or rules. Replies from Todo Manager go into the same
+requests, approvals, corrections or conventions. Replies from Todo Manager go into the same
 discussion. Comments by the integration itself are never treated as feedback, and comments
 by other people are information, not instructions.
 

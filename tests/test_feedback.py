@@ -227,7 +227,7 @@ class DelegationFeedbackTests(GateCase):
         self.decide(run_id, [{"feedback": fid, "outcome": "ignored", "reason": "评论者不是用户本人"}])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0)
 
-    def test_closing_task_through_feedback_accepts_the_delivery(self):
+    def test_closing_task_through_feedback_stops_the_agent_work_and_keeps_the_delivery(self):
         self.kb.worker_start(self.card)
         self.kb.worker_review(self.card, "草稿 v1", {"deliverable_markdown": "Dear Bob"})
         self.gate()
@@ -238,8 +238,9 @@ class DelegationFeedbackTests(GateCase):
         self.decide(run_id, [{"feedback": fid, "outcome": "applied", "ops": [
             {"op": "update_task", "task": self.task, "based_on_version": version, "set": {"status": "done"}}]}])
         self.gate()
-        self.assertEqual(delegation.get(self.conn, self.did)["status"], "ended")
-        self.assertEqual(self.kb.cards[self.card]["status"], "done")
+        self.assertEqual(delegation.get(self.conn, self.did)["status"], "cancelled", "closing never accepts")
+        self.assertEqual(self.kb.cards[self.card]["status"], "archived")
+        self.assertEqual(len(delegation.deliveries(self.conn, self.did)), 1, "the delivered draft is kept")
         self.assertEqual(self.fake.prop(self.page, "状态"), "完成")
 
 
@@ -301,9 +302,9 @@ class DirectAndReplyTests(GateCase):
         [reply] = [c for c in self.bot_comments() if c["rich_text"][0]["plain_text"] == "要取消这个任务吗？"]
         self.assertEqual(reply["parent"]["page_id"], self.sync.state.home_page_id)
 
-    def test_a_reply_to_page_notes_is_a_new_comment_on_the_task_page(self):
+    def test_a_reply_to_a_page_edit_is_a_new_comment_on_the_task_page(self):
         original = self.fake.markdown[self.page]
-        self.fake.user_set_markdown(self.page, original + "\n\n记得附上数据")
+        self.fake.user_set_markdown(self.page, original.replace("Bob 直接问我", "记得附上数据"))
         clock.advance(minutes=1)
         _, woke, run_id = self.gate()
         self.assertTrue(woke)

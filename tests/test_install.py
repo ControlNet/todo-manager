@@ -221,6 +221,33 @@ class FreshInstallTests(InstallCase):
         self.assertEqual(self.world.hermes_calls("config", "set") + self.world.hermes_calls("cron", "create")
                          + self.world.hermes_calls("cron", "edit") + self.world.hermes_calls("cron", "resume"), [])
 
+    def test_an_upgrade_updates_views_left_as_created_after_confirmation(self):
+        self.page()
+        self.install({"notion.home_page": "1"})
+        from todo_manager import db
+        from todo_manager.notion import setup
+        conn = db.connect(self.home / "state" / "todo.sqlite")
+        try:
+            views = db.loads(db.get_meta(conn, "notion.views"), {})
+            earlier = setup._earlier_filters(db.loads(db.get_meta(conn, "notion.props.task"), {}), "zh-CN")
+            for key, f in earlier.items():
+                self.world.notion.views[views[key]]["filter"] = f
+            mine = {"property": "x", "select": {"equals": "我的"}}
+            self.world.notion.views[views["review"]]["filter"] = mine     # the user changed this one
+            conn.execute("DELETE FROM meta WHERE key='notion.views_version'")
+        finally:
+            conn.close()
+        with self.assertRaises(install.NeedsConfirmation) as caught:
+            self.install(yes=())
+        self.assertEqual(caught.exception.step, "notion_views")
+        self.assertEqual(self.world.notion.views[views["agent"]]["filter"], earlier["agent"], "nothing written yet")
+        prompter, run = self.install(yes=("notion_views",))
+        self.assertNotEqual(self.world.notion.views[views["agent"]]["filter"], earlier["agent"])
+        self.assertEqual(self.world.notion.views[views["review"]]["filter"], mine, "the user's view is kept")
+        self.assertTrue(any("待我验收" in line and "保持原样" in line for line in run.report), run.report)
+        prompter, run = self.install(yes=())
+        self.assertNotIn("notion_views", prompter.asked, "asked once")
+
     def test_the_terminal_shows_numbered_choices_and_asks_for_yes(self):
         self.page("Todo home")
         replies = iter(["1", "y", "y", "y", "y"])

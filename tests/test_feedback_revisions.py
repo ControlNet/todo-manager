@@ -1,6 +1,7 @@
-"""B01/B02: every Notion feedback stream (a comment, the managed box, the page notes) has a
-persistent revision number, so a later read can tell an unchanged re-read from a revert and a
-run that interpreted an older revision cannot apply it.
+"""B01/B02: every Notion feedback stream (a comment, the managed box) has a persistent revision
+number, so a later read can tell an unchanged re-read from a revert and a run that interpreted
+an older revision cannot apply it. The page notes are context, not feedback: they are kept as
+their latest text (with a revision count) and never queued.
 
 FakeNotion (test double) stamps edits with a minute-truncated ``last_edited_time``, which makes
 two edits within one minute share a timestamp; that is a property of the fake used to force
@@ -127,39 +128,17 @@ class NotesRevisionTests(NotionCase):
         self.fake.user_set_markdown(self.page, self.base + "\n\n" + "\n".join(lines))
         self.pull()
 
-    def added(self):
-        return [f["payload"]["added"] for f in pending(self.conn, "page_notes")]
-
-    def test_a_non_conflicting_append_keeps_the_earlier_note(self):
-        self.notes("要求：放上周的实验结果")
-        self.notes("要求：放上周的实验结果", "另外：加一页总结")
-        self.assertEqual(self.added(), ["要求：放上周的实验结果", "另外：加一页总结"])
-
-    def test_a_replacement_supersedes_the_earlier_note(self):
-        self.notes("要求：周五前完成")
-        self.notes("要求：周一前完成")
-        rows = pending(self.conn, "page_notes")
-        self.assertEqual([f["payload"]["added"] for f in rows], ["要求：周一前完成"])
-        self.assertEqual(rows[0]["payload"]["removed"], "", "the replaced line was never applied")
-
-    def test_a_b_a_restores_a(self):
-        self.notes("要求：周五前完成")
-        self.notes("要求：周一前完成")
-        self.notes("要求：周五前完成")
-        self.assertEqual(self.added(), ["要求：周五前完成"])
-
-    def test_a_deleted_note_is_withdrawn(self):
-        self.notes("要求：周五前完成")
-        self.notes()
-        self.assertEqual(self.added(), [])
-        row = self.conn.execute("SELECT status, result FROM feedback WHERE kind='page_notes'").fetchone()
-        self.assertEqual(row["status"], "superseded")
-        self.assertIn("withdrawn", row["result"])
-
-    def test_a_partly_removed_note_carries_what_remains(self):
-        self.notes("要求一：放实验结果", "要求二：加总结页")
-        self.notes("要求一：放实验结果")
-        self.assertEqual(self.added(), ["要求一：放实验结果"])
+    def test_the_notes_are_always_the_latest_text_and_never_feedback(self):
+        row = lambda: self.conn.execute("SELECT notes_text, notes_revision FROM notion_pages"  # noqa: E731
+                                        " WHERE page_id=?", (self.page,)).fetchone()
+        start = row()["notes_revision"]
+        for lines, expected in ((["要求：周五前完成"], "要求：周五前完成"), (["要求：周一前完成"], "要求：周一前完成"),
+                                (["要求：周五前完成"], "要求：周五前完成"), ([], "")):
+            self.notes(*lines)
+            self.assertEqual(row()["notes_text"], expected)
+        self.notes()                                    # unchanged re-read
+        self.assertEqual(row()["notes_revision"], start + 4)
+        self.assertEqual(pending(self.conn), [])
 
 
 class EditAfterClaimTests(GateCase):
@@ -212,15 +191,3 @@ class EditAfterClaimTests(GateCase):
         self.assertEqual(feedback.get(self.conn, fb["id"])["status"], "superseded")
         [current] = pending(self.conn, "body_edit")
         self.assertIn("Carol", current["payload"]["region"])
-
-    def test_notes_appended_after_claim_keep_the_claimed_note(self):
-        self.fake.user_set_markdown(self.page, self.original + "\n\n要求：提到截止日期")
-        clock.advance(minutes=1)
-        _, _, run_id = self.gate()
-        [fb] = feedback.claimed_by(self.conn, run_id)
-        self.fake.user_set_markdown(self.page, self.original + "\n\n要求：提到截止日期\n另外：抄送 Carol")
-        clock.advance(minutes=1)
-        self.gate()
-        report = self.decide(run_id, [{"feedback": fb["id"], "outcome": "ignored", "reason": "已知"}])
-        self.assertEqual(report["ignored"], [fb["id"]], "an append does not invalidate the claimed note")
-        self.assertEqual([f["payload"]["added"] for f in pending(self.conn, "page_notes")], ["另外：抄送 Carol"])

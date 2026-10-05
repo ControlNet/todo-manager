@@ -231,10 +231,10 @@ class StaleTransitionTests(Base):
         self.assertEqual(len(self.events(card, "review_reopened")), 1)
 
 
-class CapacityTests(Base):
-    """R05: one shared reservation for submit/answer/resume/revision/approval."""
-
-    overrides = {"kanban": {"max_running": 1}}
+class SchedulingTests(Base):
+    """Hermes schedules the work: answers, resumes and submissions are not held for a local
+    capacity (the ``kanban.max_running`` reservation was removed; Hermes' dispatcher limits
+    apply). An uncertain transition is checked on the card before it is repeated."""
 
     def two_blocked(self):
         other = store.create_task(self.conn, "Another", origin="cli")
@@ -252,21 +252,26 @@ class CapacityTests(Base):
         self.tick()
         return (first, c1), (second, c2)
 
-    def test_two_answers_in_one_round_respect_max_running(self):
+    def test_two_answers_in_one_round_both_reach_their_cards(self):
         (first, c1), (second, c2) = self.two_blocked()
         delegation.add_message(self.conn, first, "answer", "A1", feedback_id="fbk_1")
         delegation.add_message(self.conn, second, "answer", "A2", feedback_id="fbk_2")
         delegation.send_messages(self.conn, self.cfg, self.kb)
-        self.assertEqual(sorted(self.kb.cards[c]["status"] for c in (c1, c2)), ["blocked", "ready"])
+        self.assertEqual([self.kb.cards[c]["status"] for c in (c1, c2)], ["ready", "ready"])
 
-    def test_uncertain_resume_keeps_its_reservation(self):
+    def test_an_uncertain_resume_is_checked_not_repeated_and_holds_nothing_else(self):
         (first, c1), (second, c2) = self.two_blocked()
-        delegation.add_message(self.conn, first, "answer", "A1", feedback_id="fbk_1")
+        a1 = delegation.add_message(self.conn, first, "answer", "A1", feedback_id="fbk_1")
         self.kb.fail_next["transition"] = delegation.KanbanError("timeout", uncertain=True)
         delegation.send_messages(self.conn, self.cfg, self.kb)
+        self.assertEqual(self.msg(a1)["status"], "sending")
         delegation.add_message(self.conn, second, "answer", "A2", feedback_id="fbk_2")
         delegation.send_messages(self.conn, self.cfg, self.kb)
-        self.assertEqual(self.kb.cards[c2]["status"], "blocked", "the uncertain transition still holds the slot")
+        self.assertEqual(self.kb.cards[c2]["status"], "ready", "the other card does not wait for it")
+        delegation.send_messages(self.conn, self.cfg, self.kb)
+        self.assertEqual(self.kb.cards[c1]["status"], "ready")
+        self.assertEqual(self.msg(a1)["status"], "sent")
+        self.assertEqual(sum(1 for c in self.kb.comments if f"[tm:{a1}]" in c["body"]), 1)
 
 
 class ApprovalTests(Base):
@@ -346,6 +351,37 @@ class ApprovalTests(Base):
         self.tick()
         self.assertEqual(self.conn.execute("SELECT outcome FROM approvals WHERE id=?", (aid,)).fetchone()[0], "unknown")
         self.assertNotIn(card, self.kb.dispatch_tick())
+
+
+class RemovedSettingTests(Base):
+    def test_a_capacity_left_in_config_toml_is_reported_and_ignored(self):
+        (self.tmp / "config.toml").write_text("[kanban]\nmax_running = 1\n\n[wake]\nover_budget = \"defer\"\n",
+                                              encoding="utf-8")
+        notes = health.report(self.conn, self.cfg)["notes"]
+        self.assertTrue(any("kanban.max_running" in n and "no longer has an effect" in n for n in notes), notes)
+        self.assertTrue(any("wake.over_budget" in n for n in notes), notes)
+        self.delegate()
+        other = store.create_task(self.conn, "Another", origin="cli")
+        self.delegate(task=other, title="t2")
+        self.tick()
+        self.assertEqual(len(self.kb.cards), 2, "nothing holds a card back")
+
+
+class RetryPolicyTests(Base):
+    """Hermes' per-card breaker: always 1 when an external action is allowed at creation;
+    otherwise ``kanban.max_retries`` (0 = Hermes' own default)."""
+
+    def card_of(self, did):
+        self.tick()
+        return self.kb.cards[self.d(did)["card_id"]]
+
+    def test_external_actions_always_get_one_retry_the_rest_follow_the_config(self):
+        self.cfg.data["kanban"]["max_retries"] = 0
+        mail = self.delegate(allowed_actions=["read", "draft", "send_email"])
+        other = store.create_task(self.conn, "Another", origin="cli")
+        draft = self.delegate(task=other, title="t2")
+        self.assertEqual(self.card_of(mail)["max_retries"], 1)
+        self.assertIsNone(self.card_of(draft)["max_retries"], "Hermes' default")
 
 
 class DeliveryRunTests(Base):

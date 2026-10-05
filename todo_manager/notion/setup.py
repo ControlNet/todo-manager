@@ -13,13 +13,16 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from .. import clock, i18n
+from .. import clock, delegation, i18n
 from ..db import get_meta, loads
 from . import body, schema
-from .client import NotionClient
+from .client import NotionClient, NotionError
 from .sync import HOME_MARKER, save_state
 
 SECTIONS = ("focus", "projects", "waiting", "decision", "agent", "review", "recent")
+# 2: card events no longer set a Task to "review": "Agent work" shows every state and "To
+# review" also lists agent work waiting for the user (question, delivery).
+VIEWS_VERSION = 2
 
 
 def _not_snoozed(p: dict[str, str]) -> dict[str, Any]:
@@ -41,7 +44,7 @@ def view_specs(p: dict[str, str], q: dict[str, str], lang: str | None = None) ->
         return {"key": key, "heading": i18n.t(f"home.section.{key}", lang), "source": source,
                 "name": i18n.t(f"view.{key}", lang), "type": kind, **rest}
 
-    agent_states = [schema.label("delegation", v, lang) for v in ("queued", "running", "paused", "quarantined")]
+    needs_user = [schema.label("delegation", v, lang) for v in delegation.NEEDS_USER_LABELS]
     return [
         # Worth pushing now: focus, or due within a week / overdue; snoozed tasks are hidden.
         spec("focus", "task", "table",
@@ -69,12 +72,13 @@ def view_specs(p: dict[str, str], q: dict[str, str], lang: str | None = None) ->
              sorts=[{"property": p["due_date"], "direction": "ascending"}],
              configuration={"type": "list", "properties": cols(p, ["next_step", "due_date", "project_id"])}),
         spec("agent", "task", "board",
-             filter={"property": p["delegation"], "select": {"equals": agent_states}},
+             filter={"property": p["delegation"], "select": {"is_not_empty": True}},
              configuration={"type": "board", "group_by": {"type": "select", "property_id": p["delegation"],
                                                           "sort": {"type": "manual"}, "hide_empty_groups": True},
                             "properties": cols(p, ["next_step", "project_id"])}),
         spec("review", "task", "table",
-             filter={"property": p["status"], "select": {"equals": task("review")}},
+             filter={"or": [{"property": p["status"], "select": {"equals": task("review")}},
+                            {"property": p["delegation"], "select": {"equals": needs_user}}]},
              sorts=[{"property": p["updated"], "direction": "descending"}],
              configuration={"type": "table", "properties": cols(p, ["title", "delegation", "change_note",
                                                                     "project_id"])}),
@@ -85,6 +89,54 @@ def view_specs(p: dict[str, str], q: dict[str, str], lang: str | None = None) ->
              sorts=[{"property": p["updated"], "direction": "descending"}],
              configuration={"type": "table", "properties": cols(p, ["title", "status", "change_note", "project_id"])}),
     ]
+
+
+def _earlier_filters(p: dict[str, str], lang: str | None) -> dict[str, dict[str, Any]]:
+    """The filters views had before ``VIEWS_VERSION`` 2, to recognise a view the user left as created."""
+    states = [schema.label("delegation", v, lang) for v in ("queued", "running", "paused", "quarantined")]
+    return {"agent": {"property": p["delegation"], "select": {"equals": states}},
+            "review": {"property": p["status"], "select": {"equals": schema.label("task_status", "review", lang)}}}
+
+
+def view_upgrades(conn: sqlite3.Connection, client: NotionClient) -> tuple[list[dict[str, Any]], list[str]]:
+    """Views of an earlier version: (filter updates for views still as created, notes for
+    views the user changed or removed - those are left alone). Read-only."""
+    if int(get_meta(conn, "notion.views_version") or 1) >= VIEWS_VERSION:
+        return [], []
+    lang = i18n.normalize(get_meta(conn, "notion.language")) or i18n.language()
+    views = loads(get_meta(conn, "notion.views"), {}) or {}
+    tmap = loads(get_meta(conn, "notion.props.task"), {})
+    pmap = loads(get_meta(conn, "notion.props.project"), {})
+    earlier = _earlier_filters(tmap, lang)
+    prop = next(p for p in schema.TASK_PROPS if p.field == "delegation").name(lang)
+    states = i18n.t("list.sep", lang).join(schema.label("delegation", v, lang) for v in delegation.NEEDS_USER_LABELS)
+    updates, notes = [], []
+    for spec in view_specs(tmap, pmap, lang):
+        if spec["key"] not in earlier or spec["key"] not in views:
+            continue
+        try:
+            live = client.retrieve_view(views[spec["key"]]).get("filter")
+        except NotionError as exc:
+            if exc.status != 404:
+                raise
+            notes.append(i18n.t("setup.view_missing", lang, view=spec["name"]))
+            continue
+        if live == spec["filter"]:
+            continue
+        if live == earlier[spec["key"]]:
+            what = i18n.t(f"setup.view_update.{spec['key']}", lang)
+            updates.append({"key": spec["key"], "view_id": views[spec["key"]], "filter": spec["filter"],
+                            "change": i18n.t("setup.view_update", lang, name=spec["name"], what=what)})
+        else:
+            notes.append(i18n.t(f"setup.view_kept.{spec['key']}", lang, view=spec["name"], prop=prop, states=states))
+    return updates, notes
+
+
+def apply_view_upgrades(conn: sqlite3.Connection, client: NotionClient, updates: list[dict[str, Any]]) -> None:
+    """Write the approved ``view_upgrades`` and record that the views are current."""
+    for u in updates:
+        client.update_view(u["view_id"], {"filter": u["filter"]})
+    save_state(conn, views_version=str(VIEWS_VERSION))
 
 
 def home_markdown(lang: str | None = None) -> str:
@@ -170,6 +222,7 @@ def apply(conn: sqlite3.Connection, client: NotionClient, parent_page_id: str | 
         raise RuntimeError(f"data sources lack properties {missing}; fix the schema before continuing")
     save_state(conn, **{"props.task": tmap.ids, "props.project": pmap.ids})
     views = loads(get_meta(conn, "notion.views"), {}) or {}
+    fresh = not views
     headings = _headings(client, home)
     for spec in view_specs(tmap.ids, pmap.ids, lang):
         if spec["key"] in views:
@@ -187,6 +240,8 @@ def apply(conn: sqlite3.Connection, client: NotionClient, parent_page_id: str | 
         views[spec["key"]] = view["id"]
         save_state(conn, views=views)
     done["views"] = views
+    if fresh:
+        save_state(conn, views_version=str(VIEWS_VERSION))
     if not get_meta(conn, "notion.setup_at"):
         save_state(conn, setup_at=clock.iso())
     return done

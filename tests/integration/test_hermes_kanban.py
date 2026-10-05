@@ -165,6 +165,42 @@ class HermesKanbanIntegration(WorkspaceCase):
         # Exactly one card for this delegation on the real board.
         self.assertEqual(len(self.kb.find(d["idem_key"], f"todo-manager-delegation: {did}")), 1)
 
+    def test_a_worker_completing_natively_ends_the_work_but_not_the_task(self):
+        did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草回复", goal="Draft only")
+        self.tick()
+        card = delegation.get(self.conn, did)["card_id"]
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.assertTrue(self.sim("complete", task_id=card, summary="草稿完成",
+                                 metadata={"deliverable_markdown": "Dear Alice, ..."}))
+        self.tick()
+        self.assertEqual(delegation.get(self.conn, did)["status"], "ended")
+        [result] = [x for x in delegation.deliveries(self.conn, did) if x["kind"] == "result"]
+        self.assertEqual(result["body"], "Dear Alice, ...")
+        task = store.get_task(self.conn, self.task)
+        self.assertEqual((task["status"], task["next_actor"]), ("todo", "me"), "the draft does not complete the Task")
+        self.assertEqual(delegation.task_label(self.conn, self.task), "delivered")
+
+    def test_an_approval_given_with_an_answer_reaches_the_worker_once(self):
+        did = delegation.create(self.conn, self.cfg, task_id=self.task, title="发送回复", goal="Draft and send")
+        self.tick()
+        card = delegation.get(self.conn, did)["card_id"]
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.assertTrue(self.sim("block", task_id=card, reason="可以直接发给 Alice 吗？", kind="needs_input"))
+        self.tick()
+        mid = delegation.add_message(self.conn, did, "answer", "可以", feedback_id="fbk_it_ok",
+                                     approve=[("send_email", "只发给 Alice")])
+        self.tick()
+        self.assertEqual(self.sim("status", task_id=card)["status"], "ready")
+        comments = self.kb.snapshot(card)["comments"]
+        [ours] = [c for c in comments if f"[tm:{mid}]" in c["body"]]
+        self.assertIn("APPROVED send_email for question #1. 只发给 Alice", ours["body"])
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.assertTrue(self.sim("complete", task_id=card, summary="已发送",
+                                 metadata={"deliverable_markdown": "Sent.", "external_actions_done": ["send_email"]}))
+        self.tick()
+        self.assertEqual([a["outcome"] for a in self.conn.execute(
+            "SELECT outcome FROM approvals WHERE answer_message_id=?", (mid,))], ["reported"])
+
     def test_archived_card_found_by_lookup(self):
         did = delegation.create(self.conn, self.cfg, task_id=self.task, title="调查", goal="Investigate")
         self.tick()

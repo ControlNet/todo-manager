@@ -35,7 +35,7 @@ FEEDBACK_OUTCOMES = ("applied", "clarify", "ignored")
 MAX_REPLY_CHARS = 1900          # one Notion rich-text object holds 2000 characters
 DEFER_DAYS = 7                  # a deferral without a date is offered again after this at the latest
 # Lengths older versions cut stored Notion text at (an item stored before ``complete`` was kept).
-LEGACY_CUTS = {"added": 3000, "removed": 1500, "body": 4000}
+LEGACY_CUTS = {"body": 4000}     # new-page bodies stored by versions that cut them
 
 
 class OpError(ValueError):
@@ -85,7 +85,7 @@ def incomplete_reason(fb: dict[str, Any]) -> str | None:
     p = fb.get("payload") or {}
     if p.get("truncated"):
         return "the Notion API returned the page body cut short"
-    if fb["kind"] in ("page_notes", "new_task") and not p.get("complete") and any(
+    if fb["kind"] == "new_task" and not p.get("complete") and any(
             len(p.get(key) or "") >= limit for key, limit in LEGACY_CUTS.items()):
         return "stored by an older version that kept only the first characters of long text"
     return None
@@ -95,7 +95,7 @@ def page_body_unread(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any]) 
     """A box interpretation is built from our last read of the page body; while a later edit
     (pulled, not read yet) may have replaced or withdrawn its text, it is neither claimed nor
     applied: the next covering read supersedes it or keeps it."""
-    if fb["kind"] not in ("body_edit", "page_notes"):
+    if fb["kind"] != "body_edit":
         return False
     row = conn.execute("SELECT last_edited_time, last_edited_by, body_read_at FROM notion_pages WHERE page_id=?",
                        ((fb["payload"] or {}).get("page_id"),)).fetchone()
@@ -791,10 +791,25 @@ def delegate_message(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, delegation
     return perform(conn, ctx, "delegate message", args, apply)
 
 
+def parse_approvals(values: list[str] | None) -> list[tuple[str, str]]:
+    """``action[:detail]`` -> (action, detail); unknown actions are refused."""
+    result = []
+    for value in values or []:
+        action, _, detail = value.partition(":")
+        action = action.strip()
+        if action not in delegation.KNOWN_ACTIONS:
+            raise OpError("INVALID", f"unknown action {action!r}; known: {sorted(delegation.KNOWN_ACTIONS)}")
+        result.append((action, detail.strip()))
+    return result
+
+
 def delegate_answer(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, delegation_id: str, *,
-                    body: str) -> dict[str, Any]:
-    """Answer the card's open question (bound to that question, however late the answer)."""
+                    body: str, approve: list[str] | None = None) -> dict[str, Any]:
+    """Answer the card's open question (bound to that question, however late the answer).
+    ``approve``: external actions (``action[:detail]``) the user allows with this answer, e.g.
+    when the worker asked whether it may send the email; each is used at most once."""
     _delegation_ctx(ctx)
+    approvals = parse_approvals(approve)
     d = delegation.get(conn, delegation_id)
     if d is None:
         raise OpError("NOT_FOUND", f"no delegation {delegation_id}")
@@ -808,16 +823,19 @@ def delegate_answer(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, delegation_
             and p.get("delivery_seq") not in (None, d["block_seq"]):
         raise OpError("INVALID", f"this reply answers an earlier question (#{p.get('delivery_seq')}), not the open one"
                                  f" (#{d['block_seq']}): send it as a supplement")
-    args = {"delegation": delegation_id, "body": body}
+    args = {"delegation": delegation_id, "body": body, **({"approve": approve} if approve else {})}
     key = _key(ctx, "delegate answer", args)
 
     def apply() -> dict[str, Any]:
         try:
             mid = delegation.add_message(conn, delegation_id, "answer", body,
-                                         feedback_id=ctx.fb["id"] if ctx.fb else None, op_key=key)
+                                         feedback_id=ctx.fb["id"] if ctx.fb else None, op_key=key, approve=approvals)
         except delegation.DelegationError as exc:
             raise OpError("INVALID", str(exc)) from None
-        return {"message": mid, "kind": "answer", "question": d["block_seq"]}
+        result = {"message": mid, "kind": "answer", "question": d["block_seq"]}
+        if approvals:
+            result["approvals"] = [a["id"] for a in delegation.answer_approvals(conn, mid)]
+        return result
 
     return perform(conn, ctx, "delegate answer", args, apply)
 

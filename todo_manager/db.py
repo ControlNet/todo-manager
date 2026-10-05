@@ -561,7 +561,9 @@ ALTER TABLE notion_comments ADD COLUMN presence_at TEXT;
     # (holds for a user's pause stay). Page notes are context now: pending notes items are closed
     # (the notes stay on the page and in notion_pages.notes_text). The rules tables stay for
     # audit and export; their content moves to the workspace files on the first open
-    # (``prefs.migrate_rules``, flagged by meta ``prefs.migration_from``).
+    # (``prefs.migrate_rules``, flagged by meta ``prefs.migration_from``). An approval can be
+    # given with the answer to a worker's question (``answer_message_id``: it goes out with that
+    # answer; ``delivery_id`` is then the question).
     8: """
 CREATE TABLE op_log (
   key TEXT PRIMARY KEY,
@@ -574,6 +576,7 @@ ALTER TABLE runs ADD COLUMN rules_hash TEXT;
 ALTER TABLE runs ADD COLUMN released_at TEXT;
 ALTER TABLE batches ADD COLUMN not_before TEXT;
 ALTER TABLE batches ADD COLUMN defer_reason TEXT;
+ALTER TABLE approvals ADD COLUMN answer_message_id TEXT;
 UPDATE delegation_messages SET status = 'pending', error = NULL
   WHERE status = 'waiting_capacity' AND COALESCE(error, '') != 'paused by user';
 UPDATE feedback SET status = 'superseded', applied_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),

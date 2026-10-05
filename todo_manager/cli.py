@@ -482,7 +482,7 @@ def cmd_delegate(args: argparse.Namespace) -> int:
             return ops.delegate_message(conn, cfg, ctx, args.id, kind=args.kind, body=args.body,
                                         delivery=args.delivery)
         if args.action == "answer":
-            return ops.delegate_answer(conn, cfg, ctx, args.id, body=args.body)
+            return ops.delegate_answer(conn, cfg, ctx, args.id, body=args.body, approve=args.approve)
         return ops.delegate_approve(conn, cfg, ctx, args.id, delivery=args.delivery, action=args.action_name,
                                     detail=args.detail)
     return _run(act)
@@ -890,6 +890,9 @@ def build_parser() -> argparse.ArgumentParser:
     x = ds.add_parser("answer", help="answer the agent's open question")
     x.add_argument("id")
     x.add_argument("--body", required=True)
+    x.add_argument("--approve", action="append", metavar="ACTION[:DETAIL]",
+                   help="an external action the user allows with this answer (repeatable), e.g."
+                        " send_email:'to Alice only'")
     _add_ctx(x)
     x = ds.add_parser("approve", help="approve an external action for a delivered version")
     x.add_argument("id")

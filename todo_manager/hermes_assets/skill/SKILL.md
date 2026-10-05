@@ -152,10 +152,12 @@ agent work and recent thread.
   `todo-manager delegate message <delegation> --kind supplement|revision|pause|resume|cancel --body "..."`.
 - The agent asked a question: `todo-manager delegate answer <delegation> --body "..."` (it goes
   to that card's open question, however late). When the user approves an external action the
-  agent asked about, add `--approve <action>`. Approval must be explicit; praise is not approval.
+  agent asked about, add `--approve <action>[:<what exactly>]` (repeatable). For a delivered
+  version: `todo-manager delegate approve <delegation> --delivery <id> --action <action>`.
+  Approval must be explicit; praise is not approval. An approval allows the action once.
 - A delivered version the user accepts as it is:
   `todo-manager delegate message <delegation> --kind accept`. A finished draft does not finish the
-  task; the user decides that. Closing a task stops its active agent work.
+  task; the user decides that. Closing a task cancels its active agent work (it never accepts).
 
 ## Diagnostics
 

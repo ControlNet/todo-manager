@@ -30,6 +30,10 @@ def main():
             run = kb.get_task(conn, tid).current_run_id
             result = kb.request_review(conn, tid, summary=req["summary"], metadata=req.get("metadata"),
                                        expected_run_id=run)
+        elif op == "complete":
+            run = kb.get_task(conn, tid).current_run_id
+            result = kb.complete_task(conn, tid, summary=req["summary"], metadata=req.get("metadata"),
+                                      expected_run_id=run)
         elif op == "status":
             task = kb.get_task(conn, tid)
             result = {"status": task.status, "block_kind": task.block_kind, "recurrences": task.block_recurrences}

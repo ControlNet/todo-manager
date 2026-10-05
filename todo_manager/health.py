@@ -8,7 +8,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from . import clock, prefs
+from . import clock, config, prefs
 from .config import Config
 from .db import dumps, get_meta, loads, set_meta, tx
 
@@ -133,7 +133,8 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
             if woke else None}
     out["delegations_held"] = loads(get_meta(conn, "delegations.hold"), None)
     # Information, not problems: how the user's Hermes settings treat agent work.
-    out["notes"] = (loads(get_meta(conn, "kanban.settings"), None) or {}).get("notes", [])
+    out["notes"] = ((loads(get_meta(conn, "kanban.settings"), None) or {}).get("notes", [])
+                    + config.removed_keys(cfg.home))
     out["conventions_problems"] = prefs.problems(cfg.home)
     out["notion_ready"] = bool(get_meta(conn, "notion.tasks_data_source_id") or cfg.get("notion.tasks_data_source_id"))
     out["recorded_problems"] = {r["key"].split(".", 2)[2]: loads(r["value"], {})

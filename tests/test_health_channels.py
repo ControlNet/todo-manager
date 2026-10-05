@@ -59,7 +59,7 @@ class ChannelHealthTests(GateCase):
         self.assertFalse(any("notion:comments" in p for p in self.problems()))
 
     def test_a_failed_body_read_is_kept_and_the_edit_is_read_after_recovery(self):
-        self.fake.user_set_markdown(self.page, self.fake.markdown[self.page] + "\n\n要求：提到截止日期")
+        self.fake.user_set_markdown(self.page, self.fake.markdown[self.page].replace("Bob 直接问我", "其实是导师转给我的"))
         self.fake.fail_next[("GET", f"/pages/{self.page}/markdown")] = RESTRICTED
         _, woke, _ = self.gate()
         self.assert_no_wake(woke)
@@ -67,7 +67,7 @@ class ChannelHealthTests(GateCase):
         self.assertTrue(any(p.startswith("source notion:bodies") for p in self.problems()))
         clock.advance(minutes=5)
         _, woke, _ = self.gate()
-        self.assertTrue(woke, "the user's note is read once the body can be read again")
+        self.assertTrue(woke, "the user's edit is read once the body can be read again")
         self.assertEqual(channel(self.conn, "notion", "bodies")["consecutive_failures"], 0)
 
     def test_failed_kanban_steps_are_kept_per_step_and_cleared(self):

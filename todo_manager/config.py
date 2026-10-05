@@ -106,10 +106,10 @@ DEFAULTS: dict[str, Any] = {
         "board": "todo-manager",
         "hermes_bin": "hermes",
         "assignee": "",  # Hermes profile that executes delegations ("" = board default)
-        "max_running": 1,
         # Hermes per-card failure breaker: 1 = a crashed/timed-out/stale run parks the card for you
-        # instead of an automatic respawn (which could repeat an approved external action whose
-        # outcome is unknown). Rate-limit requeues are not counted by Hermes.
+        # instead of an automatic respawn. Cards allowed an external action always get 1 (a respawn
+        # could repeat an action whose outcome is unknown); 0 = Hermes' own default for the others.
+        # Rate-limit requeues are not counted by Hermes. How many cards run at once is Hermes'.
         "max_retries": 1,
     },
     "health": {
@@ -143,6 +143,32 @@ DEFAULTS: dict[str, Any] = {
         "problem_minutes": 60,
     },
 }
+
+
+# Keys earlier versions read, with what replaced them: reported by ``health`` while config.toml
+# still sets them (they have no effect).
+REMOVED_KEYS = {
+    "kanban.max_running": "Hermes schedules agent work now; its dispatcher limits apply to every board"
+                          " (`hermes config get kanban.max_in_progress`)",
+    "wake.over_budget": "a context over wake.max_context_chars is clipped and the run goes ahead",
+    "feedback.over_budget": "a context over feedback.max_context_chars is clipped and the run goes ahead",
+    "wake.max_questions_per_run": "when to ask is a convention in the workspace AGENTS.md",
+}
+
+
+def removed_keys(home: Path) -> list[str]:
+    """Lines for the keys of ``REMOVED_KEYS`` that config.toml still sets."""
+    from .config_file import explicit
+    try:
+        data = explicit(home / "config.toml")
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    found = []
+    for key, why in REMOVED_KEYS.items():
+        section, _, name = key.partition(".")
+        if isinstance(data.get(section), dict) and name in data[section]:
+            found.append(f"config.toml sets {key}, which no longer has an effect: {why}; the line can be removed")
+    return found
 
 
 def local_timezone() -> str:

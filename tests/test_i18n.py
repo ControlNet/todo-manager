@@ -99,7 +99,8 @@ class LanguageSelectionTests(unittest.TestCase):
         for name in ("skill/SKILL.md", "cron/intake.md", "cron/feedback.md"):
             self.assertIsNone(CJK.search(templates.asset(name)), name)
         protocol = delegation.WORKER_PROTOCOL.format(allowed="read", pause="X", language=i18n.language_name())
-        self.assertIn("summary in Simplified Chinese", protocol)
+        self.assertIn("2-3 sentences in Simplified Chinese", protocol)
+        self.assertIn("question in Simplified Chinese", protocol)
 
 
 class EnglishSetupTests(NotionCase):

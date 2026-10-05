@@ -294,6 +294,15 @@ class FakeKanban:
         run.update(status="done", summary=summary, metadata=metadata or {})
         self._event(card_id, "review_requested", {"summary": summary}, run_id=run["id"])
 
+    def worker_complete(self, card_id: str, summary: str, metadata: dict | None = None) -> None:
+        """The worker finished with Hermes' native ``kanban_complete`` (no review asked)."""
+        card = self.cards[card_id]
+        assert card["status"] == "running"
+        card["status"] = "done"
+        run = self.runs[card_id][-1]
+        run.update(status="done", summary=summary, metadata=metadata or {})
+        self._event(card_id, "completed", {"summary": summary}, run_id=run["id"])
+
     def worker_crash(self, card_id: str) -> None:
         """The worker process died: the dispatcher returns the card to ready for a retry, unless
         the failure breaker trips (per-card ``max_retries``, else Hermes' default of 2)."""

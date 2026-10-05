@@ -448,9 +448,25 @@ class Install:
             else:
                 self.note("notion", "set up" if cfg.get("notion.enabled") else
                           "set up, but notion.enabled = false in config.toml: not synced")
+            if finished:
+                self._notion_views(conn, client)
         finally:
             conn.close()
         self._notion_identity(client)
+
+    def _notion_views(self, conn: Any, client: Any) -> None:
+        """Views created by an earlier version: those still as created are updated (confirmed
+        first); those the user changed are left alone and reported."""
+        from .notion import setup
+        updates, notes = setup.view_upgrades(conn, client)
+        for text in notes:
+            self.note("notion", text)
+        if updates and not self.prompter.confirm("notion_views", "Update Todo Manager's Notion views for this"
+                                                 " version:", [u["change"] for u in updates]):
+            self.note("notion", "views not updated (declined); run install again to update them")
+            return
+        if updates or notes:
+            setup.apply_view_upgrades(conn, client, updates)
 
     def _notion_setup(self, conn: Any, client: Any, cfg: config.Config, home: str | None) -> bool:
         """``home``: the page of an interrupted setup, finished on the same page without asking again."""

@@ -11,16 +11,17 @@ Import (gate B, every run)
   * Pages created by the user become tasks/projects (``origin=notion``).
   * Edits with workflow meaning are not guessed: "next by = Agent" without an active
     delegation becomes a pending feedback item for the model; closing a task stops its
-    active delegations deterministically (accept a delivered review, cancel otherwise).
+    active delegations deterministically (cancelled; closing never accepts a delivery).
 
 Page bodies (gate B, after the property import)
   * A page last edited by someone other than our bot gets its body read until a read covers
     the edit's timestamp (``body.edit_unread``: a whole-minute stamp may stand for any moment
     of that minute, so a read in the same minute may predate a later edit with the same stamp).
-    At most ``notion.body_reads_per_run`` reads per run, least recently read first. A change inside the managed box is ``body_edit``; a change to the
-    user's own notes outside it is ``page_notes`` with the added/removed text. Both go to
-    the model, which decides whether the text is information, a requirement for the task
-    or its delegation, or a lasting rule. The first read of a page is a baseline only.
+    At most ``notion.body_reads_per_run`` reads per run, least recently read first. A change
+    inside the managed box is ``body_edit`` feedback (the model decides what it means; the box is
+    not overwritten meanwhile). The user's own notes outside it are kept as written
+    (``notion_pages.notes_text``) and shown with the Task as context; they are not feedback.
+    The first read of a page is a baseline only.
   * The body of a page created by the user is part of its ``new_task`` feedback.
 
 Push (outbox handlers)
@@ -42,7 +43,6 @@ Comments
 
 from __future__ import annotations
 
-import difflib
 import hashlib
 import sqlite3
 from dataclasses import dataclass
@@ -184,13 +184,7 @@ class NotionSync:
         return row["page_id"] if row else None
 
     def delegation_label(self, task_id: str) -> str | None:
-        order = ["quarantined", "blocked", "review", "running", "queued", "paused"]
-        statuses = [d["status"] for d in delegation.for_task(self.conn, task_id, active_only=True)]
-        statuses = ["queued" if s in ("pending_submit", "reconcile") else s for s in statuses]
-        for status in order:
-            if status in statuses:
-                return status
-        return None
+        return delegation.task_label(self.conn, task_id)
 
     def source_label(self, task: dict[str, Any]) -> str:
         row = self.conn.execute(
@@ -340,12 +334,11 @@ class NotionSync:
         with tx(self.conn):
             if region is not None and row["managed_hash"]:
                 found += self._box_read(row, task, region, self.render_body(task), bool(doc.get("truncated")), trust)
+            # The user's own notes are context (shown with the Task to the agent and in the card),
+            # kept exactly as written; a change is not a request by itself and wakes nothing.
             notes_fp = body.content_fingerprint(notes) if notes else ""
-            revision = row["notes_revision"]
-            if row["notes_hash"] is not None and notes_fp != row["notes_hash"]:
-                revision += 1
-                found += self._notes_read(row, task, notes, notes_fp, revision, bool(doc.get("truncated")), trust)
-            # Kept in full: the next read diffs against it (a cut baseline would invent changes).
+            revision = row["notes_revision"] + (1 if row["notes_hash"] is not None and notes_fp != row["notes_hash"]
+                                                else 0)
             self.conn.execute("UPDATE notion_pages SET body_read_at=?, notes_hash=?, notes_text=?, notes_revision=?"
                               " WHERE page_id=?", (clock.iso(), notes_fp, notes, revision, row["page_id"]))
         return found
@@ -374,44 +367,6 @@ class NotionSync:
         feedback.supersede_older(self.conn, "notion_page", row["page_id"], fid, kind="body_edit",
                                  reason="replaced by a later edit of the box")
         return ["body_edit"]
-
-    def _notes_read(self, row: dict[str, Any], task: dict[str, Any], notes: str, notes_fp: str, revision: int,
-                    truncated: bool, trust: dict[str, Any]) -> list[str]:
-        """A new revision of the page's own notes. A pending note whose added lines are all still
-        there (and removed lines still gone) stays valid, so an append does not touch it; one
-        that no longer holds is superseded and what still holds of it is carried over. Lines it
-        added or removed that were never applied are not presented as removed/added again."""
-        added, removed = _line_diff(row["notes_text"] or "", notes)
-        if not (added.strip() or removed.strip()):
-            return []
-        present = {line.strip() for line in notes.splitlines()}
-        stale = [f for f in feedback.pending(self.conn, include_claimed=True)
-                 if f["kind"] == "page_notes" and f["origin"] == "notion_page" and f["source_id"] == row["page_id"]
-                 and not _note_holds(f["payload"], notes, present)]
-        stale_added = {line for f in stale for line in _lines(f["payload"].get("added"))}
-        stale_removed = {line for f in stale for line in _lines(f["payload"].get("removed"))}
-        net_added = _unique([line for f in stale for line in _lines(f["payload"].get("added")) if line in present]
-                            + [line for line in _lines(added) if line not in stale_removed])
-        net_removed = _unique([line for f in stale for line in _lines(f["payload"].get("removed"))
-                               if line not in present]
-                              + [line for line in _lines(removed) if line not in stale_added])
-        stale_ids = [f["id"] for f in stale]
-        if not (net_added or net_removed):
-            feedback.supersede(self.conn, stale_ids, "withdrawn: the note was removed or reverted")
-            return []
-        added, removed = "\n".join(net_added), "\n".join(net_removed)
-        # Stored in full (``complete``); only the display is budgeted (context.feedback_item).
-        payload = {"page_id": row["page_id"], "added": added, "removed": removed, "notes": notes,
-                   "truncated": truncated, "revision": revision, "complete": True}
-        if stale_ids:
-            payload["replaces"] = stale_ids
-        if not self.user_ids():
-            payload["identity_unverified"] = True
-        fid, _ = feedback.record(self.conn, origin="notion_page", source_id=row["page_id"],
-                                 source_version=f"notes:r{revision}:{notes_fp}", text=added or removed,
-                                 scope_type="task", scope_id=task["id"], kind="page_notes", payload=payload, **trust)
-        feedback.supersede(self.conn, stale_ids, "replaced by a later edit of the notes", fid)
-        return ["page_notes"]
 
     def import_page(self, kind: str, page: dict[str, Any]) -> str:
         """Apply unseen human edits of one page. Returns created|edited|unchanged|ignored."""
@@ -1151,35 +1106,6 @@ def _select_raw_present(page: dict[str, Any], pmap: schema.PropertyMap, field: s
     raw = next((v for v in props.values() if isinstance(v, dict) and v.get("id") == key), None) if key \
         else props.get(prop.name(pmap.lang))
     return bool(raw and raw.get("select"))
-
-
-def _line_diff(before: str, after: str) -> tuple[str, str]:
-    """Lines added to and removed from the user's notes."""
-    added, removed = [], []
-    for line in difflib.ndiff(before.splitlines(), after.splitlines()):
-        if line.startswith("+ ") and line[2:].strip():
-            added.append(line[2:])
-        elif line.startswith("- ") and line[2:].strip():
-            removed.append(line[2:])
-    return "\n".join(added), "\n".join(removed)
-
-
-def _lines(text: str | None) -> list[str]:
-    return [line.strip() for line in (text or "").splitlines() if line.strip()]
-
-
-def _unique(lines: list[str]) -> list[str]:
-    return list(dict.fromkeys(lines))
-
-
-def _note_holds(payload: dict[str, Any], notes: str, present: set[str]) -> bool:
-    """A pending notes item still describes the page: its added lines are there and its removed
-    lines are still gone. (Items stored by older versions kept only 3000 characters: their cut
-    last line matches as a substring.)"""
-    added = _lines(payload.get("added"))
-    clipped = not payload.get("complete") and len(payload.get("added") or "") >= 3000
-    return all(line in present or (clipped and n == len(added) - 1 and line in notes) for n, line in enumerate(added)) \
-        and all(line not in present for line in _lines(payload.get("removed")))
 
 
 def _split_repos(text: str | None) -> list[str]:

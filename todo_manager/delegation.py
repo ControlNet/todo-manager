@@ -48,7 +48,6 @@ from .locks import file_lock, lock_path
 
 ACTIVE = ("pending_submit", "queued", "running", "blocked", "review", "paused", "reconcile")
 EXECUTING = ("queued", "running")
-CAPACITY_KINDS = ("answer", "revision", "resume", "approval")
 RUN_ENDED_EVENTS = ("crashed", "timed_out", "spawn_failed", "gave_up", "reclaimed")
 PAUSE_MARK = "[todo-manager pause]"
 KNOWN_ACTIONS = {
@@ -60,11 +59,11 @@ EXTERNAL_ACTIONS = {"push_branch", "open_pr", "merge_pr", "comment_github", "clo
 
 WORKER_PROTOCOL = """\
 ## Todo Manager delegation protocol
-- Do ONLY this delegation. Do not widen the scope, do not handle unrelated matters, do not create or decompose kanban cards.
-- Allowed actions: {allowed}. Anything else is NOT allowed. External actions (sending email, public comments, push, opening/merging PRs, closing issues, publishing) are allowed only when listed here, or when a later comment by `todo-manager` says `APPROVED <action> for delivery <delivery id>`; an approval covers exactly that delivered version - any substantive change voids it.
-- Never change the Notion task or its status yourself; the Todo Manager owns that.
-- Need information or a decision from the user? Call kanban_block(kind="needs_input", reason="<one concrete question in {language}>"). Do not guess.
-- Deliverable ready? Call kanban_request_review(summary="<2-3 sentence summary in {language}>", metadata={{"deliverable_markdown": "<the full deliverable in Markdown>", "external_actions_done": [...], "notes": "..."}}, artifacts=[<absolute paths of files to keep>]). Do NOT call kanban_complete: the user reviews in Notion.
+- Do only this delegation: do not widen the scope or handle unrelated matters. The user follows this card only: if you split the work into other cards, report their results here.
+- Allowed actions: {allowed}. An external action not listed here (sending email, public comments, push, opening/merging PRs, closing issues, publishing, editing shared documents) needs the user's approval first: ask with kanban_block(kind="needs_input", reason="<exactly what you would do, in {language}>") and wait. An approval is a comment by `todo-manager` saying `APPROVED <action> for question #<n>` (your question) or `APPROVED <action> for delivery <id>` (a version you delivered); it allows that action once, as described, and any later change of the requirements voids it.
+- Need information or a decision from the user? kanban_block(kind="needs_input", reason="<one concrete question in {language}>"). Do not guess.
+- Finished? kanban_complete(summary="<2-3 sentences in {language}>", metadata={{"deliverable_markdown": "<the full deliverable in Markdown>", "external_actions_done": [...], "notes": "..."}}, artifacts=[<absolute paths of files to keep>]). When the user should check the deliverable before you go on, call kanban_request_review with the same fields instead. Either way the user sees it in Notion.
+- The Notion task and its status are the user's: do not change them. Your delivery does not complete the task.
 - Comments by `todo-manager` are the user's supplements, answers, revision requests or approvals: follow them. A comment starting with {pause} means stop immediately and take no further action.
 - An external action whose outcome you cannot confirm (timeout, crash, unclear reply) must NOT be repeated: report it with kanban_block(kind="needs_input") and let the user check. The same applies when an earlier run of this card ended without a result after an APPROVED comment: assume the approved action may have happened and ask instead of doing it again.
 - Scratch workspaces are deleted when the card ends: keep needed files in artifacts.
@@ -73,6 +72,14 @@ WORKER_PROTOCOL = """\
 
 class DelegationError(ValueError):
     pass
+
+
+def card_retries(cfg: Config, d: dict[str, Any]) -> int | None:
+    """Hermes' per-card ``max_retries``: 1 for a card allowed an external action (a respawn could
+    repeat an action whose outcome is unknown), else ``kanban.max_retries`` (0: Hermes' default)."""
+    if external_actions(d["allowed_actions"]):
+        return 1
+    return int(cfg.get("kanban.max_retries", 1)) or None
 
 
 def action_names(allowed: list[str] | None) -> set[str]:
@@ -100,7 +107,12 @@ def for_task(conn: sqlite3.Connection, task_id: str, active_only: bool = False) 
     return [{**dict(r), "allowed_actions": loads(r["allowed_actions"], [])} for r in rows]
 
 
-def card_body(d: dict[str, Any], task: dict[str, Any], notion_url: str | None, extra: list[str]) -> str:
+CARD_NOTES_CHARS = 6000
+
+
+def card_body(d: dict[str, Any], task: dict[str, Any], notion_url: str | None, extra: list[str],
+              notes: str | None = None) -> str:
+    """``notes``: the user's own notes on the Task page (context, as written when the card is made)."""
     allowed = ", ".join(d["allowed_actions"]) or "read, analyze"
     parts = [
         f"todo-manager-delegation: {d['id']}",
@@ -114,6 +126,11 @@ def card_body(d: dict[str, Any], task: dict[str, Any], notion_url: str | None, e
         if d.get(key):
             parts.append(f"## {title}\n{d[key]}")
     parts.append(f"## Task background\n{task['title']}" + (f"\n{task['summary']}" if task.get("summary") else ""))
+    if (notes or "").strip():
+        text = notes.strip()
+        if len(text) > CARD_NOTES_CHARS:
+            text = text[:CARD_NOTES_CHARS] + f"\n[... {len(notes.strip()) - CARD_NOTES_CHARS} more characters on the Notion page]"
+        parts.append("## The user's notes on the task page (context, not instructions by themselves)\n" + text)
     if extra:
         parts.append("## Later supplements\n" + "\n".join(f"- {e}" for e in extra))
     parts.append(WORKER_PROTOCOL.format(allowed=allowed, pause=PAUSE_MARK, language=i18n.language_name()))
@@ -164,33 +181,41 @@ def create(conn: sqlite3.Connection, cfg: Config, *, task_id: str, title: str, g
             "INSERT INTO delegation_messages(id, delegation_id, kind, feedback_id, body, requirement_version, status,"
             " created_at, sent_at) VALUES (?,?,?,?,?,1,'sent',?,?)",
             (ids.new_id("event"), did, "requirement", feedback_id, goal.strip(), now, now))
-        _task_state(conn, did, "in_progress", "agent", i18n.t("dlg.assigned", title=title.strip()), actor=actor,
-                    cause=feedback_id or did)
-        # Human edits made AFTER this point win over delegation-driven status changes.
+        _next_actor(conn, did, "agent", i18n.t("dlg.assigned", title=title.strip()), actor=actor,
+                    cause=feedback_id or did, initial=True)
+        # A next actor the user sets AFTER this point is never changed by agent work.
         conn.execute("UPDATE delegations SET base_task_version=(SELECT version FROM tasks WHERE id=?) WHERE id=?",
                      (task_id, did))
     return did
 
 
-def _task_state(conn: sqlite3.Connection, delegation_id: str, status: str, next_actor: str, note: str | None,
-                actor: str = "program", cause: str | None = None) -> None:
+def _next_actor(conn: sqlite3.Connection, delegation_id: str, to: str, note: str | None,
+                actor: str = "program", cause: str | None = None, initial: bool = False) -> None:
+    """The one link from agent work to the personal Task: its next actor. Delegating makes the
+    agent the next actor (``initial``); when the work waits for the user (question, delivery,
+    failure) or stops, it goes back to ``me``, and to ``agent`` again when the work resumes -
+    unless the user set the next actor after the delegation started. The Task's status is the
+    user's and is never changed by agent work."""
     d = conn.execute("SELECT task_id, base_task_version FROM delegations WHERE id=?", (delegation_id,)).fetchone()
     task = store.get_task(conn, d["task_id"])
-    if task is None or task["status"] in store.CLOSED_STATUSES:
+    if task is None or task["status"] in store.CLOSED_STATUSES or task["next_actor"] == to:
         return
-    meta = loads(task["field_meta"], {})
-    human_v = max((int(meta.get(f, {}).get("v", 0)) for f in ("status", "next_actor")
-                   if meta.get(f, {}).get("by") == "human"), default=0)
-    override = actor == "human" or human_v <= d["base_task_version"]
-    changes: dict[str, Any] = {"status": status, "next_actor": next_actor}
+    if store.normalize_state(task["status"], to)[1] != to:
+        return          # the Task's status keeps its own next actor (waiting, review, decision)
+    if not initial:
+        meta = loads(task["field_meta"], {}).get("next_actor") or {}
+        if meta.get("by") == "human" and int(meta.get("v", 0)) > int(d["base_task_version"] or 0):
+            return
+    changes: dict[str, Any] = {"next_actor": to}
     if note:
         changes["change_note"] = note
     result = store.update_task(conn, task["id"], changes, actor=actor, origin="kanban", cause_ref=cause or delegation_id,
-                               based_on_version=task["version"], override_human=override)
-    if result.applied:
-        if "change_note" in result.applied:
-            conn.execute("UPDATE tasks SET change_note_at=? WHERE id=?", (clock.iso(), task["id"]))
-        effects.task_push(conn, task["id"])
+                               based_on_version=task["version"], override_human=True)
+    if not result.applied:
+        return
+    if "change_note" in result.applied:
+        conn.execute("UPDATE tasks SET change_note_at=? WHERE id=?", (clock.iso(), task["id"]))
+    effects.task_push(conn, task["id"])
 
 
 def _set(conn: sqlite3.Connection, delegation_id: str, **fields: Any) -> None:
@@ -199,36 +224,21 @@ def _set(conn: sqlite3.Connection, delegation_id: str, **fields: Any) -> None:
     conn.execute(f"UPDATE delegations SET {assignments}, version=version+1 WHERE id=?", (*fields.values(), delegation_id))
 
 
-def _executing_count(conn: sqlite3.Connection, exclude: str | None = None) -> int:
-    """Cards that are (or may be) executing, plus reservations: an uncertain create, and a
-    resume-type transition that is in flight or whose outcome is not known yet."""
-    return conn.execute(
-        "SELECT COUNT(*) FROM delegations d WHERE d.id IS NOT ? AND ("
-        " (d.status IN ('queued','running') AND d.card_id IS NOT NULL) OR d.status='reconcile'"
-        " OR (d.status NOT IN ('ended','cancelled','quarantined') AND EXISTS (SELECT 1 FROM delegation_messages m"
-        "     WHERE m.delegation_id=d.id AND m.status='sending' AND m.kind IN ('answer','revision','resume','approval'))))",
-        (exclude,)).fetchone()[0]
-
-
-def capacity(conn: sqlite3.Connection, cfg: Config, exclude: str | None = None) -> int:
-    return int(cfg.get("kanban.max_running", 1)) - _executing_count(conn, exclude)
-
-
 # --------------------------------------------------------------------------- lifecycle
 
 def _closing_message(conn: sqlite3.Connection, d: dict[str, Any], task_status: str, reason: str,
                      feedback_id: str | None) -> str | None:
-    """One closing message per delegation of a closed Task. A cancelled Task is always
-    cancelled, even with an accept queued (the cancel voids it when it is processed, or finds
-    it already carried out); an existing cancel is never replaced by an accept."""
+    """A closed Task stops its agent work: one cancel per active delegation. Closing never
+    accepts a delivery. An accept the user gave explicitly before closing a Task as done is
+    still carried out instead; a cancelled Task is cancelled even then (the cancel voids the
+    accept when it is processed, or finds it already carried out)."""
     closing = {r["kind"] for r in conn.execute(
         "SELECT kind FROM delegation_messages WHERE delegation_id=? AND kind IN ('accept','cancel')"
         " AND status IN ('pending','sending','sent','waiting_capacity')", (d["id"],))}
-    if "cancel" in closing or (closing and task_status != "cancelled"):
+    if "cancel" in closing or ("accept" in closing and task_status != "cancelled"):
         return None
-    kind = "accept" if d["status"] == "review" and task_status == "done" else "cancel"
-    add_message(conn, d["id"], kind, reason, feedback_id=feedback_id, cause="task_closed")
-    return kind
+    add_message(conn, d["id"], "cancel", reason, feedback_id=feedback_id, cause="task_closed")
+    return "cancel"
 
 
 def enforce_task_lifecycle(conn: sqlite3.Connection) -> dict[str, int]:
@@ -318,7 +328,7 @@ def _failed(stats: dict[str, Any], counter: str, error: str) -> None:
 
 def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str | None = None) -> dict[str, Any]:
     """Create the cards of new delegations (``only``: just that one, right after it was created)."""
-    stats: dict[str, Any] = {"submitted": 0, "linked": 0, "waiting_capacity": 0, "errors": 0, "quarantined": 0, "held": 0}
+    stats: dict[str, Any] = {"submitted": 0, "linked": 0, "errors": 0, "quarantined": 0, "held": 0}
     if held(conn):
         stats["held"] = conn.execute("SELECT COUNT(*) FROM delegations WHERE status IN ('pending_submit','reconcile')"
                                      ).fetchone()[0]
@@ -368,20 +378,19 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str 
                     _set(conn, d["id"], status="pending_submit", last_error=None)
                 stats["held"] += 1
                 continue
-            if capacity(conn, cfg, exclude=d["id"]) <= 0:
-                stats["waiting_capacity"] += 1
-                continue
             extra = [m["body"] for m in conn.execute(
                 "SELECT body FROM delegation_messages WHERE delegation_id=? AND kind='supplement' AND status='pending'"
                 " ORDER BY created_at", (d["id"],))]
-            body = card_body(d, task, _notion_url(conn, task), extra)
+            notes = conn.execute("SELECT notes_text FROM notion_pages WHERE entity_type='task' AND entity_id=?",
+                                 (task["id"],)).fetchone()
+            body = card_body(d, task, _notion_url(conn, task), extra, notes["notes_text"] if notes else None)
             with tx(conn):
                 _set(conn, d["id"], status="reconcile", submit_attempts=d["submit_attempts"] + 1)
             try:
                 card_id = kb.create(title=f"{d['title']} [{d['id']}]", body=body, idem_key=d["idem_key"],
                                     assignee=d.get("assignee"), tenant="todo-manager",
                                     workspace=cfg.get("kanban.workspace") or None,
-                                    max_retries=int(cfg.get("kanban.max_retries", 1)) or None)
+                                    max_retries=card_retries(cfg, d))
             except KanbanError as exc:
                 with tx(conn):
                     _set(conn, d["id"], status="reconcile" if exc.uncertain else "pending_submit",
@@ -566,13 +575,13 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
          block_reason=block_reason, block_event_id=block_event, pause_event_id=pause_event)
     if new_status != d["status"]:
         if new_status in ("queued", "running"):
-            _task_state(conn, d["id"], "in_progress", "agent", None)
+            _next_actor(conn, d["id"], "agent", None)
         elif new_status in ("blocked", "review"):
-            _task_state(conn, d["id"], "review", "me",
-                        i18n.t("dlg.needs_input" if new_status == "blocked" else "dlg.to_review"))
+            _next_actor(conn, d["id"], "me", i18n.t("dlg.needs_input" if new_status == "blocked" else "dlg.to_review"))
         elif new_status in ("ended", "cancelled") and not for_task_active_other(conn, d):
-            _task_state(conn, d["id"], "todo", "me",
-                        i18n.t("dlg.ended" if new_status == "ended" else "dlg.cancelled"))
+            note = ("dlg.cancelled" if new_status == "cancelled"
+                    else "dlg.to_review" if _latest_result(conn, d["id"]) else "dlg.ended")
+            _next_actor(conn, d["id"], "me", i18n.t(note))
         effects.task_push(conn, d["task_id"])
 
 
@@ -581,21 +590,23 @@ def _settle_approvals(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], 
     it did in this delivery); approvals not sent yet are void and their messages withdrawn."""
     conn.execute("UPDATE approvals SET outcome='reported' WHERE delegation_id=? AND consumed_at IS NOT NULL"
                  " AND outcome IS NULL", (d["id"],))
-    for a in conn.execute("SELECT a.*, m.id AS mid, m.status AS mstatus FROM approvals a LEFT JOIN delegation_messages m"
-                          " ON m.approval_id=a.id WHERE a.delegation_id=? AND a.delivery_id != ?"
-                          " AND a.consumed_at IS NULL AND a.revoked_at IS NULL", (d["id"], delivery_id)).fetchall():
+    for a in _unsent_approvals(conn, d["id"], besides=delivery_id):
         if a["mstatus"] == "sending":
-            continue  # in flight: its retry reconciles against the review event it was bound to
+            continue  # in flight: its retry reconciles against the card event it was bound to
         _void_approval(conn, d, a, "newer_version")
 
 
-def _void_approval(conn: sqlite3.Connection, d: dict[str, Any], a: sqlite3.Row, reason: str) -> None:
+def _void_approval(conn: sqlite3.Connection, d: dict[str, Any], a: sqlite3.Row, reason: str, **values: Any) -> None:
     conn.execute("UPDATE approvals SET revoked_at=COALESCE(revoked_at, ?) WHERE id=?", (clock.iso(), a["id"]))
     conn.execute("UPDATE delegation_messages SET status='superseded', error=? WHERE approval_id=?"
                  " AND status IN ('pending','waiting_capacity','sending')", (f"approval void: {reason}", a["id"]))
-    effects.task_comment(conn, d["task_id"], f"approval-void:{a['id']}",
-                         i18n.t("dlg.approval_void", action=a["action"], delivery=a["delivery_id"],
-                                reason=i18n.t(f"dlg.reason.{reason}")))
+    why = i18n.t(f"dlg.reason.{reason}", **values)
+    if a["answer_message_id"]:
+        seq = conn.execute("SELECT seq FROM deliveries WHERE id=?", (a["delivery_id"],)).fetchone()
+        text = i18n.t("dlg.approval_void_answer", action=a["action"], seq=seq[0] if seq else "?", reason=why)
+    else:
+        text = i18n.t("dlg.approval_void", action=a["action"], delivery=a["delivery_id"], reason=why)
+    effects.task_comment(conn, d["task_id"], f"approval-void:{a['id']}", text)
 
 
 def _hold_unknown_external_action(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], event: str,
@@ -621,27 +632,29 @@ def _hold_unknown_external_action(conn: sqlite3.Connection, cfg: Config, d: dict
         add_message(conn, d["id"], "pause", text, cause="approval_unknown")
 
 
-# Card events that end the run approvals were handed to: a result, or the run ending without one.
-HANDED_RUN_ENDS = ("review_requested", "completed") + RUN_ENDED_EVENTS
-
-
 def _handed_reopen(conn: sqlite3.Connection, a: sqlite3.Row, events: list[dict[str, Any]]) -> int | None:
-    """The card event that handed approval ``a`` to the worker: the first ``review_reopened``
-    after the review event of the version it approves (a review is reopened once)."""
-    row = conn.execute("SELECT source_event_id FROM deliveries WHERE id=?", (a["delivery_id"],)).fetchone()
+    """The card event that handed approval ``a`` to the worker: for an approval of a delivered
+    version, the first ``review_reopened`` after that version's review event (a review is
+    reopened once); for one given with an answer, the first unblock after the question."""
+    row = conn.execute("SELECT kind, source_event_id FROM deliveries WHERE id=?", (a["delivery_id"],)).fetchone()
     if row is None or row["source_event_id"] is None:
         return None
+    kinds = ("unblocked", "specified") if row["kind"] == "question" else ("review_reopened",)
     return min((int(e["id"]) for e in events
-                if e["kind"] == "review_reopened" and int(e["id"]) > int(row["source_event_id"])), default=None)
+                if e["kind"] in kinds and int(e["id"]) > int(row["source_event_id"])), default=None)
+
+
+# Card events that end the run approvals were handed to: a result, or the run ending without one
+# (a question is not a report: the worker may have acted before asking).
+HANDED_RUN_ENDS = ("review_requested", "completed") + RUN_ENDED_EVENTS
 
 
 def _handed_run_end(conn: sqlite3.Connection, d: dict[str, Any], a: sqlite3.Row, msg: dict[str, Any],
                     events: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The card event that ended the run approval ``a`` was handed to: the first result or run
-    end after the reopen of the approved version's review (the first ``review_reopened`` after
-    that version's review event: a review is reopened once) and after the approval's own comment.
-    Earlier runs and the approved version's own result come before it. None: not ended yet (or
-    the reopen is not among ``events``)."""
+    end after the event that handed it (``_handed_reopen``) and after the comment that carried
+    it. Earlier runs and the approved version's own result come before it. None: not ended yet
+    (or the handing event is not among ``events``)."""
     ordered = sorted(events, key=lambda e: int(e["id"]))
     reopen = _handed_reopen(conn, a, ordered)
     if reopen is None:
@@ -658,22 +671,26 @@ def _handed_run_end(conn: sqlite3.Connection, d: dict[str, Any], a: sqlite3.Row,
 
 def _settle_late(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], msg: dict[str, Any],
                  snap: dict[str, Any]) -> None:
-    """An approval confirmed as handed only now (the reopen's response was lost; a retry found
-    it on the card): the sync may already have read the end of its run - and moved its cursor
-    past it - while the approval did not count as handed yet. Settle it from the card's events
-    (``snap``: all of them, taken after that sync) as the sync would have; an end the sync has
-    not read yet is left to it."""
-    a = conn.execute("SELECT * FROM approvals WHERE id=?", (msg["approval_id"],)).fetchone()
-    if a is None or a["consumed_at"] is None or a["outcome"] is not None:
-        return
-    end = _handed_run_end(conn, d, a, msg, snap.get("events") or [])
-    cursor = conn.execute("SELECT event_cursor FROM delegations WHERE id=?", (d["id"],)).fetchone()[0]
-    if end is None or int(end["id"]) > int(cursor or 0):
-        return
-    if end["kind"] in RUN_ENDED_EVENTS:
-        _hold_unknown_external_action(conn, cfg, d, end["kind"], handed=[a])
+    """Approvals confirmed as handed only now (the response of the reopen or unblock that
+    carried them was lost; a retry found it on the card): the sync may already have read the
+    end of their run - and moved its cursor past it - while they did not count as handed yet.
+    Settle them from the card's events (``snap``: all of them, taken after that sync) as the
+    sync would have; an end the sync has not read yet is left to it."""
+    if msg["kind"] == "answer":
+        handed = answer_approvals(conn, msg["id"])
     else:
-        conn.execute("UPDATE approvals SET outcome='reported' WHERE id=? AND outcome IS NULL", (a["id"],))
+        handed = conn.execute("SELECT * FROM approvals WHERE id=?", (msg.get("approval_id"),)).fetchall()
+    cursor = conn.execute("SELECT event_cursor FROM delegations WHERE id=?", (d["id"],)).fetchone()[0]
+    for a in handed:
+        if a["consumed_at"] is None or a["outcome"] is not None:
+            continue
+        end = _handed_run_end(conn, d, a, msg, snap.get("events") or [])
+        if end is None or int(end["id"]) > int(cursor or 0):
+            continue
+        if end["kind"] in RUN_ENDED_EVENTS:
+            _hold_unknown_external_action(conn, cfg, d, end["kind"], handed=[a])
+        else:
+            conn.execute("UPDATE approvals SET outcome='reported' WHERE id=? AND outcome IS NULL", (a["id"],))
 
 
 def _open_approvals(conn: sqlite3.Connection, delegation_id: str) -> list[sqlite3.Row]:
@@ -708,6 +725,26 @@ def _settle_on_cancel(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], 
 def _accepted_by_us(conn: sqlite3.Connection, delegation_id: str) -> bool:
     return conn.execute("SELECT 1 FROM delegation_messages WHERE delegation_id=? AND kind IN ('accept','cancel')"
                         " AND status IN ('sending','sent')", (delegation_id,)).fetchone() is not None
+
+
+LABEL_ORDER = ("quarantined", "blocked", "review", "running", "queued", "paused")
+NEEDS_USER_LABELS = ("blocked", "review", "delivered")
+
+
+def task_label(conn: sqlite3.Connection, task_id: str) -> str | None:
+    """A Task's "Agent work": the most urgent state of its active delegations, else
+    "delivered" while its latest delegation ended with a result (the draft is the user's to
+    use; the Task stays open until the user closes it), else None."""
+    statuses = {"queued" if d["status"] in ("pending_submit", "reconcile") else d["status"]
+                for d in for_task(conn, task_id, active_only=True)}
+    for status in LABEL_ORDER:
+        if status in statuses:
+            return status
+    row = conn.execute("SELECT id, status FROM delegations WHERE task_id=? ORDER BY created_at DESC, rowid DESC"
+                       " LIMIT 1", (task_id,)).fetchone()
+    if row is not None and row["status"] == "ended" and _latest_result(conn, row["id"]) is not None:
+        return "delivered"
+    return None
 
 
 def for_task_active_other(conn: sqlite3.Connection, d: dict[str, Any]) -> bool:
@@ -811,14 +848,22 @@ def cancel_pending(conn: sqlite3.Connection, d: dict[str, Any]) -> bool:
 
 def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: str,
                 feedback_id: str | None = None, approval_id: str | None = None, cause: str | None = None,
-                delivery_id: str | None = None, op_key: str | None = None) -> str:
+                delivery_id: str | None = None, op_key: str | None = None,
+                approve: list[tuple[str, str]] | None = None) -> str:
     """Queue a message. Its target is fixed here and kept for every retry: an answer binds to
     the open question, accept/revision to ``delivery_id`` (the version the user replied to) or
     else the latest delivered version, resume to the latest pause. ``op_key`` (feedback id + op
     index) makes a retried op return its message while a second op of the same kind in the
-    same feedback gets its own; without it, one message per feedback item and kind."""
+    same feedback gets its own; without it, one message per feedback item and kind.
+    ``approve`` (answers only): external actions ``(action, detail)`` the user allows with this
+    answer; they go to the worker with it and are used at most once (``answer_approvals``)."""
     if kind not in MESSAGE_KINDS:
         raise DelegationError(f"invalid message kind {kind!r}")
+    if approve and kind != "answer":
+        raise DelegationError("approvals go with an answer to a question, or with `delegate approve` for a version")
+    unknown = action_names([a for a, _ in approve or []]) - KNOWN_ACTIONS
+    if unknown:
+        raise DelegationError(f"unknown actions {sorted(unknown)}; known: {sorted(KNOWN_ACTIONS)}")
     d = get(conn, delegation_id)
     if d is None:
         raise DelegationError(f"delegation {delegation_id} not found")
@@ -859,6 +904,13 @@ def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: s
                                  " AND status NOT IN ('superseded','failed') ORDER BY created_at DESC, rowid DESC LIMIT 1",
                                  (delegation_id,)).fetchone()
             target_message = pause["id"] if pause else None
+        question = None
+        if approve:
+            question = conn.execute("SELECT id FROM deliveries WHERE delegation_id=? AND kind='question'"
+                                    " AND source_event_id=?", (delegation_id, target_event)).fetchone() \
+                if target_event is not None else None
+            if question is None:
+                raise DelegationError("there is no open question to answer with an approval")
         conn.execute(
             "INSERT INTO delegation_messages(id, delegation_id, kind, feedback_id, body, requirement_version,"
             " target_block_seq, target_event_id, target_seq, target_message_id, approval_id, cause, status, created_at,"
@@ -869,11 +921,14 @@ def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: s
         if changes_requirement:
             _set(conn, delegation_id, requirement_version=requirement_version)
             # A substantive change voids approvals that have not gone out yet.
-            for a in conn.execute("SELECT a.*, m.status AS mstatus FROM approvals a LEFT JOIN delegation_messages m"
-                                  " ON m.approval_id=a.id WHERE a.delegation_id=? AND a.consumed_at IS NULL"
-                                  " AND a.revoked_at IS NULL", (delegation_id,)).fetchall():
+            for a in _unsent_approvals(conn, delegation_id):
                 if a["mstatus"] != "sending":
                     _void_approval(conn, d, a, "requirement_changed")
+        for action, detail in approve or []:
+            conn.execute("INSERT INTO approvals(id, delegation_id, delivery_id, action, detail, feedback_id, granted_at,"
+                         " answer_message_id) VALUES (?,?,?,?,?,?,?,?)",
+                         (ids.new_id("approval"), delegation_id, question["id"], action, detail or "", feedback_id,
+                          clock.iso(), mid))
         if kind == "pause":
             _set(conn, delegation_id, pause_requested=1)
         elif kind == "resume":
@@ -881,9 +936,25 @@ def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: s
     return mid
 
 
+def _unsent_approvals(conn: sqlite3.Connection, delegation_id: str, *, besides: str | None = None) -> list[sqlite3.Row]:
+    """Approvals not handed to the worker yet, with the status of the message that carries
+    them (its own approval message, or the answer it was given with)."""
+    return conn.execute(
+        "SELECT a.*, m.id AS mid, m.status AS mstatus FROM approvals a LEFT JOIN delegation_messages m"
+        " ON m.id = COALESCE(a.answer_message_id, (SELECT x.id FROM delegation_messages x WHERE x.approval_id=a.id))"
+        " WHERE a.delegation_id=? AND a.consumed_at IS NULL AND a.revoked_at IS NULL AND a.delivery_id IS NOT ?",
+        (delegation_id, besides)).fetchall()
+
+
+def answer_approvals(conn: sqlite3.Connection, message_id: str) -> list[sqlite3.Row]:
+    """The approvals given with an answer, still valid."""
+    return conn.execute("SELECT * FROM approvals WHERE answer_message_id=? AND revoked_at IS NULL"
+                        " ORDER BY granted_at, rowid", (message_id,)).fetchall()
+
+
 def on_task_closed(conn: sqlite3.Connection, task_id: str, status: str, reason: str,
                    feedback_id: str | None) -> list[str]:
-    """The user closed the task: accept a delivered delegation (done) and cancel the others."""
+    """The user closed the task: its active agent work is cancelled (``_closing_message``)."""
     notes = []
     for d in for_task(conn, task_id, active_only=True):
         kind = _closing_message(conn, d, status, reason, feedback_id)
@@ -1024,15 +1095,12 @@ def _parked_in_review(events: list[dict[str, Any]], comment_event: int) -> int |
 def _hold_back(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], msg: dict[str, Any],
                attempted: bool) -> str | None:
     """A transition that would start the card again waits while the user paused the delegation
-    or no execution slot is free (an attempted one already holds its slot)."""
+    (status ``waiting_capacity``, error "paused by user": the name is kept from the schema).
+    How many cards run at once is Hermes' scheduling, not ours."""
     if d["pause_requested"] and msg["kind"] != "resume":
         with tx(conn):
             conn.execute("UPDATE delegation_messages SET status='waiting_capacity', error='paused by user' WHERE id=?",
                          (msg["id"],))
-        return "waiting"
-    if not attempted and capacity(conn, cfg, exclude=d["id"]) <= 0:
-        with tx(conn):
-            conn.execute("UPDATE delegation_messages SET status='waiting_capacity' WHERE id=?", (msg["id"],))
         return "waiting"
     return None
 
@@ -1048,7 +1116,7 @@ def send_messages(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str
         stats["held"] = conn.execute("SELECT COUNT(*) FROM delegation_messages WHERE status IN"
                                      " ('pending','sending','waiting_capacity') AND kind != 'requirement'").fetchone()[0]
         return stats
-    # Same lock as submission: capacity reservations and card links are decided one at a time.
+    # Same lock as submission: card links and transitions are decided one at a time.
     with file_lock(lock_path(cfg.home, "kanban-submit"), blocking=True, timeout=60):
         enforce_task_lifecycle(conn)
         rows = conn.execute("SELECT * FROM delegation_messages WHERE status IN ('pending','sending','waiting_capacity')"
@@ -1087,9 +1155,13 @@ def _finish(conn: sqlite3.Connection, mid: str, status: str, error: str | None =
 
 
 def _unused(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str, Any], reason: str, **values: Any) -> str:
-    """The message could not be applied to the state it was meant for: say so, never drop it silently."""
+    """The message could not be applied to the state it was meant for: say so, never drop it
+    silently. Approvals given with an answer are void with it."""
     _finish(conn, msg["id"], "superseded", reason)
     with tx(conn):
+        for a in answer_approvals(conn, msg["id"]):
+            if a["consumed_at"] is None:
+                _void_approval(conn, d, a, reason, **values)
         effects.task_comment(conn, d["task_id"], f"unused:{msg['id']}", i18n.t(
             "dlg.msg_unused", kind=i18n.t(f"dlg.msg.{msg['kind']}"), title=d["title"],
             reason=i18n.t(f"dlg.reason.{reason}", **values), body=(msg["body"] or "")[:300]))
@@ -1124,7 +1196,7 @@ def _cancel_unsubmitted(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: di
         conn.execute("UPDATE delegation_messages SET status='sent', sent_at=? WHERE id=?", (clock.iso(), msg["id"]))
         _set(conn, d["id"], status="cancelled", cancel_state="confirmed")
         if not for_task_active_other(conn, d):
-            _task_state(conn, d["id"], "todo", "me", i18n.t("dlg.cancelled"))
+            _next_actor(conn, d["id"], "me", i18n.t("dlg.cancelled"))
     return "sent"
 
 
@@ -1214,7 +1286,7 @@ def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any
             return "sent"
         snap = kb.snapshot(d["card_id"], after_event=0)
         _sending(conn, mid)
-        _post_comment(conn, kb, d, msg, f"[{i18n.t('dlg.msg.' + kind)}] {msg['body']}", snap)
+        _post_comment(conn, kb, d, msg, _message_text(conn, msg), snap)
         _finish(conn, mid, "sent")
         return "sent"
 
@@ -1238,8 +1310,8 @@ def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any
         if not ours:
             return _unused(conn, d, msg, "answered_elsewhere")
         if kind != "resume" and _has_marker(snap, mid):
-            _post_comment(conn, kb, d, msg, f"[{i18n.t('dlg.msg.' + kind)}] {msg['body']}", snap)  # its place
-        return _sent_transition(conn, d, msg, reserved=False)
+            _post_comment(conn, kb, d, msg, _message_text(conn, msg), snap)  # records its place
+        return _sent_transition(conn, d, msg, requeued=False, cfg=cfg, snap=snap)
     if verdict == "mismatch":
         return _unused(conn, d, msg, "newer_question" if kind in ("answer", "resume") else "card_moved",
                        status=snap["task"]["status"])
@@ -1248,8 +1320,19 @@ def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any
         return held_back
     _sending(conn, mid)
     if kind != "resume":
-        _post_comment(conn, kb, d, msg, f"[{i18n.t('dlg.msg.' + kind)}] {msg['body']}", snap)
+        _post_comment(conn, kb, d, msg, _message_text(conn, msg), snap)
     return _apply_transition(conn, cfg, kb, d, msg, action, anchor)
+
+
+def _message_text(conn: sqlite3.Connection, msg: dict[str, Any]) -> str:
+    """The comment for a message; an answer carries the approvals given with it, one line each
+    (built when it is posted, so a voided approval is not in it)."""
+    text = f"[{i18n.t('dlg.msg.' + msg['kind'])}] {msg['body']}"
+    if msg["kind"] == "answer":
+        seq = msg.get("target_block_seq")
+        text += "".join(f"\nAPPROVED {a['action']} for question #{seq}. {a['detail'] or ''}".rstrip()
+                        for a in answer_approvals(conn, msg["id"]))
+    return text
 
 
 def _apply_transition(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any], msg: dict[str, Any],
@@ -1259,7 +1342,7 @@ def _apply_transition(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict
     if result["outcome"] == "mismatch":
         return _unused(conn, d, msg, "newer_question" if kind in ("answer", "resume") else "card_moved",
                        status=result["status"])
-    sent = _sent_transition(conn, d, msg, reserved=result["outcome"] in ("done", "raced"))
+    sent = _sent_transition(conn, d, msg, requeued=result["outcome"] in ("done", "raced"))
     if result["outcome"] == "raced":
         _raced(conn, cfg, d, msg)
     return sent
@@ -1349,7 +1432,7 @@ def _send_approvals(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[s
             if m["status"] == "sending" or _has_marker(snap, m["id"]):
                 if _has_marker(snap, m["id"]):                    # records its place; nothing is posted
                     _post_comment(conn, kb, d, m, f"[{i18n.t('dlg.msg.approval')}] {m['body']}", snap)
-                _sent_transition(conn, d, m, reserved=False, cfg=cfg, snap=snap)
+                _sent_transition(conn, d, m, requeued=False, cfg=cfg, snap=snap)
             else:
                 _refuse_approval(conn, d, m, "sent_back_without_it")
         return "sent"
@@ -1358,11 +1441,11 @@ def _send_approvals(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[s
         for m in group:
             _refuse_approval(conn, d, m, "newer_version" if newer else "not_in_review")
         return "superseded"
-    if d["pause_requested"] or (not attempted and capacity(conn, cfg, exclude=d["id"]) <= 0):
+    if d["pause_requested"]:
         with tx(conn):
             for m in group:
-                conn.execute("UPDATE delegation_messages SET status='waiting_capacity', error=? WHERE id=?",
-                             ("paused by user" if d["pause_requested"] else None, m["id"]))
+                conn.execute("UPDATE delegation_messages SET status='waiting_capacity', error='paused by user'"
+                             " WHERE id=?", (m["id"],))
         return "waiting"
     for m in group:
         _sending(conn, m["id"])
@@ -1375,13 +1458,13 @@ def _send_approvals(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[s
             _refuse_approval(conn, d, m, "not_in_review")
         return "superseded"
     for n, m in enumerate(group):
-        _sent_transition(conn, d, m, reserved=n == 0 and result["outcome"] in ("done", "raced"), cfg=cfg, snap=snap)
+        _sent_transition(conn, d, m, requeued=n == 0 and result["outcome"] in ("done", "raced"), cfg=cfg, snap=snap)
     if result["outcome"] == "raced":
         _raced(conn, cfg, d, msg)
     return "sent"
 
 
-def _sent_transition(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str, Any], reserved: bool,
+def _sent_transition(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str, Any], requeued: bool,
                      cfg: Config | None = None, snap: dict[str, Any] | None = None) -> str:
     """``cfg``/``snap`` (all card events, taken after the last sync): an approval is settled
     from them in the same transaction when its run already ended (``_settle_late``)."""
@@ -1391,11 +1474,15 @@ def _sent_transition(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str,
         if msg["kind"] == "approval" and msg.get("approval_id"):
             conn.execute("UPDATE approvals SET consumed_at=COALESCE(consumed_at, ?) WHERE id=?",
                          (clock.iso(), msg["approval_id"]))
-            if cfg is not None and snap is not None:
-                _settle_late(conn, cfg, d, msg, snap)
-        if reserved:
-            # The card is back in the pool: count it against max_running until the next sync.
+        elif msg["kind"] == "answer":
+            conn.execute("UPDATE approvals SET consumed_at=COALESCE(consumed_at, ?) WHERE answer_message_id=?"
+                         " AND revoked_at IS NULL", (clock.iso(), msg["id"]))
+        if msg["kind"] in ("approval", "answer") and cfg is not None and snap is not None:
+            _settle_late(conn, cfg, d, msg, snap)
+        if requeued:
+            # The card is back in Hermes' queue (shown as such until the next sync reads it).
             _set(conn, d["id"], status="queued")
+            _next_actor(conn, d["id"], "agent", None)
     return "sent"
 
 
@@ -1444,16 +1531,15 @@ def _settle_for_cancel(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dic
             _accepted(conn, d, m, snap["task"]["status"])
             accepted = True
         else:
-            _sent_transition(conn, d, m, reserved=False, cfg=cfg, snap=snap)
+            _sent_transition(conn, d, m, requeued=False, cfg=cfg, snap=snap)
     if voided:
         items = "; ".join(f"{i18n.t('dlg.msg.' + m['kind'])}: {(m['body'] or '')[:120]}" for m in voided)
         with tx(conn):
             for m in voided:
                 conn.execute("UPDATE delegation_messages SET status='superseded', error=? WHERE id=?",
                              (f"void: cancelled ({cancel['id']}) before it was carried out", m["id"]))
-                if m.get("approval_id"):
-                    conn.execute("UPDATE approvals SET revoked_at=COALESCE(revoked_at, ?) WHERE id=?",
-                                 (clock.iso(), m["approval_id"]))
+                conn.execute("UPDATE approvals SET revoked_at=COALESCE(revoked_at, ?) WHERE (id=? OR"
+                             " answer_message_id=?) AND consumed_at IS NULL", (clock.iso(), m.get("approval_id"), m["id"]))
             effects.task_comment(conn, d["task_id"], f"cancel-voided:{cancel['id']}:{voided[0]['id']}",
                                  i18n.t("dlg.cancel_voided", title=d["title"], items=items))
     return not accepted
@@ -1489,7 +1575,7 @@ def _send_cancel(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str,
             text = i18n.t("dlg.cancel_unconfirmed", title=d["title"], detail=detail or "-")
             effects.task_comment(conn, d["task_id"], f"cancel-unconfirmed:{d['id']}", text)
         if not for_task_active_other(conn, d):
-            _task_state(conn, d["id"], "todo", "me", i18n.t("dlg.cancelled"))
+            _next_actor(conn, d["id"], "me", i18n.t("dlg.cancelled"))
     return "sent"
 
 
@@ -1539,7 +1625,7 @@ def _accepted(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str, Any], 
                      (clock.iso(), msg["id"]))
         _set(conn, d["id"], status="ended", card_status=card_status)
         if not for_task_active_other(conn, d):
-            _task_state(conn, d["id"], "todo", "me", i18n.t("dlg.accepted"))
+            _next_actor(conn, d["id"], "me", i18n.t("dlg.accepted"))
 
 
 def summary_line(d: dict[str, Any]) -> str:

@@ -29,7 +29,7 @@ _LEADING = re.compile(r"^(\s*)([#>+-]|\d+[.)])")
 def edit_unread(last_edited_time: str | None, last_edited_by: str | None, body_read_at: str | None,
                 bot_user_id: str | None) -> bool:
     """Whether the page's last edit (not ours) may postdate our last body read. The one check
-    for re-reading a body, claiming body_edit/page_notes items and applying them. No timestamp
+    for re-reading a body, claiming body_edit items and applying them. No timestamp
     precision is assumed: a stamp on a whole minute (Notion rounds edit times) may stand for any
     moment of that minute, so only a read after the end of the minute covers it; a stamp with
     seconds is taken as precise to the second."""
