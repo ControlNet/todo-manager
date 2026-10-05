@@ -390,3 +390,56 @@ class HermesKanbanIntegration(WorkspaceCase):
         self.assertEqual(a["outcome"], "reported")
         self.assertEqual(delegation.get(self.conn, did)["pause_requested"], 0)
         self.assertEqual(len(delegation.deliveries(self.conn, did)), 2)
+
+    # ----- a cancel settles approvals already handed to a run -----
+
+    def handed_then(self, worker):
+        """v1 delivered, an approval for it delivered normally (the review reopened on the
+        installed Kanban), then the simulated worker does ``worker`` and the user cancels before
+        any sync read it."""
+        did, card = self.started()
+        self.assertTrue(self.sim("review", task_id=card, summary="v1", metadata={"deliverable_markdown": "v1"}))
+        self.tick()
+        v1 = delegation.deliveries(self.conn, did)[0]["id"]
+        aid = delegation.record_approval(self.conn, did, v1, "send_email", "发给 Alice", "fbk_a")
+        self.sync_all()
+        self.assertEqual(self.conn.execute("SELECT consumed_at FROM approvals WHERE id=?", (aid,)).fetchone()[0]
+                         is not None, True)
+        worker(card)
+        delegation.add_message(self.conn, did, "cancel", "不用做了", feedback_id="fbk_c")
+        self.sync_all()
+        self.sync_all()
+        self.assertEqual(self.sim("status", task_id=card)["status"], "archived")
+        self.assertEqual(delegation.get(self.conn, did)["status"], "cancelled")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM delegation_messages WHERE delegation_id=?"
+                                           " AND kind='pause'", (did,)).fetchone()[0], 0)
+        [archived] = self.events(card, "archived")
+        return card, archived, self.conn.execute("SELECT outcome FROM approvals WHERE id=?", (aid,)).fetchone()[0]
+
+    def test_cancel_after_an_unread_crash_settles_the_approval_unknown(self):
+        def crash(card):
+            self.assertTrue(self.sim("claim", task_id=card))
+            self.assertTrue(self.sim("fail", task_id=card))
+        _, _, outcome = self.handed_then(crash)
+        self.assertEqual(outcome, "unknown")
+
+    def test_cancel_after_an_unread_result_settles_the_approval_reported(self):
+        def deliver(card):
+            self.assertTrue(self.sim("claim", task_id=card))
+            self.assertTrue(self.sim("review", task_id=card, summary="v2", metadata={"deliverable_markdown": "v2"}))
+        _, _, outcome = self.handed_then(deliver)
+        self.assertEqual(outcome, "reported")
+
+    def test_cancel_while_the_run_is_going_settles_the_approval_unknown(self):
+        card, archived, outcome = self.handed_then(lambda card: self.assertTrue(self.sim("claim", task_id=card)))
+        # Hermes closes the active run as reclaimed and names it on the archived event; no run
+        # end event of its own: the archive tells nothing about what the run did.
+        runs = self.kb.snapshot(card)["runs"]
+        self.assertEqual(archived["run_id"], runs[-1]["id"])
+        self.assertEqual(runs[-1]["outcome"], "reclaimed")
+        self.assertEqual(outcome, "unknown")
+
+    def test_cancel_before_any_run_claimed_the_card_is_not_run(self):
+        card, archived, outcome = self.handed_then(lambda card: None)
+        self.assertIsNone(archived["run_id"], "no run was active")
+        self.assertEqual(outcome, "not_run")

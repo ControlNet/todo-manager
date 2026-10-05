@@ -538,8 +538,8 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
                     announce(dlv, i18n.t("dlg.failed_retry", title=d["title"], reason=block_reason))
             else:
                 _set(conn, d["id"], last_error=f"{kind}: {payload.get('error') or payload.get('reason') or ''}"[:500])
-            if not quiet:
-                _hold_unknown_external_action(conn, cfg, d, kind)
+            # Also while a cancel is pending: a cancel does not show the approved action was not done.
+            _hold_unknown_external_action(conn, cfg, d, kind)
         elif kind == "completed" and _accepted_by_us(conn, d["id"]):
             continue
         elif kind in ("review_requested", "completed"):
@@ -605,25 +605,38 @@ def _hold_unknown_external_action(conn: sqlite3.Connection, cfg: Config, d: dict
                                   handed: list[sqlite3.Row] | None = None) -> None:
     """A run that was handed an approval ended without reporting back: the external action
     may or may not have happened. Pause the card so it is not retried automatically, and ask.
-    ``handed``: the approvals that run had (default: every handed one not settled yet)."""
+    ``handed``: the approvals that run had (default: every handed one not settled yet). A
+    delegation that is being cancelled or has ended is not paused: nothing runs it again."""
     if handed is None:
         handed = conn.execute("SELECT * FROM approvals WHERE delegation_id=? AND consumed_at IS NOT NULL"
                               " AND outcome IS NULL ORDER BY consumed_at, rowid", (d["id"],)).fetchall()
     if not handed:
         return
+    now = get(conn, d["id"])               # a pause queued meanwhile (by the user or for another approval) holds it
+    stopped = now["status"] in ("ended", "cancelled") or cancel_pending(conn, now)
     text = ""
     for a in handed:                       # approvals of one version go out to the same run
         conn.execute("UPDATE approvals SET outcome='unknown' WHERE id=? AND outcome IS NULL", (a["id"],))
-        text = i18n.t("dlg.approval_unknown", action=a["action"], title=d["title"], event=event)
+        text = i18n.t("dlg.approval_unknown_stopped" if stopped else "dlg.approval_unknown",
+                      action=a["action"], title=d["title"], event=event)
         effects.task_comment(conn, d["task_id"], f"approval-unknown:{a['id']}", text)
         effects.notify(conn, cfg, f"approval-unknown:{a['id']}", text, task_id=d["task_id"])
-    now = get(conn, d["id"])               # a pause queued meanwhile (by the user or for another approval) holds it
-    if not now["pause_requested"] and now["status"] not in ("ended", "cancelled") and not cancel_pending(conn, now):
+    if not now["pause_requested"] and not stopped:
         add_message(conn, d["id"], "pause", text, cause="approval_unknown")
 
 
 # Card events that end the run approvals were handed to: a result, or the run ending without one.
 HANDED_RUN_ENDS = ("review_requested", "completed") + RUN_ENDED_EVENTS
+
+
+def _handed_reopen(conn: sqlite3.Connection, a: sqlite3.Row, events: list[dict[str, Any]]) -> int | None:
+    """The card event that handed approval ``a`` to the worker: the first ``review_reopened``
+    after the review event of the version it approves (a review is reopened once)."""
+    row = conn.execute("SELECT source_event_id FROM deliveries WHERE id=?", (a["delivery_id"],)).fetchone()
+    if row is None or row["source_event_id"] is None:
+        return None
+    return min((int(e["id"]) for e in events
+                if e["kind"] == "review_reopened" and int(e["id"]) > int(row["source_event_id"])), default=None)
 
 
 def _handed_run_end(conn: sqlite3.Connection, d: dict[str, Any], a: sqlite3.Row, msg: dict[str, Any],
@@ -633,12 +646,8 @@ def _handed_run_end(conn: sqlite3.Connection, d: dict[str, Any], a: sqlite3.Row,
     that version's review event: a review is reopened once) and after the approval's own comment.
     Earlier runs and the approved version's own result come before it. None: not ended yet (or
     the reopen is not among ``events``)."""
-    row = conn.execute("SELECT source_event_id FROM deliveries WHERE id=?", (a["delivery_id"],)).fetchone()
-    if row is None or row["source_event_id"] is None:
-        return None
     ordered = sorted(events, key=lambda e: int(e["id"]))
-    reopen = next((int(e["id"]) for e in ordered
-                   if e["kind"] == "review_reopened" and int(e["id"]) > int(row["source_event_id"])), None)
+    reopen = _handed_reopen(conn, a, ordered)
     if reopen is None:
         return None
     start = max(reopen, int(msg.get("card_event_id") or 0))
@@ -669,6 +678,35 @@ def _settle_late(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], msg: 
         _hold_unknown_external_action(conn, cfg, d, end["kind"], handed=[a])
     else:
         conn.execute("UPDATE approvals SET outcome='reported' WHERE id=? AND outcome IS NULL", (a["id"],))
+
+
+def _open_approvals(conn: sqlite3.Connection, delegation_id: str) -> list[sqlite3.Row]:
+    """Approvals handed to a run whose outcome is not known yet."""
+    return conn.execute("SELECT a.*, m.card_event_id FROM approvals a LEFT JOIN delegation_messages m"
+                        " ON m.approval_id=a.id AND m.kind='approval' WHERE a.delegation_id=?"
+                        " AND a.consumed_at IS NOT NULL AND a.outcome IS NULL ORDER BY a.consumed_at, a.rowid",
+                        (delegation_id,)).fetchall()
+
+
+def _settle_on_cancel(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], events: list[dict[str, Any]]) -> None:
+    """The card was archived and is not synced again: settle every approval handed to a run
+    whose outcome is still open, from all of the card's events (``events``, read after the
+    archive, whether or not the sync cursor covers them). A result of the run it went to ->
+    reported; that run ended without one, or was still going or waiting for an answer when the
+    card was archived -> unknown (archiving does not show the action was not done; the user is
+    told, nothing is paused or retried); no run started after it reached the card (Hermes claims
+    a card before it starts a worker) -> not_run."""
+    for a in _open_approvals(conn, d["id"]):
+        end = _handed_run_end(conn, d, a, {"card_event_id": a["card_event_id"]}, events)
+        if end is not None and end["kind"] not in RUN_ENDED_EVENTS:
+            conn.execute("UPDATE approvals SET outcome='reported' WHERE id=? AND outcome IS NULL", (a["id"],))
+            continue
+        reopen = _handed_reopen(conn, a, events)
+        if end is None and reopen is not None and not any(
+                e["kind"] == "claimed" and int(e["id"]) > reopen for e in events):
+            conn.execute("UPDATE approvals SET outcome='not_run' WHERE id=? AND outcome IS NULL", (a["id"],))
+            continue
+        _hold_unknown_external_action(conn, cfg, d, end["kind"] if end is not None else "archived", handed=[a])
 
 
 def _accepted_by_us(conn: sqlite3.Connection, delegation_id: str) -> bool:
@@ -1437,12 +1475,16 @@ def _send_cancel(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str,
     # Whatever the card did before the archive is kept as history; it changes nothing now.
     late = {"deliveries": 0, "questions": 0, "failures": 0}
     try:
-        snap = kb.snapshot(d["card_id"], after_event=d["event_cursor"])
+        snap = kb.snapshot(d["card_id"], after_event=0)
     except KanbanError:
+        if _open_approvals(conn, d["id"]):
+            raise     # what their run did is on the card: finished by the retry (the archive is idempotent)
         snap = None
     with tx(conn):
         if snap is not None:
-            _apply_snapshot(conn, cfg, d, snap, late, quiet=True)
+            _settle_on_cancel(conn, cfg, d, snap["events"])      # the cancel is still pending: nothing is paused
+            unread = [e for e in snap["events"] if int(e["id"]) > int(d["event_cursor"] or 0)]
+            _apply_snapshot(conn, cfg, d, {**snap, "events": unread}, late, quiet=True)
         conn.execute("UPDATE delegation_messages SET status='sent', sent_at=?, error=NULL WHERE id=?",
                      (clock.iso(), msg["id"]))
         _set(conn, d["id"], status="cancelled", card_status=result["status"],

@@ -18,6 +18,7 @@
   "body.when": " ({when})",
   "dlg.accepted": "Agent delivery accepted",
   "dlg.approval_unknown": "⚠️ The approved external action {action} ({title}) may or may not have happened: the run ended with {event} before reporting back. Paused, no automatic retry; check whether it was done, then resume or cancel.",
+  "dlg.approval_unknown_stopped": "⚠️ The approved external action {action} ({title}) may or may not have happened: the run ended with {event} before reporting back, and the delegation was stopped. Nothing is retried; check whether it was done.",
   "dlg.approval_void": "⚠️ Approval of {action} for delivery {delivery} is void ({reason}); approve the latest version again if still wanted.",
   "dlg.assigned": "Delegated to Agent: {title}",
   "dlg.cancel_unconfirmed": "⚠️ \"{title}\" is cancelled, but the worker process could not be confirmed as stopped ({detail}); please check it.",

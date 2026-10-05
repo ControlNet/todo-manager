@@ -18,6 +18,7 @@
   "body.when": "（{when}）",
   "dlg.accepted": "Agent 交付已验收",
   "dlg.approval_unknown": "⚠️ 已批准的外部动作 {action}（{title}）结果未知：执行在回报前以 {event} 结束。已暂停，不会自动重试；请先确认它是否已经完成，再决定继续或取消。",
+  "dlg.approval_unknown_stopped": "⚠️ 已批准的外部动作 {action}（{title}）结果未知：执行在回报前以 {event} 结束，委派已停止，不会重试；请确认它是否已经完成。",
   "dlg.approval_void": "⚠️ 对交付 {delivery} 的 {action} 批准已失效（{reason}）；如仍需要，请对最新版本重新批准。",
   "dlg.assigned": "委派给 Agent：{title}",
   "dlg.cancel_unconfirmed": "⚠️ “{title}”已取消，但无法确认 worker 进程已经停止（{detail}），请检查。",
