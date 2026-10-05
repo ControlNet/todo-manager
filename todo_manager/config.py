@@ -77,7 +77,7 @@ DEFAULTS: dict[str, Any] = {
         "quiet_minutes": 10,  # PROPOSED
         "min_wake_interval_minutes": 60,  # PROPOSED
         "overlap_minutes": 30,
-        "bot_logins": ["dependabot[bot]", "github-actions[bot]", "renovate[bot]", "codecov[bot]"],
+        "bot_logins": [],  # accounts GitHub does not mark as bots (it marks apps: type Bot, "<name>[bot]")
     },
     "commits": {
         "enabled": False,

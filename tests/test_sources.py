@@ -12,7 +12,7 @@ from todo_manager import clock, gate_intake, store
 from todo_manager.net import HttpError
 from todo_manager.sources.base import (FetchResult, Item, SourceError, get_cursor, item_body, persist_fetch,
                                       record_fetch_error)
-from todo_manager.sources.github import GitHubNotificationSource, GitHubRepoSource
+from todo_manager.sources.github import CommitSource, GitHubNotificationSource, GitHubRepoSource
 from todo_manager.sources.gmail import GmailSource
 from todo_manager.sources.slack import SlackDirectory, SlackSource
 from tests.helpers import WorkspaceCase
@@ -114,7 +114,7 @@ class GitHubNotificationTests(WorkspaceCase):
 
     def fetch(self, notes, objects):
         """The notification items (context about the matter is covered in test_github_context)."""
-        src = GitHubNotificationSource(FakeGitHub(notes, objects), set(), ["me-gh"], bot_logins=["dependabot[bot]"])
+        src = GitHubNotificationSource(FakeGitHub(notes, objects), set(), ["me-gh"])
         return [i for i in src.fetch(None).items if i.kind == "notification"]
 
     def test_own_merged_pr_is_marked_as_mine_with_its_state(self):
@@ -183,6 +183,44 @@ class GitHubNotificationTests(WorkspaceCase):
         pr = {"user": {"login": "dependabot[bot]", "type": "Bot"}, "state": "open", "merged": False, "body": "bump"}
         [item] = self.fetch([notification("n3", "author", self.PR, self.PR)], {"repos/octo/repo/pulls/7": pr})
         self.assertEqual(item.route, "context")
+
+
+class GitHubBotTests(WorkspaceCase):
+    """GitHub marks app accounts itself (``type: "Bot"``, ``<name>[bot]`` logins), so no bot
+    names are configured; ``github.bot_logins`` only adds accounts GitHub does not mark."""
+
+    def event_route(self, actor, bot_logins=()):
+        now = clock.iso()
+        issue = {"number": 7, "id": 70, "pull_request": {}, "user": {"login": "me-gh"}, "state": "open",
+                 "title": "Loader", "html_url": "https://github.com/octo/repo/pull/7",
+                 "created_at": "2026-01-01T00:00:00Z", "comments": 0}
+        events = [{"id": 2, "event": "review_requested", "actor": actor, "created_at": now,
+                   "requested_reviewer": {"login": "me-gh"}}]
+        client = FakeGitHub([], {}, pages={"repos/octo/repo/issues": [issue], "repos/octo/repo/issues/7/events": events})
+        [item] = [i for i in GitHubRepoSource(client, "octo/repo", ["me-gh"], list(bot_logins)).fetch(None).items
+                  if i.kind == "event"]
+        return item.route
+
+    def commit_route(self, author, bot_logins=()):
+        commit = {"sha": "abc", "author": author, "commit": {"author": {"name": "x"}, "message": "bump"}}
+        client = FakeGitHub([], {}, pages={"repos/octo/repo/commits": [commit]})
+        [item] = CommitSource(client, "octo/repo", list(bot_logins)).fetch(None).items
+        return item.route
+
+    def test_no_bot_names_are_configured_by_default(self):
+        self.assertEqual(self.cfg.get("github.bot_logins"), [])
+
+    def test_an_app_login_is_a_bot_without_configuration(self):
+        self.assertEqual(self.event_route({"login": "codecov[bot]"}), "context")
+        self.assertEqual(self.event_route({"login": "bob"}), "batch")
+
+    def test_a_bot_account_commit_is_context(self):
+        self.assertEqual(self.commit_route({"login": "release-app", "type": "Bot"}), "context")
+        self.assertEqual(self.commit_route({"login": "bob", "type": "User"}), "digest")
+
+    def test_a_configured_machine_user_is_a_bot(self):
+        self.assertEqual(self.event_route({"login": "ci-machine", "type": "User"}, ["ci-machine"]), "context")
+        self.assertEqual(self.commit_route({"login": "ci-machine", "type": "User"}, ["ci-machine"]), "context")
 
 
 class SlackAdapterTests(WorkspaceCase):

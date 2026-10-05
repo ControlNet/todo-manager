@@ -110,6 +110,13 @@ class GitHubClient:
         raise SourceError(f"pagination limit reached for {path}; refusing to truncate silently")
 
 
+def is_bot(user: dict[str, Any] | None, extra: set[str]) -> bool:
+    """GitHub marks app accounts itself (``type: "Bot"``, ``<name>[bot]`` logins); ``extra``
+    (``github.bot_logins``, lower case) adds accounts it does not mark, e.g. a machine user."""
+    login = ((user or {}).get("login") or "").lower()
+    return (user or {}).get("type") == "Bot" or login.endswith("[bot]") or login in extra
+
+
 def _since(cursor: str | None, lookback_days: int) -> str:
     if cursor:
         return cursor
@@ -209,12 +216,12 @@ class GitHubRepoSource:
     def _item(self, number: int, external_id: str, kind: str, user: dict[str, Any] | None, at: str, body: str,
               title: str, url: str, version: str = "", meta: dict[str, Any] | None = None) -> Item:
         login = (user or {}).get("login", "") or ""
-        is_bot = login.lower() in self.bots or (user or {}).get("type") == "Bot"
+        bot = is_bot(user, self.bots)
         key = f"github:{self.repo.lower()}#{number}"
         return Item(source="github", account=self.repo.lower(), external_id=external_id, version=version, kind=kind,
                     conversation_key=key, thread_key=key, occurred_at=_gh_time(at), author=login,
                     author_is_me=login.lower() in self.me, title=title, url=url, body=body or "",
-                    route="context" if is_bot else "batch",
+                    route="context" if bot else "batch",
                     meta={"number": number, **(meta or {}), "github_event": event_identity(external_id, kind)})
 
     def fetch(self, cursor: str | None, last_success_at: str | None = None) -> FetchResult:
@@ -348,7 +355,7 @@ class GitHubNotificationSource:
                 state = "merged"
             actor = (latest or {}).get("user") or {}
             login = actor.get("login") or ""
-            is_bot = login.lower() in self.bots or actor.get("type") == "Bot" or login.lower().endswith("[bot]")
+            bot = is_bot(actor, self.bots)
             body = (latest or {}).get("body") or ""
             # My own PR merged/closed with no newer comment: news only for a task still open about it.
             own_pr_closed = ("/pulls/" in url and opener.lower() in self.me and state in ("merged", "closed")
@@ -372,7 +379,7 @@ class GitHubNotificationSource:
                               thread_key=key, occurred_at=_gh_time(note.get("updated_at", clock.iso())),
                               author=login or None, author_is_me=login.lower() in self.me,
                               title=title, url=html_url,
-                              route="context" if is_bot else "if_open_task" if own_pr_closed else "batch",
+                              route="context" if bot else "if_open_task" if own_pr_closed else "batch",
                               body=f"[reason: {note.get('reason')}; state: {state}; opened by {opener}]{gaps}\n{body}",
                               meta=meta))
             if thread:
@@ -455,8 +462,7 @@ class GitHubNotificationSource:
         return found
 
     def _is_bot(self, user: dict[str, Any] | None) -> bool:
-        login = ((user or {}).get("login") or "").lower()
-        return login in self.bots or (user or {}).get("type") == "Bot" or login.endswith("[bot]")
+        return is_bot(user, self.bots)
 
     def _get(self, api_url: str, what: str = "", unavailable: list[str] | None = None) -> dict[str, Any] | None:
         """404/410 (deleted or no longer accessible) is ``None`` and noted in ``unavailable``; any
@@ -496,13 +502,13 @@ class CommitSource:
         for c in commits:
             author = (c.get("author") or {}).get("login") or (c.get("commit", {}).get("author") or {}).get("name", "")
             message = c.get("commit", {}).get("message", "")
-            is_bot = author.lower() in self.bots or author.lower().endswith("[bot]")
+            bot = is_bot(c.get("author") or {"login": author}, self.bots)
             items.append(Item(source="commit", account=self.repo.lower(), external_id=c["sha"], kind="commit",
                               conversation_key=f"repo:{self.repo.lower()}", thread_key=None,
                               occurred_at=_gh_time((c.get("commit", {}).get("committer") or {}).get("date", clock.iso())),
                               author=author, title=message.splitlines()[0][:200] if message else c["sha"][:7],
                               url=c.get("html_url"), body=message[:4000],
-                              route="context" if is_bot else "digest",
+                              route="context" if bot else "digest",
                               meta={"sha": c["sha"], "parents": len(c.get("parents", []))}))
         new_cursor = clock.iso(started - timedelta(minutes=5)).replace(".000Z", "Z")
         return FetchResult(scope=self.scope, items=items, cursor=new_cursor, meta={"commits": len(commits)})
