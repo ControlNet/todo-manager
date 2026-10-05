@@ -123,9 +123,11 @@ def card_body(d: dict[str, Any], task: dict[str, Any], notion_url: str | None, e
 def create(conn: sqlite3.Connection, cfg: Config, *, task_id: str, title: str, goal: str, context: str | None = None,
            constraints: str | None = None, deliverable: str | None = None, done_criteria: str | None = None,
            allowed_actions: list[str] | None = None, feedback_id: str | None = None, actor: str = "human",
-           op_key: str | None = None) -> str:
+           op_key: str | None = None, parallel: bool = False) -> str:
     """``op_key`` (feedback id + op index) identifies the request: applying the same op again
-    returns the same delegation, another op of the same feedback creates its own."""
+    returns the same delegation, another op of the same feedback creates its own. One active
+    delegation per Task unless ``parallel`` (genuinely separate work): checked here, in the
+    transaction that inserts the row, so every entry point and concurrent writers are covered."""
     task = store.get_task(conn, task_id)
     if task is None:
         raise DelegationError(f"task {task_id} not found")
@@ -137,17 +139,20 @@ def create(conn: sqlite3.Connection, cfg: Config, *, task_id: str, title: str, g
     unknown = action_names(allowed) - KNOWN_ACTIONS
     if unknown:
         raise DelegationError(f"unknown actions {sorted(unknown)}; known: {sorted(KNOWN_ACTIONS)}")
-    if op_key:
-        existing = conn.execute("SELECT id FROM delegations WHERE op_key=?", (op_key,)).fetchone()
-    elif feedback_id:
-        existing = conn.execute("SELECT id FROM delegations WHERE from_feedback_id=?", (feedback_id,)).fetchone()
-    else:
-        existing = None
-    if existing:
-        return existing["id"]
     did = ids.new_id("delegation")
     now = clock.iso()
     with tx(conn):
+        if op_key:
+            existing = conn.execute("SELECT id FROM delegations WHERE op_key=?", (op_key,)).fetchone()
+        elif feedback_id:
+            existing = conn.execute("SELECT id FROM delegations WHERE from_feedback_id=?", (feedback_id,)).fetchone()
+        else:
+            existing = None
+        if existing:
+            return existing["id"]
+        if not parallel and for_task(conn, task_id, active_only=True):
+            raise DelegationError("task already has an active delegation; send it a supplement/revision, or"
+                                  " create a parallel one for genuinely separate work")
         conn.execute(
             "INSERT INTO delegations(id, task_id, title, goal, context, constraints, deliverable, done_criteria,"
             " allowed_actions, assignee, requirement_version, status, board, idem_key, from_feedback_id,"

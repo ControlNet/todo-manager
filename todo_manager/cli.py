@@ -286,7 +286,8 @@ def cmd_delegate(args: argparse.Namespace) -> int:
         if args.action == "create":
             did = delegation.create(conn, cfg, task_id=args.task, title=args.title, goal=args.goal,
                                     context=args.context, constraints=args.constraints, deliverable=args.deliverable,
-                                    done_criteria=args.done, allowed_actions=args.allow.split(",") if args.allow else None)
+                                    done_criteria=args.done, allowed_actions=args.allow.split(",") if args.allow else None,
+                                    parallel=args.parallel)
             _print({"delegation": did, "note": "submitted to the board by the next gate run"})
             return 0
         if args.action == "message":
@@ -655,6 +656,8 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--deliverable")
     x.add_argument("--done")
     x.add_argument("--allow", help="comma list of allowed actions (default read,analyze,draft)")
+    x.add_argument("--parallel", action="store_true",
+                   help="genuinely separate work next to the Task's active delegation (default: refused)")
     x = ds.add_parser("message")
     x.add_argument("id")
     x.add_argument("--kind", required=True, choices=[k for k in delegation.MESSAGE_KINDS if k != "approval"])

@@ -182,8 +182,12 @@ def _evidence_only(fb: dict[str, Any], op: dict[str, Any]) -> bool:
     return not fb["author_is_user"] and not (op.get("op") == "rule" and op.get("status", "suggested") == "suggested")
 
 
-def _validate_ops(conn: sqlite3.Connection, fb: dict[str, Any], ops: list[dict[str, Any]], where: str) -> list[str]:
+def _validate_ops(conn: sqlite3.Connection, fb: dict[str, Any], ops: list[dict[str, Any]], where: str,
+                 planned: set[str] | None = None) -> list[str]:
+    """``planned``: Tasks delegated by earlier ops of the same batch (shared across the items of
+    one run), so two delegate ops cannot both pass the one-active-delegation check."""
     errors: list[str] = []
+    planned = set() if planned is None else planned
     for n, op in enumerate(ops):
         kind = op.get("op")
         at = f"{where}.ops[{n}] ({kind})"
@@ -225,9 +229,13 @@ def _validate_ops(conn: sqlite3.Connection, fb: dict[str, Any], ops: list[dict[s
                 errors.append(f"{at}: unknown task")
             elif task["status"] in store.CLOSED_STATUSES:
                 errors.append(f"{at}: task is closed; create a follow-up task first")
-            elif delegation.for_task(conn, task["id"], active_only=True) and not op.get("parallel"):
-                errors.append(f"{at}: task already has an active delegation; use message(kind=supplement/revision)"
-                              " on it, or set parallel=true for genuinely separate work")
+            elif (delegation.for_task(conn, task["id"], active_only=True) or task["id"] in planned) \
+                    and not op.get("parallel"):
+                errors.append(f"{at}: task already has an active delegation (or one from an earlier op of this"
+                              " batch); use message(kind=supplement/revision) on it, or set parallel=true for"
+                              " genuinely separate work")
+            if task is not None:
+                planned.add(task["id"])
             if not (op.get("goal") or "").strip() or not (op.get("title") or "").strip():
                 errors.append(f"{at}: title and goal required")
             unknown = delegation.action_names(op.get("allowed_actions")) - delegation.KNOWN_ACTIONS
@@ -301,6 +309,7 @@ def _validate(conn: sqlite3.Connection, decisions: dict[str, Any], claimed: list
         return ["'items' must be a list"]
     by_id = {f["id"]: f for f in claimed}
     seen: set[str] = set()
+    planned: set[str] = set()
     for n, item in enumerate(items):
         fid = item.get("feedback")
         where = f"items[{n}]"
@@ -322,7 +331,7 @@ def _validate(conn: sqlite3.Connection, decisions: dict[str, Any], claimed: list
             errors.append(f"{where}: ignored needs a reason")
         if item.get("reply") and len(item["reply"]) > MAX_REPLY_CHARS:
             errors.append(f"{where}: reply too long (keep it short; results belong in the task page)")
-        errors.extend(_validate_ops(conn, by_id[fid], item.get("ops") or [], where))
+        errors.extend(_validate_ops(conn, by_id[fid], item.get("ops") or [], where, planned))
     missing = set(by_id) - seen
     if missing:
         errors.append(f"uncovered feedback items: {sorted(missing)}")
@@ -404,7 +413,7 @@ def apply_ops(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any], ops: li
                                     context=op.get("context"), constraints=op.get("constraints"),
                                     deliverable=op.get("deliverable"), done_criteria=op.get("done_criteria"),
                                     allowed_actions=op.get("allowed_actions"), feedback_id=fb["id"], actor="human",
-                                    op_key=op_key)
+                                    op_key=op_key, parallel=bool(op.get("parallel")))
             entry["delegation"] = did
         elif kind == "message":
             entry["message"] = delegation.add_message(conn, op["delegation"], op["kind"], op["body"], feedback_id=fb["id"],
