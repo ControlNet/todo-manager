@@ -153,8 +153,19 @@ def main() -> None:
                 "attachments": [{"id": a.id, "filename": a.filename, "path": a.stored_path, "size": a.size}
                                 for a in atts]}})
         if op == "comment":
-            cid = kb.add_comment(conn, req["task_id"], req.get("author", "todo-manager"), req["body"])
-            return _out({"ok": True, "result": cid})
+            author = req.get("author", "todo-manager")
+            cid = kb.add_comment(conn, req["task_id"], author, req["body"])
+            # add_comment writes the comment and its "commented" event in one transaction; our
+            # comments are posted one at a time (kanban-submit lock), so the newest commented
+            # event by this author is the one just written.
+            event_id = None
+            for row in conn.execute("SELECT id, payload FROM task_events WHERE task_id = ? AND kind = 'commented'"
+                                    " ORDER BY id DESC LIMIT 20", (req["task_id"],)):
+                payload = json.loads(row["payload"] or "{}") if isinstance(row["payload"], str) else (row["payload"] or {})
+                if payload.get("author") == author:
+                    event_id = row["id"]
+                    break
+            return _out({"ok": True, "result": {"comment_id": cid, "event_id": event_id}})
         if op == "block":
             ok = kb.block_task(conn, req["task_id"], reason=req.get("reason"), kind=req.get("kind"))
             return _out({"ok": True, "result": bool(ok)})

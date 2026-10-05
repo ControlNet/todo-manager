@@ -44,6 +44,7 @@
   "dlg.reason.card_moved": "the card is no longer at that point ({status})",
   "dlg.reason.newer_question": "the agent has moved on to a newer question or state",
   "dlg.reason.newer_version": "a newer version was delivered",
+  "dlg.reason.nothing_to_accept": "no delivered version was named when it was queued",
   "dlg.reason.not_in_review": "the delegation is no longer under review",
   "dlg.reason.requirement_changed": "the requirements changed after that version",
   "dlg.reason.revoked": "revoked",

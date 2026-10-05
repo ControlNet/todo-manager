@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -538,6 +538,20 @@ UPDATE notion_pages SET box_seen_hash = COALESCE((
   WHERE f.origin = 'notion_page' AND f.kind = 'body_edit' AND f.source_id = notion_pages.page_id
     AND f.status = 'pending' AND f.source_version LIKE 'body:%'
   ORDER BY f.received_at DESC LIMIT 1), managed_hash);
+""",
+    # 7: where a message landed on its card (the card event id of its comment, and the last card
+    # event seen before posting it), so a delivery's requirement version comes from the order of
+    # card events instead of "sent by sync time"; feedback held for a reason that must clear
+    # before it may be claimed or applied (e.g. a Notion comment missing from its page's list
+    # whose deletion is not confirmed); whether a Notion comment is still listed on its page.
+    # Additive only. Rows written before it have NULL positions and are read as before
+    # (received). Rollback: restore the automatic pre-schema backup with the previous code.
+    7: """
+ALTER TABLE delegation_messages ADD COLUMN card_event_before INTEGER;
+ALTER TABLE delegation_messages ADD COLUMN card_event_id INTEGER;
+ALTER TABLE feedback ADD COLUMN hold_reason TEXT;
+ALTER TABLE notion_comments ADD COLUMN presence TEXT NOT NULL DEFAULT 'listed';
+ALTER TABLE notion_comments ADD COLUMN presence_at TEXT;
 """,
 }
 

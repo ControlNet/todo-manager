@@ -96,8 +96,8 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT revision FROM notion_comments").fetchone()[0], 1)
         finally:
             conn.close()
-        self.assertEqual(len(list((self.home / "backups").glob("pre-schema-v6-from-v5-*.sqlite"))), 1,
-                         "the rollback point is the pre-migration copy")
+        self.assertEqual(len(list((self.home / "backups").glob(f"pre-schema-v{db.SCHEMA_VERSION}-from-v5-*.sqlite"))),
+                         1, "the rollback point is the pre-migration copy")
 
     def test_v5_messages_survive_the_rebuild_in_order(self):
         """B04 (v6): delegation_messages is rebuilt without its table-level UNIQUE."""
@@ -129,6 +129,43 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
         finally:
             conn.close()
+
+    def test_v6_workspace_keeps_its_messages_and_feedback(self):
+        """Round 3 (v7): message card positions, feedback holds and comment presence are added
+        columns; rows written before them read as before (positions unknown, nothing held)."""
+        make_v1(self.path)
+        conn = sqlite3.connect(str(self.path), isolation_level=None)
+        for version in range(2, 7):
+            for statement in db._split_sql(db.MIGRATIONS[version]):
+                conn.execute(statement)
+        conn.execute("UPDATE meta SET value='6' WHERE key='schema_version'")
+        conn.execute("INSERT INTO delegations(id, task_id, title, goal, allowed_actions, requirement_version, status,"
+                     " board, idem_key, created_at, updated_at) VALUES ('dlg_1', 'tsk_1', 't', 'g', '[]', 2, 'review',"
+                     " 'b', 'k', 'x', 'x')")
+        conn.execute("INSERT INTO delegation_messages(id, delegation_id, kind, body, requirement_version, status,"
+                     " created_at, target_seq) VALUES ('m1', 'dlg_1', 'accept', 'ok', 2, 'pending', 'x', 0)")
+        conn.execute("INSERT INTO feedback(id, origin, source_id, received_at, scope_type, kind, status)"
+                     " VALUES ('fb_1', 'notion_comment', 'c1', 'x', 'task', 'comment', 'pending')")
+        conn.execute("INSERT INTO notion_comments(comment_id, page_id, content_hash, seen_at, feedback_id)"
+                     " VALUES ('c1', 'pg_1', 'h', 'x', 'fb_1')")
+        conn.close()
+        conn = db.connect(self.path)
+        try:
+            m = conn.execute("SELECT * FROM delegation_messages WHERE id='m1'").fetchone()
+            self.assertEqual((m["status"], m["target_seq"], m["card_event_before"], m["card_event_id"]),
+                             ("pending", 0, None, None))
+            self.assertIsNone(conn.execute("SELECT hold_reason FROM feedback WHERE id='fb_1'").fetchone()[0])
+            self.assertEqual(conn.execute("SELECT presence FROM notion_comments").fetchone()[0], "listed")
+            self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        finally:
+            conn.close()
+        backups = list((self.home / "backups").glob("pre-schema-v7-from-v6-*.sqlite"))
+        self.assertEqual(len(backups), 1, "the rollback point is the pre-migration copy")
+        old = sqlite3.connect(str(backups[0]))
+        try:
+            self.assertEqual(old.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0], "6")
+        finally:
+            old.close()
 
     def test_fresh_database_takes_no_backup(self):
         db.connect(self.path).close()

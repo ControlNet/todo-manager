@@ -84,7 +84,7 @@ class Kanban(Protocol):
     def create(self, *, title: str, body: str, idem_key: str, assignee: str | None, tenant: str,
                workspace: str | None = None, max_retries: int | None = None) -> str: ...
     def snapshot(self, card_id: str, after_event: int = 0, after_comment: int = 0) -> dict[str, Any]: ...
-    def comment(self, card_id: str, body: str, author: str = "todo-manager") -> int: ...
+    def comment(self, card_id: str, body: str, author: str = "todo-manager") -> dict[str, Any]: ...
     def block(self, card_id: str, reason: str, kind: str | None = None) -> bool: ...
     def unblock(self, card_id: str) -> bool: ...
     def respecify(self, card_id: str) -> bool: ...
@@ -158,7 +158,9 @@ class BridgeKanban:
         return self.call("snapshot", mutating=False, task_id=card_id, after_event=after_event,
                          after_comment=after_comment)
 
-    def comment(self, card_id: str, body: str, author: str = "todo-manager") -> int:
+    def comment(self, card_id: str, body: str, author: str = "todo-manager") -> dict[str, Any]:
+        """``{"comment_id", "event_id"}``: the event id is the card's ``commented`` event for it,
+        which places the comment among the card's other events (runs, results)."""
         return self.call("comment", task_id=card_id, body=body, author=author)
 
     def block(self, card_id: str, reason: str, kind: str | None = None) -> bool:
@@ -210,6 +212,7 @@ class FakeKanban:
         self.terminate_ok = True  # outcome of terminating a running worker on archive
         # action -> callable run after the transition's check and before its state function:
         # stands in for a dashboard action interleaving there (the race ``transition_raced`` reports).
+        # "comment": run right before a comment is stored (e.g. the worker submits meanwhile).
         self.interleave: dict[str, Any] = {}
         self.settings_values = {"review_dispatch": False, "auto_decompose": False}
         self._n = 0
@@ -259,15 +262,17 @@ class FakeKanban:
                 "comments": [c for c in self.comments if c["task_id"] == card_id and c["id"] > after_comment],
                 "runs": self.runs.get(card_id, []), "attachments": []}
 
-    def comment(self, card_id: str, body: str, author: str = "todo-manager") -> int:
+    def comment(self, card_id: str, body: str, author: str = "todo-manager") -> dict[str, Any]:
         self._maybe_fail("comment")
+        if "comment" in self.interleave:
+            self.interleave.pop("comment")()
         cid = len(self.comments) + 1
         self.comments.append({"id": cid, "task_id": card_id, "author": author, "body": body})
-        self._event(card_id, "commented")
+        self._event(card_id, "commented", {"author": author, "len": len(body)})   # Hermes' payload
         if "comment" in self.lose_response:
             self.lose_response.discard("comment")
             raise KanbanError("bridge timeout during comment", uncertain=True)
-        return cid
+        return {"comment_id": cid, "event_id": self.events[-1]["id"]}
 
     # ----- worker simulation helpers (tests) -----
     def worker_start(self, card_id: str) -> None:
