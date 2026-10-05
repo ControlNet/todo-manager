@@ -5,8 +5,9 @@ Fetch checkpoint vs. processed checkpoint:
 * An adapter returns items plus the cursor that covers them. ``persist_fetch`` stores
   the items (with full bodies) and advances the cursor in ONE transaction, so the
   cursor never moves past content that is not durably saved.
-* Items are later marked ``processed`` only when the semantic decisions that cover
-  them are committed (see ``intake.apply_decisions``).
+* Items are later marked ``processed`` only when a command of the run that was shown
+  them records their outcome (a task, a link, a dismissal; see ``ops``); fetched is
+  not processed.
 * A failed fetch records the error on the cursor and leaves the position untouched;
   freshness is reported, never treated as "no changes".
 """

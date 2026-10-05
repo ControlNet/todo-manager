@@ -5,7 +5,7 @@ the worker in the same run.
   are each recorded with their own message; at send time they go out together - one comment
   each, then one reopen of that version's review - so neither is merged into the other nor
   voided by the reopen the other caused.
-* A retried op (same feedback + op index) returns its approval; an identical approval that has
+* A retried command (same feedback item, same arguments) returns its approval; an identical approval that has
   not gone out yet is the same approval, from any entry point.
 * An approval that can no longer reach the run of its version is refused when it is received
   (the version was already sent back, or approvals for it are being delivered), never reported
@@ -14,7 +14,8 @@ the worker in the same run.
 Kanban is ``FakeKanban`` (test double).
 """
 
-from todo_manager import delegation, feedback_flow
+from todo_manager import delegation
+from tests.flow import apply_feedback_ops, user_feedback
 from tests.test_delegation_binding import BindingBase
 
 
@@ -43,11 +44,11 @@ class ApprovalGroupTests(BindingBase):
 
     def test_two_approve_ops_in_one_feedback_are_both_delivered(self):
         did, card = self.delivered()
-        fb = {"id": "fbk_two", "origin": "notion_comment", "author_is_user": 1, "payload": {}}
+        fb = user_feedback(self.conn, "c-two", origin="notion_comment")
         ops = [{"op": "approve", "delegation": did, "delivery": self.v1(did), "action": "send_email", "detail": "发给 Alice"},
                {"op": "approve", "delegation": did, "delivery": self.v1(did), "action": "comment_github",
                 "detail": "在 issue 下回复"}]
-        feedback_flow.apply_ops(self.conn, self.cfg, fb, ops)
+        apply_feedback_ops(self.conn, self.cfg, fb, ops)
         self.assertEqual(len(self.approvals(did)), 2)
         self.assertTrue(all(r["mstatus"] == "pending" for r in self.approvals(did)), "each has its own message")
         self.tick()
@@ -60,13 +61,13 @@ class ApprovalGroupTests(BindingBase):
         self.tick()
         self.assert_both_delivered_in_one_run(did, card)
 
-    def test_a_retried_op_returns_its_approval(self):
+    def test_a_retried_command_returns_its_approval(self):
         did, card = self.delivered()
-        fb = {"id": "fbk_r", "origin": "notion_comment", "author_is_user": 1, "payload": {}}
+        fb = user_feedback(self.conn, "c-r", origin="notion_comment")
         ops = [{"op": "approve", "delegation": did, "delivery": self.v1(did), "action": "send_email", "detail": ""}]
-        first = feedback_flow.apply_ops(self.conn, self.cfg, fb, ops)
-        again = feedback_flow.apply_ops(self.conn, self.cfg, fb, ops)
-        self.assertEqual(first["ops"][0]["approval"], again["ops"][0]["approval"])
+        [first] = apply_feedback_ops(self.conn, self.cfg, fb, ops)
+        [again] = apply_feedback_ops(self.conn, self.cfg, fb, ops)
+        self.assertEqual(first["approval"], again["approval"])
         self.assertEqual(len(self.approvals(did)), 1)
 
     def test_the_same_approval_twice_is_one_approval(self):

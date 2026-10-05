@@ -1,18 +1,19 @@
-"""Pre-run gate for entry point B (human feedback + execution state), Hermes cron every 5 min.
+"""Pre-run gate of the feedback job (Hermes cron, every few minutes): sync, then feedback.
 
 Deterministic steps, each isolated so one failing system does not stall the others:
 
-1. Notion: pull human property/page edits (projects, then tasks) and poll comments.
-2. Kanban: send queued messages (answers/supplements/pauses), submit new delegations,
-   read card events (questions, deliveries, failures).
+1. Notion: pull the user's property/page edits (projects, then tasks) and poll comments.
+2. Kanban: send queued messages (answers, supplements, pauses), create the cards of new
+   delegations, read card events (questions, deliveries, failures). The cards themselves run
+   in Hermes whether or not this job runs; their results are read when it runs again.
 3. Dirty scan + outbox: push local changes to Notion, post bot comments.
 4. Home page freshness callout (rewritten only when its content changes).
-5. Claim pending feedback that needs interpretation and wake the model for it.
+5. Claim the feedback that needs interpretation and print it as the run's context
+   (``context.feedback``); nothing to interpret -> ``{"wakeAgent": false}``.
 
-Stdout carries only ids and counts (never comment text) and ends with ``{"wakeAgent": ...}``.
-Nothing is sent from here: the user reads results and problems in Notion (task comments, the
-home page freshness box); what a woken run reports is delivered by the Hermes cron job's own
-``deliver`` setting.
+No model runs for steps 1-4. A failing channel is reported in Notion and by ``health``; one
+that keeps failing with nothing else to do wakes a short report at most once a day
+(``[CRON_FAILURE]``). A failure of the gate itself raises ``GateError`` (a failed script).
 """
 
 from __future__ import annotations
@@ -21,9 +22,10 @@ import sqlite3
 from datetime import timedelta
 from typing import Any, Callable
 
-from . import clock, delegation, effects, feedback, feedback_flow, health, i18n, outbox, runs
+from . import clock, context, delegation, feedback, health, i18n, ops, outbox, prefs, runs
 from .config import Config
 from .db import tx
+from .gate_intake import IDLE, GateError, problems_due
 from .notion import schema
 
 Step = Callable[[], Any]
@@ -31,7 +33,7 @@ SOURCE_SCOPES = ("gmail", "slack", "github", "commit", "notion", "kanban")
 # Steps whose failures are kept as channel health here (``health.record_channel``). The Notion
 # pulls and the comment poll record their own (``notion``/``projects``, ``tasks``, ``bodies``,
 # ``comments``) since a partly failed pass does not raise.
-CHANNELS = {"claims": ("gate", "claims"), "kanban_settings": ("kanban", "settings"),
+CHANNELS = {"claims": ("gate", "claims"),
             "kanban_messages": ("kanban", "messages"), "kanban_submit": ("kanban", "submit"),
             "kanban_cards": ("kanban", "cards"), "dirty": ("notion", "dirty"),
             "outbox": ("gate", "outbox"), "home": ("notion", "home")}
@@ -54,18 +56,15 @@ def _step(conn: sqlite3.Connection, summary: dict[str, Any], problems: list[str]
 
 
 def fail_exhausted_claims(conn: sqlite3.Connection, cfg: Config) -> dict[str, int]:
-    """Feedback whose model run never completed after ``max_attempts`` claims is marked failed."""
+    """Feedback no run resolved after ``max_attempts`` claims (lease expired) is marked failed."""
     stale = int(cfg.get("feedback.stale_claim_minutes", 60))
     max_attempts = int(cfg.get("feedback.max_attempts", 3))
     cutoff = clock.iso(clock.now() - timedelta(minutes=stale))
-    rows = conn.execute("SELECT id, scope_type, scope_id FROM feedback WHERE status='pending' AND claimed_run IS NOT NULL"
+    rows = conn.execute("SELECT id, attempts FROM feedback WHERE status='pending' AND claimed_run IS NOT NULL"
                         " AND claimed_at < ? AND attempts >= ?", (cutoff, max_attempts)).fetchall()
     with tx(conn):
         for r in rows:
-            feedback.resolve(conn, r["id"], "failed", error=f"not applied after {max_attempts} model runs")
-            if r["scope_type"] == "task" and r["scope_id"]:
-                effects.task_comment(conn, r["scope_id"], f"feedback-failed:{r['id']}",
-                                     i18n.t("fb.failed_alert", n=max_attempts, id=r["id"]))
+            feedback.fail(conn, r["id"], r["attempts"])
     return {"failed": len(rows)}
 
 
@@ -116,13 +115,10 @@ def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None,
         step("pull_tasks", lambda: notion.pull("task"))
         step("comments", lambda: notion.poll_comments(int(cfg.get("notion.cold_comment_pages_per_run", 30))))
     if kanban is not None:
-        on_board = conn.execute("SELECT 1 FROM delegations WHERE card_id IS NOT NULL AND status IN (%s) LIMIT 1"
-                                % ",".join("?" * len(delegation.ACTIVE)), delegation.ACTIVE).fetchone()
-        if on_board:  # cards in flight are exposed to the global switches; re-read them every run
-            step("kanban_settings", lambda: delegation.check_settings(conn, kanban))
         step("kanban_messages", lambda: delegation.send_messages(conn, cfg, kanban))
         step("kanban_submit", lambda: delegation.submit_pending(conn, cfg, kanban))
         step("kanban_cards", lambda: delegation.sync_cards(conn, cfg, kanban))
+        step("kanban_settings", lambda: delegation.observe_settings(conn, kanban))
     handlers: dict[tuple[str, str], Any] = {}
     if notion is not None:
         step("dirty", notion.enqueue_dirty)
@@ -139,17 +135,18 @@ def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None,
     return summary, problems
 
 
-def fit_context(conn: sqlite3.Connection, cfg: Config, run_id: str,
-                items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+def fit_context(conn: sqlite3.Connection, cfg: Config, run_id: str, items: list[dict[str, Any]],
+                problems: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
     """The oldest items whose rendered context fits ``feedback.max_context_chars`` (the rest
-    stays pending for the next run), with that size. When not even the first fits, it is
-    returned alone with its (over budget) size for the caller to defer or, if opted in, run."""
+    stays pending for the next run). The first one is always taken: item text is clipped with
+    a pointer to the full text, so no item waits forever."""
     budget = int(cfg.get("feedback.max_context_chars", 60000))
+    incomplete = {f["id"]: ops.incomplete_reason(f) for f in items}
     for n in range(len(items), 0, -1):
-        size = len(feedback_flow.render_context(conn, cfg, run_id, items[:n]))
-        if size <= budget or n == 1:
-            return items[:n], size
-    return [], 0
+        text = context.feedback(conn, cfg, run_id, items[:n], incomplete, problems)
+        if len(text) <= budget or n == 1:
+            return items[:n], text
+    return [], ""
 
 
 def run_gate(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None,
@@ -157,41 +154,42 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None,
     run_id = runs.start(conn, "feedback")
     summary: dict[str, Any] = {}
     try:
+        with tx(conn):
+            conn.execute("UPDATE runs SET rules_hash=? WHERE id=?", (prefs.file_hash(cfg.home), run_id))
         summary, _ = sync_all(conn, cfg, notion=notion, kanban=kanban)
+        problems = problems_due(conn, cfg, "feedback", ("notion", "kanban", "gate"))
+        if problems:
+            summary["problems_reported"] = [f"{p['source']}:{p['scope']}" for p in problems]
         items = feedback.pending(conn, stale_minutes=int(cfg.get("feedback.stale_claim_minutes", 60)))
-        waiting = [f["id"] for f in items if feedback_flow.not_ready(conn, cfg, f)]
+        waiting = [f["id"] for f in items if ops.not_ready(conn, cfg, f)]
         if waiting:
             summary["not_ready"] = len(waiting)   # held, or waiting for a body read that covers the last edit
         items = [f for f in items if f["id"] not in waiting][: int(cfg.get("feedback.max_items_per_run", 20))]
         if not items:
+            if problems:
+                runs.finish(conn, run_id, status="woke", wake=True, reasons=["problems"], summary=summary)
+                shown = context.final_check(context.problems_only(cfg, run_id, "feedback", problems))
+                runs.write_text(cfg.home, run_id, "context.md", shown)   # what the agent was shown
+                return shown, True
             runs.finish(conn, run_id, status="idle", summary=summary)
-            return '{"wakeAgent": false}', False
-        items, context_chars = fit_context(conn, cfg, run_id, items)
-        summary["context_chars"] = context_chars
-        budget = int(cfg.get("feedback.max_context_chars", 60000))
-        if context_chars > budget:
-            summary["context_over_budget"] = context_chars
-            if cfg.get("feedback.over_budget", "defer") != "proceed":
-                summary["deferred_over_budget"] = budget   # nothing claimed; health reports it
-                runs.finish(conn, run_id, status="idle", summary=summary)
-                return '{"wakeAgent": false}', False
-        ids = [f["id"] for f in items]
-        feedback.claim(conn, run_id, ids)
-        kinds: dict[str, int] = {}
-        for f in items:
-            kinds[f["kind"] or "other"] = kinds.get(f["kind"] or "other", 0) + 1
-        manifest = {"run_id": run_id, "created_at": clock.iso(), "feedback_ids": ids}
+            return IDLE, False
+        feedback.claim(conn, run_id, [f["id"] for f in items])
+        items, text = fit_context(conn, cfg, run_id, items, problems)
+        claimed = {f["id"] for f in items}
+        with tx(conn):    # what did not fit goes back without counting as an attempt
+            for fb in feedback.claimed_by(conn, run_id):
+                if fb["id"] not in claimed:
+                    conn.execute("UPDATE feedback SET claimed_run=NULL, claimed_at=NULL, attempts=MAX(attempts-1, 0)"
+                                 " WHERE id=?", (fb["id"],))
+        summary["context_chars"] = len(text)
+        if len(text) > int(cfg.get("feedback.max_context_chars", 60000)):
+            summary["context_over_budget"] = len(text)   # one clipped item over budget: run anyway (health)
+        manifest = {"run_id": run_id, "created_at": clock.iso(), "feedback_ids": sorted(claimed)}
         runs.write_json(cfg.home, run_id, "manifest.json", manifest)
-        reasons = [f"feedback:{len(ids)}"]
-        runs.finish(conn, run_id, status="woke", wake=True, reasons=reasons, summary=summary)
-        lines = [
-            f"Todo Manager feedback run: {run_id}",
-            f"Feedback to interpret: {len(ids)} (" + ", ".join(f"{k} {v}" for k, v in sorted(kinds.items())) + ")",
-            f"Do: load skill todo-manager, run `todo-manager feedback show {run_id}`, decide, then"
-            f" `todo-manager feedback apply {run_id} --file <decisions.json>`.",
-            '{"wakeAgent": true}',
-        ]
-        return "\n".join(lines), True
-    except Exception as exc:  # noqa: BLE001 - never wake the model for a gate crash
+        runs.finish(conn, run_id, status="woke", wake=True, reasons=[f"feedback:{len(claimed)}"], summary=summary)
+        shown = context.final_check(text)
+        runs.write_text(cfg.home, run_id, "context.md", shown)   # what the agent was shown
+        return shown, True
+    except Exception as exc:  # noqa: BLE001 - recorded, then reported to Hermes as a failed script
         runs.finish(conn, run_id, status="error", summary=summary, error=f"{type(exc).__name__}: {exc}")
-        return '{"wakeAgent": false}', False
+        raise GateError(f"feedback gate failed in run {run_id}: {type(exc).__name__}: {exc}") from exc

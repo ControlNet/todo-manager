@@ -4,24 +4,25 @@ cut on display says so and how to read the rest.
 * page_notes (added/removed lines, the notes baseline), body_edit regions and a new page's body
   are stored without any length cut (``payload.complete``); the supersede/carry-over logic of
   notes works on the full lines.
-* The context shows each item's own text in full (removed lines, the box as edited and the
-  lines that differ from ours, a new page's body); background (task fields, deliveries, earlier
-  feedback) may be cut, always with a "…[+N chars]" mark, and earlier feedback names its id for
-  ``todo-manager feedback item <id>``, which prints a stored item in full.
+* The context shows each item's own text up to ``wake.max_item_chars``; longer text, and
+  background (task fields, deliveries, earlier feedback), is cut with a
+  "[... N more characters: `todo-manager feedback item <id>`]" mark naming the command that
+  prints the stored item in full. Nothing is cut silently.
 * An item whose text may be incomplete (the Notion API cut the page body, or an older version
   stored it cut) is marked as such and can only be answered with ``clarify``.
-* An item larger than the context budget is deferred by the existing budget rule, not cut.
+* An item larger than the context budget is clipped and handled; it never waits for room.
 
 Notion is ``FakeNotion`` (test double; ``truncate_markdown_at`` imitates the API's truncated
-flag), Kanban is ``FakeKanban``; model decisions are written by the test.
+flag), Kanban is ``FakeKanban``; what the agent records is written by the test.
 """
 
 import contextlib
 import io
 import json
 
-from todo_manager import cli, clock, feedback, feedback_flow, store
-from todo_manager.feedback_flow import FeedbackDecisionError
+from todo_manager import cli, clock, feedback, store
+from todo_manager.ops import OpError
+from tests.flow import feedback_context
 from tests.test_feedback import GateCase
 
 LONG = "背景：" + "很长的说明" * 900                    # 4,503 chars on one line
@@ -43,19 +44,28 @@ class Base(GateCase):
         return run_id, feedback.claimed_by(self.conn, run_id)
 
     def context(self, run_id, items):
-        return feedback_flow.render_context(self.conn, self.cfg, run_id, items)
+        return feedback_context(self.conn, self.cfg, run_id, items)
+
+    def assert_clipped_with_pointer(self, context, fb, start):
+        self.assertIn(start, context)
+        self.assertIn(f"more characters: `todo-manager feedback item {fb['id']}`", context)
+
+    def shown_in_full(self, fid):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--home", str(self.cfg.home), "feedback", "item", fid]), 0)
+        return json.loads(out.getvalue())
 
 
 class StoredInFullTests(Base):
-    def test_a_long_note_is_stored_and_shown_in_full(self):
+    def test_a_long_note_is_stored_in_full_and_its_display_says_where_the_rest_is(self):
         self.notes(LONG, TAIL)
         run_id, [fb] = self.run_items()
         self.assertEqual(fb["payload"]["added"], LONG + "\n" + TAIL)
         self.assertTrue(fb["payload"]["complete"])
         self.assertEqual(fb["text"], LONG + "\n" + TAIL)
-        context = self.context(run_id, [fb])
-        self.assertIn(TAIL, context)
-        self.assertIn(LONG, context)
+        self.assert_clipped_with_pointer(self.context(run_id, [fb]), fb, LONG[:3000])
+        self.assertEqual(self.shown_in_full(fb["id"])["text"], LONG + "\n" + TAIL)
 
     def test_long_removed_lines_are_kept_in_full(self):
         self.notes(LONG, "保留这一行")
@@ -64,7 +74,7 @@ class StoredInFullTests(Base):
         self.notes("保留这一行")
         run_id, [fb] = self.run_items()
         self.assertEqual(fb["payload"]["removed"], LONG)
-        self.assertIn(LONG, self.context(run_id, [fb]))
+        self.assert_clipped_with_pointer(self.context(run_id, [fb]), fb, LONG[:3000])
 
     def test_the_baseline_of_long_notes_is_kept_in_full(self):
         self.cfg.data.setdefault("feedback", {})["max_context_chars"] = 200000
@@ -91,30 +101,30 @@ class StoredInFullTests(Base):
         self.gate()
         self.assertEqual(feedback.get(self.conn, a["id"])["status"], "superseded")
 
-    def test_a_new_page_body_is_stored_and_shown_in_full(self):
+    def test_a_new_page_body_is_stored_in_full(self):
         self.fake.user_create_page(self.tasks_ds, "写基金申请", markdown=LONG + "\n" + TAIL)
         clock.advance(minutes=1)
         run_id, items = self.run_items()
         [fb] = [f for f in items if f["kind"] == "new_task"]
         self.assertEqual(fb["payload"]["body"], LONG + "\n" + TAIL)
-        self.assertIn(TAIL, self.context(run_id, [fb]))
+        self.assert_clipped_with_pointer(self.context(run_id, [fb]), fb, LONG[:3000])
 
-    def test_a_long_box_edit_is_shown_in_full_with_the_differing_lines(self):
+    def test_a_long_box_edit_is_shown_with_the_differing_lines_and_a_pointer(self):
         edited = self.original.replace("Bob 直接问我", "其实是导师转给我的；" + LONG)
         self.fake.user_set_markdown(self.page, edited)
         clock.advance(minutes=1)
         run_id, [fb] = self.run_items()
-        context = self.context(run_id, [fb])
-        self.assertIn(LONG, context)
-        self.assertNotIn("…[+", context.split("### ")[1].split("Task t")[0], "the item itself is never cut")
+        self.assert_clipped_with_pointer(self.context(run_id, [fb]), fb, "其实是导师转给我的；" + LONG[:3000])
+        self.assertIn(LONG, json.dumps(self.shown_in_full(fb["id"])["payload"], ensure_ascii=False))
 
-    def test_over_the_context_budget_it_waits_instead_of_being_cut(self):
+    def test_over_the_context_budget_it_is_clipped_and_handled_never_waits(self):
         self.cfg.data.setdefault("feedback", {})["max_context_chars"] = 3000
         self.notes(LONG)
-        _, woke, _ = self.gate()
-        self.assertFalse(woke)
-        [fb] = feedback.pending(self.conn)
+        out, woke, run_id = self.gate()
+        self.assertTrue(woke)
+        [fb] = feedback.claimed_by(self.conn, run_id)
         self.assertEqual(fb["payload"]["added"], LONG)
+        self.assert_clipped_with_pointer(out, fb, LONG[:1000])
 
 
 class DisplayCutTests(Base):
@@ -130,13 +140,10 @@ class DisplayCutTests(Base):
         self.notes(LONG, TAIL)
         run_id, [fb] = self.run_items()
         context = self.context(run_id, [fb])
-        self.assertIn("…[+", context)
+        self.assertIn("more characters: `todo-manager task show", context, "the long summary is cut, with a pointer")
         self.assertIn(first["id"], context, "the earlier item is named, so it can be read in full")
-        self.assertIn("todo-manager feedback item", context)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(cli.main(["--home", str(self.cfg.home), "feedback", "item", first["id"]]), 0)
-        shown = json.loads(out.getvalue())
+        self.assertIn(f"todo-manager feedback item {first['id']}", context)
+        shown = self.shown_in_full(first["id"])
         self.assertEqual(shown["payload"]["added"], LONG)
         self.assertEqual(shown["text"], LONG)
 
@@ -154,8 +161,9 @@ class IncompleteTextTests(Base):
         self.assertTrue(fb["payload"]["truncated"])
         context = self.context(run_id, [fb])
         self.assertIn("INCOMPLETE", context)
-        with self.assertRaises(FeedbackDecisionError) as ctx:
+        with self.assertRaises(OpError) as ctx:
             self.decide(run_id, [{"feedback": fb["id"], "outcome": "ignored", "reason": "笔记"}])
+        self.assertEqual(ctx.exception.code, "INCOMPLETE")
         self.assertIn("clarify", str(ctx.exception))
         report = self.decide(run_id, [{"feedback": fb["id"], "outcome": "clarify",
                                        "reply": "笔记太长被截断了，能把关键要求单独写一条评论吗？"}])
@@ -169,5 +177,5 @@ class IncompleteTextTests(Base):
         self.conn.execute("UPDATE feedback SET payload=?, text=? WHERE id=?", (json.dumps(legacy), "x" * 3000, fb["id"]))
         [fb] = feedback.claimed_by(self.conn, run_id)
         self.assertIn("INCOMPLETE", self.context(run_id, [fb]))
-        with self.assertRaises(FeedbackDecisionError):
+        with self.assertRaises(OpError):
             self.decide(run_id, [{"feedback": fb["id"], "outcome": "ignored", "reason": "笔记"}])

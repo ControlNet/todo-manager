@@ -159,7 +159,7 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
         finally:
             conn.close()
-        backups = list((self.home / "backups").glob("pre-schema-v7-from-v6-*.sqlite"))
+        backups = list((self.home / "backups").glob(f"pre-schema-v{db.SCHEMA_VERSION}-from-v6-*.sqlite"))
         self.assertEqual(len(backups), 1, "the rollback point is the pre-migration copy")
         old = sqlite3.connect(str(backups[0]))
         try:

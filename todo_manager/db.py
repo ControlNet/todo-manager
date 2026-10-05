@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -553,6 +553,33 @@ ALTER TABLE feedback ADD COLUMN hold_reason TEXT;
 ALTER TABLE notion_comments ADD COLUMN presence TEXT NOT NULL DEFAULT 'listed';
 ALTER TABLE notion_comments ADD COLUMN presence_at TEXT;
 """,
+    # 8: the Hermes-native design (docs/architecture.md). The agent records outcomes with small
+    # commands instead of a decisions file: ``op_log`` makes a retried command return its first
+    # result; a run keeps the hash of the workspace conventions it started with and when its
+    # unhandled claims were released; a conversation segment can be deferred until a date.
+    # Local execution capacity is gone: messages held only for capacity are pending again
+    # (holds for a user's pause stay). Page notes are context now: pending notes items are closed
+    # (the notes stay on the page and in notion_pages.notes_text). The rules tables stay for
+    # audit and export; their content moves to the workspace files on the first open
+    # (``prefs.migrate_rules``, flagged by meta ``prefs.migration_from``).
+    8: """
+CREATE TABLE op_log (
+  key TEXT PRIMARY KEY,
+  context TEXT NOT NULL,
+  command TEXT NOT NULL,
+  result TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+ALTER TABLE runs ADD COLUMN rules_hash TEXT;
+ALTER TABLE runs ADD COLUMN released_at TEXT;
+ALTER TABLE batches ADD COLUMN not_before TEXT;
+ALTER TABLE batches ADD COLUMN defer_reason TEXT;
+UPDATE delegation_messages SET status = 'pending', error = NULL
+  WHERE status = 'waiting_capacity' AND COALESCE(error, '') != 'paused by user';
+UPDATE feedback SET status = 'superseded', applied_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+  result = '{"reason":"page notes are kept as context, not interpreted as feedback (schema 8)"}'
+  WHERE kind = 'page_notes' AND status = 'pending';
+""",
 }
 
 
@@ -594,6 +621,9 @@ def migrate(conn: sqlite3.Connection, target: int = SCHEMA_VERSION) -> None:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(version),))
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES('rules_version', '0') ON CONFLICT(key) DO NOTHING")
+            if version == 8 and current > 0:
+                # The rules of this workspace move to its files on the first open (prefs.ensure_migrated).
+                set_meta(conn, "prefs.migration_from", str(current))
 
 
 def backup_before_migration(conn: sqlite3.Connection, current: int) -> Path | None:

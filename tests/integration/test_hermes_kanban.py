@@ -80,9 +80,8 @@ class HermesKanbanIntegration(WorkspaceCase):
         try:
             kb = BridgeKanban(BOARD, str(HERMES_PY), str(HERMES_REPO), str(defaults))
             self.assertEqual(kb.settings(), {"review_dispatch": True, "auto_decompose": True},
-                             "Hermes defaults are unsafe for a human-review board")
-            self.assertEqual(delegation.check_settings(self.conn, kb)[0].split(";")[0],
-                             "kanban.review_dispatch is true")
+                             "Hermes' defaults: its own reviewer takes review cards")
+            self.assertIn("kanban.review_dispatch is on", delegation.observe_settings(self.conn, kb)["notes"][0])
         finally:
             shutil.rmtree(defaults, ignore_errors=True)
 

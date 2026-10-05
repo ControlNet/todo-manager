@@ -61,7 +61,7 @@ DEFAULTS: dict[str, Any] = {
         "exclude": [],  # blacklist for discovered conversations: ids, DM user ids, channel name globs
         "active_hours": 168,  # agreed: a conversation with a human message this recent is read every run
         "quiet_poll_minutes": 30,  # agreed: other conversations are read at most this often (staggered)
-        "quiet_minutes": 30,  # agreed: >= 30 minutes after the last relevant message
+        "quiet_minutes": 30,  # a conversation is analysed after this many quiet minutes
         "page_size": 200,
         # Replies in threads older than the re-read window (PROPOSED values): threads active in the
         # last thread_watch_days are watched (at most thread_index_max per conversation); older
@@ -119,23 +119,28 @@ DEFAULTS: dict[str, Any] = {
         "max_items_per_run": 20,
         "stale_claim_minutes": 60,
         "max_attempts": 3,
-        # The rendered feedback context of one run (fixed part plus the claimed items); the
-        # oldest items that fit are claimed, the rest waits. Over budget even for one item:
-        # "defer" (no model run; health reports it) or "proceed" (run over budget, reported).
+        # The rendered feedback context of one run; the oldest items that fit are claimed, the
+        # rest waits for the next run (the first item always goes: its text is clipped with a
+        # pointer to the full text).
         "max_context_chars": 60000,
-        "over_budget": "defer",
     },
     "wake": {
-        # Upper bounds for one intake model run; the rest waits for the next run. The whole
-        # rendered context is checked against max_context_chars before the model is woken;
-        # new evidence gets at most max_evidence_chars of it (PROPOSED values). An ambiguity that
-        # could cost the user if missed becomes a question (a `decision` task); at most
-        # max_questions_per_run of them, everything else low-value or unclear is ignored.
+        # Upper bounds for one intake run; the rest waits for the next run (PROPOSED values). The
+        # rendered context is checked against max_context_chars before the model is woken; new
+        # material gets at most max_evidence_chars of it. Each message is shown up to
+        # max_item_chars (a bulk mailing up to max_bulk_item_chars, an earlier message of the
+        # conversation up to max_earlier_chars), with a line naming the command for the rest.
         "max_items_per_run": 60,
         "max_context_chars": 60000,
-        "over_budget": "defer",        # or "proceed": wake even when one conversation does not fit
         "max_evidence_chars": 40000,
-        "max_questions_per_run": 3,
+        "max_item_chars": 4000,
+        "max_bulk_item_chars": 800,
+        "max_earlier_chars": 600,
+        # A conversation offered to this many runs without an outcome for every message is
+        # marked failed (reported by health; its messages are kept).
+        "max_attempts": 3,
+        # A source failing this long is reported once a day (a cron failure Hermes delivers).
+        "problem_minutes": 60,
     },
 }
 

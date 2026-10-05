@@ -6,7 +6,8 @@ decides whether the text is information, a requirement for the task or its deleg
 or (only when stated as such) a lasting rule.
 """
 
-from todo_manager import clock, delegation, feedback, feedback_flow, store
+from todo_manager import clock, delegation, feedback, store
+from tests.flow import feedback_context
 from todo_manager.kanban import FakeKanban
 from todo_manager.notion import body
 from tests.test_feedback import GateCase
@@ -90,9 +91,8 @@ class BodyFeedbackTests(GateCase):
         self.assertTrue(woke)
         fb = feedback.claimed_by(self.conn, run_id)[0]
         self.assertEqual(fb["kind"], "page_notes")
-        context = feedback_flow.render_context(self.conn, self.cfg, run_id, [fb])
+        context = feedback_context(self.conn, self.cfg, run_id, [fb])
         self.assertIn("截止日期是周五", context)
-        self.assertIn("not a rule", context)
         self.decide(run_id, [{"feedback": fb["id"], "outcome": "applied", "ops": [
             {"op": "message", "delegation": did, "kind": "supplement", "body": "回复里要提到截止日期是周五"}]}])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM delegation_messages WHERE delegation_id=? AND"
@@ -104,7 +104,7 @@ class BodyFeedbackTests(GateCase):
         _, _, run_id = self.gate()
         fid = feedback.claimed_by(self.conn, run_id)[0]["id"]
         self.decide(run_id, [{"feedback": fid, "outcome": "ignored", "reason": "个人笔记"}])
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM rules").fetchone()[0], 0)
+        self.assertEqual(feedback.get(self.conn, fid)["status"], "ignored")
 
     def test_bot_marker_is_not_user_content(self):
         self.assertEqual(body.outside(self.fake.markdown[self.page]).strip(), "")

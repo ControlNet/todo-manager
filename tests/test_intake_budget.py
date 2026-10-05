@@ -1,13 +1,14 @@
 """R14: one intake run stays within the rendered context budget. An oversize conversation is
 processed in segments (the unread part stays pending in its own batch), without blocking other
-sources. Model decisions are written by the test (every new item ignored or linked)."""
+sources. The agent's outcomes are recorded by the test (every new item dismissed)."""
 
 from dataclasses import replace
 
-from todo_manager import clock, gate_intake, health, intake, store
-from todo_manager.db import rules_version
+from todo_manager import clock, gate_intake, health, ops, store
+from todo_manager.context import run_batches, run_items
+from tests.flow import run_ctx, run_id_of, run_summary, wake_of
 from tests.helpers import WorkspaceCase, mail, slack
-from tests.test_intake import FakeSource, run_id_of, wake_of
+from tests.test_intake import FakeSource
 
 TOTAL = 20000
 EVIDENCE = 12000
@@ -28,17 +29,16 @@ class Base(WorkspaceCase):
         return out
 
     def context(self, out):
-        run_id = run_id_of(out)
-        return intake.render_context(self.conn, self.cfg, run_id, gate_intake.manifest_for(self.cfg, run_id))
+        """The gate's output is the run's context."""
+        return out
 
     def finish(self, out):
-        """Model stand-in: ignores every new item of the run (all covered)."""
+        """Agent stand-in: dismisses every new item of the run, then ends it."""
         run_id = run_id_of(out)
-        manifest = gate_intake.manifest_for(self.cfg, run_id)
-        ids = [i["id"] for i in intake.run_new_items(self.conn, run_id)]
-        return intake.apply_decisions(self.conn, self.cfg, run_id, {
-            "run_id": run_id, "rules_version": rules_version(self.conn),
-            "items": [{"op": "ignore", "items": ids, "category": "fyi_no_action", "rationale": "test"}]}, manifest)
+        ids = [i["id"] for i in run_items(self.conn, run_id)]
+        ops.item_dismiss(self.conn, self.cfg, run_ctx(self.conn, self.cfg, run_id), ids, outcome="informational",
+                         reason="test")
+        return ops.run_done(self.conn, self.cfg, run_id)
 
     def states(self, conversation_key):
         return [r[0] for r in self.conn.execute(
@@ -61,7 +61,7 @@ class BudgetTests(Base):
         self.assertTrue(wake_of(out))
         context = self.context(out)
         self.assertLessEqual(len(context), TOTAL)
-        self.assertIn("more chars; `todo-manager source show", context)
+        self.assertIn("more characters: `todo-manager source show", context)
 
     def test_a_huge_thread_is_processed_in_segments_and_nothing_unread_is_marked_processed(self):
         self.huge_thread()
@@ -73,21 +73,21 @@ class BudgetTests(Base):
             self.assertTrue(wake_of(out), "a pending segment keeps waking runs")
             context = self.context(out)
             self.assertLessEqual(len(context), TOTAL)
-            run_items = [i["id"] for i in intake.run_new_items(self.conn, run_id_of(out))]
-            self.assertTrue(run_items)
-            self.assertFalse(set(run_items) & set(seen_new), "no message is given as new twice")
+            new_ids = [i["id"] for i in run_items(self.conn, run_id_of(out))]
+            self.assertTrue(new_ids)
+            self.assertFalse(set(new_ids) & set(seen_new), "no message is given as new twice")
             later = self.conn.execute(
                 "SELECT id FROM source_items WHERE conversation_key=? AND occurred_at > (SELECT MAX(occurred_at)"
-                " FROM source_items WHERE id IN (%s))" % ",".join("?" * len(run_items)), (key, *run_items)).fetchall()
+                " FROM source_items WHERE id IN (%s))" % ",".join("?" * len(new_ids)), (key, *new_ids)).fetchall()
             for (later_id,) in later:
                 self.assertNotIn(later_id, context, "later messages are not shown as earlier context")
             if runs:
                 self.assertIn("[earlier]", context, "a continuation sees the preceding messages")
             self.finish(out)
             states = self.states(key)
-            self.assertEqual(states.count("processed"), len(seen_new) + len(run_items),
+            self.assertEqual(states.count("processed"), len(seen_new) + len(new_ids),
                              "only the rendered segment is marked processed")
-            seen_new.extend(run_items)
+            seen_new.extend(new_ids)
             runs += 1
             clock.advance(minutes=5)
             self.assertLess(runs, 30)
@@ -107,7 +107,7 @@ class BudgetTests(Base):
         self.cfg.data["wake"]["max_items_per_run"] = 10
         self.huge_thread(n=25, size=20)
         out = self.gate()
-        self.assertEqual(len(intake.run_new_items(self.conn, run_id_of(out))), 10)
+        self.assertEqual(len(run_items(self.conn, run_id_of(out))), 10)
 
     def test_a_segment_waits_while_the_previous_one_is_in_flight_but_other_sources_do_not(self):
         self.huge_thread()
@@ -117,12 +117,12 @@ class BudgetTests(Base):
         clock.advance(minutes=16)
         out2 = self.gate()
         self.assertTrue(wake_of(out2))
-        sources = {i["source"] for i in intake.run_new_items(self.conn, run_id_of(out2))}
+        sources = {i["source"] for i in run_items(self.conn, run_id_of(out2))}
         self.assertEqual(sources, {"gmail"}, "the next segment of the in-flight thread waits; email does not")
         self.finish(out1)
         clock.advance(minutes=5)
         out3 = self.gate()
-        self.assertEqual({i["source"] for i in intake.run_new_items(self.conn, run_id_of(out3))}, {"slack"})
+        self.assertEqual({i["source"] for i in run_items(self.conn, run_id_of(out3))}, {"slack"})
 
     def test_multiple_threads_share_runs_round_robin_within_budget(self):
         self.gmail.push(*[mail(f"m{i}", f"t{i}", f"thread {i} " + "x" * 3500) for i in range(5)])
@@ -133,45 +133,44 @@ class BudgetTests(Base):
             if not wake_of(out):
                 break
             self.assertLessEqual(len(self.context(out)), TOTAL)
-            sources_per_run.append({i["source"] for i in intake.run_new_items(self.conn, run_id_of(out))})
+            sources_per_run.append({i["source"] for i in run_items(self.conn, run_id_of(out))})
             self.finish(out)
             clock.advance(minutes=5)
         self.assertEqual(sources_per_run[0], {"gmail", "slack"}, "neither source crowds the other out")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM source_items WHERE state='batched'").fetchone()[0], 0)
 
-    def test_open_tasks_and_rules_shrink_the_evidence_budget(self):
+    def test_the_fixed_part_shrinks_the_evidence_budget(self):
         for i in range(60):
-            store.create_task(self.conn, f"Task {i:02d} " + "t" * 80, origin="cli", actor="human")
+            store.create_project(self.conn, f"Project {i:02d} " + "p" * 80, origin="cli", actor="human")
         self.gmail.push(*[mail(f"m{i}", f"t{i}", f"thread {i} " + "x" * 3000) for i in range(4)])
         self.gate()
         clock.advance(minutes=16)
         out = self.gate()
         context = self.context(out)
         self.assertLessEqual(len(context), TOTAL)
-        claimed = len(intake.run_batches(self.conn, run_id_of(out)))
+        claimed = len(run_batches(self.conn, run_id_of(out)))
         self.assertLess(claimed, 4, "fixed context leaves room for fewer conversations")
-        self.assertIn(f"Context: {len(context)} chars", out)
+        self.assertEqual(run_summary(self.conn, run_id_of(out))["context_chars"], len(context))
 
-    def test_an_oversize_fixed_context_is_reported_not_silent(self):
-        self.cfg.data["wake"]["max_context_chars"] = 3000   # smaller than the decisions format alone
-        self.cfg.data["wake"]["over_budget"] = "proceed"     # opted in; the default defers (test_context_budget)
+    def test_an_oversize_fixed_context_is_reported_not_silent_and_never_waits(self):
+        self.cfg.data["wake"]["max_context_chars"] = 1500   # smaller than the fixed part alone
         self.gmail.push(mail("m1", "t1", "Can you send the report?"))
         self.gate()
         clock.advance(minutes=16)
         out = self.gate()
         self.assertTrue(wake_of(out), "still makes progress, one conversation at a time")
-        self.assertIn("over budget", out)
+        self.assertGreater(run_summary(self.conn, run_id_of(out))["context_over_budget"], 1500)
         self.assertTrue(any("context" in p and "budget" in p for p in health.report(self.conn, self.cfg)["problems"]))
 
     def test_a_failed_segment_is_retried_alone_and_does_not_block_the_rest(self):
         self.huge_thread()
         out = self.gate()
-        first = sorted(i["id"] for i in intake.run_new_items(self.conn, run_id_of(out)))
+        first = sorted(i["id"] for i in run_items(self.conn, run_id_of(out)))
         for attempt in range(2):          # the run never applies; its claim goes stale and is retried
             clock.advance(minutes=100)
             out = self.gate()
             self.assertTrue(wake_of(out))
-            self.assertEqual(sorted(i["id"] for i in intake.run_new_items(self.conn, run_id_of(out))), first,
+            self.assertEqual(sorted(i["id"] for i in run_items(self.conn, run_id_of(out))), first,
                              "the same segment is retried, not merged with the rest")
             self.assertLessEqual(len(self.context(out)), TOTAL)
         clock.advance(minutes=100)
@@ -179,9 +178,9 @@ class BudgetTests(Base):
         failed = self.conn.execute("SELECT COUNT(*) FROM batches WHERE state='failed'").fetchone()[0]
         self.assertEqual(failed, 1)
         self.assertTrue(wake_of(out), "the rest of the thread continues")
-        rest = {i["id"] for i in intake.run_new_items(self.conn, run_id_of(out))}
+        rest = {i["id"] for i in run_items(self.conn, run_id_of(out))}
         self.assertFalse(rest & set(first))
-        self.assertEqual(self.states("slack:C1:T1").count("processed"), 0, "a failed segment is not processed")
+        self.assertEqual(self.states("slack:C1:T1").count("processed"), 0, "a failed segment is not handled")
 
 
 class QuietSegmentTests(Base):
@@ -191,7 +190,7 @@ class QuietSegmentTests(Base):
     the new messages follow in a later run, after the quiet window."""
 
     def slack_sources(self, out):
-        return [i for i in intake.run_new_items(self.conn, run_id_of(out)) if i["source"] == "slack"]
+        return [i for i in run_items(self.conn, run_id_of(out)) if i["source"] == "slack"]
 
     def test_new_activity_holds_the_unclaimed_tail_until_quiet(self):
         self.huge_thread()

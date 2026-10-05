@@ -197,9 +197,10 @@ class FreshInstallTests(InstallCase):
         # Notion: the chosen page became the home page.
         self.assertIn("数据新鲜度", self.world.notion.markdown[home])
         self.assertEqual(len(self.world.notion.data_sources), 2)
-        # Kanban: global switches set through Hermes, board created.
-        self.assertEqual(self.world.hermes_config["kanban.review_dispatch"], "false")
+        # Kanban: board created; Hermes' global switches are explained, never changed.
+        self.assertEqual(self.world.hermes_calls("config", "set"), [])
         self.assertTrue(self.world.kanban.board_exists)
+        self.assertTrue(any("kanban.review_dispatch is on" in n for n in run.report), run.report)
         # Hermes: jobs created paused, then started.
         jobs = json.loads(self.world.jobs_file.read_text())["jobs"]
         self.assertEqual(len(jobs), 2)
@@ -367,7 +368,7 @@ class ConfirmationTests(InstallCase):
         with self.assertRaises(install.NeedsConfirmation) as caught:
             self.install({"notion.home_page": "1"}, yes=("notion",))
         self.assertEqual(caught.exception.step, "kanban")
-        self.assertIn("global", " ".join(caught.exception.changes))
+        self.assertEqual(caught.exception.changes, ["create the Hermes board 'todo-manager'"])
         with self.assertRaises(install.NeedsConfirmation) as caught:
             self.install(yes=("kanban",))
         self.assertEqual(caught.exception.step, "hermes")

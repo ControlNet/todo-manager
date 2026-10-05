@@ -1,12 +1,20 @@
-"""Pre-run gate for entry point A (information intake), executed by Hermes cron every 5 min.
+"""Pre-run gate of the intake job (Hermes cron, every few minutes).
 
-Deterministic work only: fetch + persist sources, accumulate and mature batches, decide
-whether anything deserves a model run. Prints a short, safe context (IDs and counts, never
-source text) followed by the wake line ``{"wakeAgent": ...}`` as the LAST stdout line.
+Deterministic work only: fetch and persist the sources, accumulate and mature conversation
+batches, and decide whether anything deserves a model run. Its stdout is the run's context
+(``context.intake``), printed directly into the agent's prompt by Hermes; when there is
+nothing to do it prints only ``{"wakeAgent": false}`` and no model runs.
 
-Wake reasons: mature batches (per-source policy in ``batching``), follow-ups due, the daily
-commit digest, and bounded retries of semantic work that did not complete. An API failure
-is recorded (freshness/health) and never turned into "no changes".
+Outcomes, as Hermes sees them:
+
+* nothing to do -> ``{"wakeAgent": false}`` (a successful, silent run);
+* material, due follow-ups or the commit digest -> the context (the agent records outcomes
+  with ``todo-manager`` commands and ends with ``run done``);
+* a source keeps failing while there is nothing else to do -> a short context that only
+  reports it, at most once a day per problem (the prompt has the agent answer
+  ``[CRON_FAILURE]``, Hermes' failure path); with other work the problem is listed in the context;
+* the gate itself fails -> ``GateError``; the command exits non-zero, Hermes wakes the agent
+  with a Script Error and the prompt has it answer ``[CRON_FAILURE]``. Never a fake idle.
 """
 
 from __future__ import annotations
@@ -17,14 +25,21 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import batching, clock, intake, runs
+from . import batching, clock, context, prefs, runs
 from .config import Config
-from .db import tx
+from .db import dumps, get_meta, loads, set_meta, tx
 from .sources.base import SourceError, get_cursor, persist_fetch, record_fetch_error, retire_scopes
 
+IDLE = '{"wakeAgent": false}'
+SOURCES = ("gmail", "slack", "github", "commit")
 FETCH_BUDGET_SECONDS = 200
-STALE_CLAIM_MINUTES = 90
+STALE_CLAIM_MINUTES = 90       # lease of a run's claims when it never reports back
 FOLLOWUP_ATTEMPTS = 2
+PROBLEMS_KEY = "gate.problems_reported"
+
+
+class GateError(RuntimeError):
+    """The gate could not do its work; reported to Hermes as a failed script."""
 
 
 def fetch_all(conn: sqlite3.Connection, adapters: list[Any], budget: float = FETCH_BUDGET_SECONDS) -> dict[str, Any]:
@@ -123,12 +138,9 @@ def commit_digest_check(conn: sqlite3.Connection, cfg: Config, adapters: list[An
         if row["state"] in ("done", "skipped", "exhausted"):
             return None, info
         if row["state"] == "claimed":
-            run = runs.get(conn, row["run_id"]) if row["run_id"] else None
-            age = clock.minutes_since(row["updated_at"]) or 0
-            if run and run.get("agent_completed_at"):
-                return None, info
-            if age < STALE_CLAIM_MINUTES:
-                return None, info  # still in flight
+            age = clock.minutes_since(row["updated_at"])
+            if age is not None and age < STALE_CLAIM_MINUTES:
+                return None, info  # still in flight (``run done`` without ``digest done`` clears the stamp)
         if row["attempts"] >= max_attempts:
             with tx(conn):
                 conn.execute("UPDATE daily_jobs SET state='exhausted', updated_at=? WHERE job='commit_digest' AND day=?",
@@ -162,9 +174,10 @@ def commit_digest_check(conn: sqlite3.Connection, cfg: Config, adapters: list[An
 
 def due_followups(conn: sqlite3.Connection, cfg: Config) -> list[str]:
     """Open tasks whose follow-up date has come. One check per (task, follow-up date): it is
-    claimed by a run and done only when that run's decisions are applied; a run that never
-    applies releases it after ``STALE_CLAIM_MINUTES`` for a bounded number of attempts, then it
-    is marked failed (reported by health). A new follow-up date is a new check."""
+    claimed by a run and done when that run updates the task or reports it checked; a run that
+    ends without either (``run done``) or never reports back (lease) leaves it due again, for a
+    bounded number of attempts, then it is marked failed (reported by health). A new follow-up
+    date is a new check."""
     today = clock.local_date(cfg.tz).isoformat()
     cutoff = clock.iso(clock.now() - timedelta(minutes=STALE_CLAIM_MINUTES))
     rows = conn.execute(
@@ -198,12 +211,35 @@ def claim_followups(conn: sqlite3.Connection, run_id: str, task_ids: list[str]) 
             (run_id, now, now, tid))
 
 
+def problems_due(conn: sqlite3.Connection, cfg: Config, entry: str, sources: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Sources failing for at least ``wake.problem_minutes`` that ``entry`` did not report
+    today. A problem that clears is forgotten, so a new outage is reported again."""
+    minimum = float(cfg.get("wake.problem_minutes", 60))
+    current = []
+    for p in context.source_problems(conn, sources):
+        age = clock.minutes_since(p["since"])
+        if (age is None and p["failures"] >= 3) or (age is not None and age >= minimum):
+            current.append(p)
+    today = clock.local_date(cfg.tz).isoformat()
+    key = f"{PROBLEMS_KEY}.{entry}"
+    reported = loads(get_meta(conn, key), {}) or {}
+    signatures = {f"{p['source']}:{p['scope']}" for p in current}
+    due = [p for p in current if reported.get(f"{p['source']}:{p['scope']}") != today]
+    with tx(conn):
+        set_meta(conn, key, dumps({**{k: v for k, v in reported.items() if k in signatures},
+                                            **{f"{p['source']}:{p['scope']}": today for p in due}}))
+    return due
+
+
 def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[Any],
              commit_adapters: list[Any]) -> tuple[str, bool]:
     run_id = runs.start(conn, "intake")
     summary: dict[str, Any] = {}
     try:
-        summary["recovery"] = batching.release_stale_claims(conn, STALE_CLAIM_MINUTES)
+        with tx(conn):
+            conn.execute("UPDATE runs SET rules_hash=? WHERE id=?", (prefs.file_hash(cfg.home), run_id))
+        attempts = int(cfg.get("wake.max_attempts", 3))
+        summary["recovery"] = batching.release_stale_claims(conn, STALE_CLAIM_MINUTES, attempts)
         summary["fetch"] = fetch_all(conn, conversation_adapters)
         summary["matured"] = len(batching.mature_batches(conn, cfg))
         digest, digest_info = commit_digest_check(conn, cfg, commit_adapters)
@@ -215,30 +251,29 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[
             extra.append(f"commit_digest:{len(digest['item_ids'])}")
         if followups:
             extra.append(f"followups_due:{len(followups)}")
-        draft = {"followups": followups, "digest": digest}
+
+        def render(reasons: list[str], problems: list[dict[str, Any]]) -> str:
+            return context.intake(conn, cfg, run_id, followups=followups, digest=digest, problems=problems,
+                                  reasons=reasons)
+
         base_chars = 0
         if extra or conn.execute("SELECT 1 FROM batches WHERE state='mature' LIMIT 1").fetchone():
-            base_chars = len(intake.render_context(conn, cfg, run_id, draft))   # nothing claimed yet
+            base_chars = len(render(extra, []))   # nothing claimed yet: the fixed part
         plan = batching.plan_intake_wake(conn, cfg, extra, base_chars=base_chars)
         if plan.deferred:
             summary["deferred_by_interval"] = plan.deferred
+        problems = problems_due(conn, cfg, "intake", SOURCES)
+        if problems:
+            summary["problems_reported"] = [f"{p['source']}:{p['scope']}" for p in problems]
         if not plan.wake:
+            if problems:
+                runs.finish(conn, run_id, status="woke", wake=True, reasons=["source_problems"], summary=summary)
+                shown = context.final_check(context.problems_only(cfg, run_id, "intake", problems))
+                runs.write_text(cfg.home, run_id, "context.md", shown)   # what the agent was shown
+                return shown, True
             runs.finish(conn, run_id, status="idle", summary=summary)
-            return '{"wakeAgent": false}', False
+            return IDLE, False
         claimed = batching.claim(conn, plan.batch_ids, run_id)
-        claimed, context_chars = fit_rendered(conn, cfg, run_id, claimed, draft)
-        summary["context_chars"] = context_chars
-        total = int(cfg.get("wake.max_context_chars", 60000))
-        if context_chars > total:
-            summary["context_over_budget"] = context_chars
-            if cfg.get("wake.over_budget", "defer") != "proceed":
-                # Not even one conversation fits: no model run over budget unless the user opted
-                # in. Claims are undone (not attempts); health reports and alerts it.
-                for batch_id in claimed:
-                    batching.unclaim(conn, batch_id, run_id)
-                summary["deferred_over_budget"] = total
-                runs.finish(conn, run_id, status="idle", summary=summary)
-                return '{"wakeAgent": false}', False
         now = clock.iso()
         with tx(conn):
             claim_followups(conn, run_id, followups)
@@ -248,45 +283,40 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[
                     " ('commit_digest', ?, 'claimed', 1, ?, ?) ON CONFLICT(job, day) DO UPDATE SET state='claimed',"
                     " attempts=daily_jobs.attempts+1, run_id=excluded.run_id, updated_at=excluded.updated_at",
                     (digest["day"], run_id, now))
+        claimed, text = fit_rendered(conn, cfg, run_id, claimed, lambda: render(plan.reasons, problems))
+        summary["context_chars"] = len(text)
+        if len(text) > int(cfg.get("wake.max_context_chars", 60000)):
+            summary["context_over_budget"] = len(text)   # one clipped item over budget: run anyway (health)
         manifest = {"run_id": run_id, "created_at": now, "batch_ids": claimed, "followups": followups,
                     "digest": digest, "reasons": plan.reasons}
         runs.write_json(cfg.home, run_id, "manifest.json", manifest)
         runs.finish(conn, run_id, status="woke", wake=True, reasons=plan.reasons, summary=summary)
-        lines = [
-            f"Todo Manager intake run: {run_id}",
-            f"Wake reasons: {', '.join(plan.reasons)}",
-            f"Conversations claimed: {len(claimed)}; follow-ups due: {len(followups)};"
-            f" commit digest: {'yes' if digest else 'no'}",
-            f"Context: {context_chars} chars (budget {total})" + (
-                "; over budget: the fixed part (rules, open tasks, follow-ups, digest, format) is too large"
-                if context_chars > total else ""),
-            f"Do: load skill todo-manager, run `todo-manager intake show {run_id}`, decide, then `todo-manager intake apply {run_id} --file <decisions.json>`.",
-            '{"wakeAgent": true}',
-        ]
-        return "\n".join(lines), True
-    except Exception as exc:  # noqa: BLE001 - never wake the model for a gate crash
+        shown = context.final_check(text)
+        runs.write_text(cfg.home, run_id, "context.md", shown)   # what the agent was shown
+        return shown, True
+    except Exception as exc:  # noqa: BLE001 - recorded, then reported to Hermes as a failed script
         runs.finish(conn, run_id, status="error", summary=summary, error=f"{type(exc).__name__}: {exc}")
-        return '{"wakeAgent": false}', False
+        raise GateError(f"intake gate failed in run {run_id}: {type(exc).__name__}: {exc}") from exc
 
 
 def fit_rendered(conn: sqlite3.Connection, cfg: Config, run_id: str, claimed: list[str],
-                 draft: dict[str, Any]) -> tuple[list[str], int]:
-    """Check the real rendered context against ``wake.max_context_chars``: give back the last
-    claimed conversations, then split the only one left, until it fits or one message remains
-    (then the size is reported as over budget, never silently cut)."""
+                 render: Any) -> tuple[list[str], str]:
+    """Check the rendered context against ``wake.max_context_chars``: give back the last
+    claimed conversations, then split the only one left, until it fits or one message remains.
+    One message is always offered (it is clipped per item), so nothing waits forever."""
     total = int(cfg.get("wake.max_context_chars", 60000))
     claimed = list(claimed)
     while True:
-        size = len(intake.render_context(conn, cfg, run_id, draft))
-        if size <= total or not claimed:
-            return claimed, size
+        text = render()
+        if len(text) <= total or not claimed:
+            return claimed, text
         if len(claimed) > 1:
             batching.unclaim(conn, claimed.pop(), run_id)
             continue
-        count = len(intake.run_new_items(conn, run_id))
+        count = len(context.run_items(conn, run_id))
         if count <= 1:
-            return claimed, size
-        batching.split_batch(conn, claimed[0], 10 ** 9, count // 2)
+            return claimed, text
+        batching.split_batch(conn, cfg, claimed[0], 10 ** 9, count // 2)
 
 
 def manifest_for(cfg: Config, run_id: str) -> dict[str, Any]:
@@ -294,4 +324,3 @@ def manifest_for(cfg: Config, run_id: str) -> dict[str, Any]:
     if manifest is None:
         raise FileNotFoundError(f"no manifest for run {run_id}")
     return manifest
-

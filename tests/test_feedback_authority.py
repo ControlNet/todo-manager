@@ -2,13 +2,13 @@
 
 R07 (author is an authorization boundary), R10 (comment version includes the content),
 R11 (an unconfirmed program write is not a human edit). FakeNotion and FakeKanban are
-test doubles; model decisions are written by the test.
+test doubles; what the agent records is written by the test.
 """
 
-from todo_manager import delegation, feedback, feedback_flow, health, store
-from todo_manager.db import rules_version
-from todo_manager.feedback_flow import FeedbackDecisionError
+from todo_manager import delegation, feedback, health, ops, store
+from todo_manager.ops import OpError
 from tests.fake_notion import USER_ID
+from tests.flow import apply_direct, apply_feedback_ops
 from tests.test_feedback import GateCase
 from tests.test_notion import NotionCase
 
@@ -48,15 +48,16 @@ class NonUserFeedbackTests(GateCase):
             {"op": "message", "delegation": did, "kind": "cancel", "body": "取消"},
             {"op": "message", "delegation": did, "kind": "supplement", "body": "顺便抄送我"},
             {"op": "create_task", "title": "新任务"},
-            {"op": "rule", "title": "以后都这样", "body": "x", "status": "active"},
         ]
         for op in forbidden:
-            with self.subTest(op=op["op"]), self.assertRaises(FeedbackDecisionError) as ctx:
-                self.decide(run_id, [{"feedback": fid, "outcome": "applied", "ops": [op]}])
-            self.assertIn("not the user", str(ctx.exception))
-        # Evidence only: it may be ignored, or turned into a non-binding suggestion.
-        self.decide(run_id, [{"feedback": fid, "outcome": "applied", "ops": [
-            {"op": "rule", "title": "访客建议", "body": "访客希望改期", "status": "suggested"}]}])
+            with self.subTest(op=op["op"]), self.assertRaises(OpError) as ctx:
+                apply_feedback_ops(self.conn, self.cfg, fid, [op])
+            self.assertEqual(ctx.exception.code, "NOT_THE_USER")
+        with self.assertRaises(OpError):
+            ops.feedback_resolve(self.conn, self.cfg, fid, outcome="ignored")
+        # Information only: resolved with a reason (or a question to the user).
+        self.decide(run_id, [{"feedback": fid, "outcome": "ignored", "reason": "访客的建议，等用户决定"}])
+        self.assertEqual(feedback.get(self.conn, fid)["status"], "ignored")
         self.assertEqual(store.get_task(self.conn, self.task)["due_date"], "2026-10-09")
         self.assertNotEqual(delegation.get(self.conn, did)["status"], "cancelled")
         self.assertFalse(self.conn.execute("SELECT 1 FROM delegation_messages WHERE delegation_id=? AND kind='cancel'",
@@ -120,9 +121,14 @@ class CommentVersionTests(GateCase):
         self.fake.user_edit_comment(cid, "截止日期不用改了")
         self.new_sync().poll_comments()
         version = store.get_task(self.conn, self.task)["version"]
-        report = self.decide(run1, [{"feedback": old, "outcome": "applied", "ops": [
-            {"op": "update_task", "task": self.task, "based_on_version": version, "set": {"due_date": "2026-10-10"}}]}])
-        self.assertEqual(report["superseded"], [old])
+        with self.assertRaises(OpError) as ctx:
+            apply_feedback_ops(self.conn, self.cfg, old, [{"op": "update_task", "task": self.task,
+                                                           "based_on_version": version,
+                                                           "set": {"due_date": "2026-10-10"}}])
+        self.assertEqual(ctx.exception.code, "SUPERSEDED")
+        with self.assertRaises(OpError) as ctx:
+            ops.feedback_resolve(self.conn, self.cfg, old, outcome="applied")
+        self.assertEqual(ctx.exception.code, "SUPERSEDED")
         self.assertEqual(store.get_task(self.conn, self.task)["due_date"], "2026-10-09", "the old version is not applied")
         pending = feedback.pending(self.conn)
         self.assertEqual([f["text"] for f in pending], ["截止日期不用改了"])
@@ -137,7 +143,7 @@ class UnconfirmedWriteTests(GateCase):
         self.push(self.task)
         self.assertEqual(self.fake.prop(self.page, "下一步"), "A：先问导师")
         # 2. The user corrects it to B through Matrix (main agent, direct path).
-        feedback_flow.apply_direct(self.conn, self.cfg, origin="matrix", text="下一步改成 B", source_id="$evt_b", ops=[
+        apply_direct(self.conn, self.cfg, text="下一步改成 B", source_id="$evt_b", op_list=[
             {"op": "update_task", "task": self.task, "based_on_version": store.get_task(self.conn, self.task)["version"],
              "set": {"next_step": "B：直接回复 Bob"}}])
         # 3. The next pull sees A on the page: our own write, not a human edit.
@@ -158,17 +164,15 @@ class UnconfirmedWriteTests(GateCase):
         self.assertEqual(store.get_task(self.conn, self.task)["next_step"], "C：我自己改的")
 
 
-class DecisionFileTests(GateCase):
-    def test_duplicate_feedback_items_are_rejected(self):
+class OneFeedbackManyCommandsTests(GateCase):
+    def test_each_command_of_one_feedback_applies_once(self):
         self.fake.user_comment(self.page, "帮我建两个任务：订会议室、发议程")
         _, _, run_id = self.gate()
         fid = feedback.claimed_by(self.conn, run_id)[0]["id"]
         before = self.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
-        item = {"feedback": fid, "outcome": "applied", "ops": [{"op": "create_task", "title": "订会议室"}]}
-        with self.assertRaises(FeedbackDecisionError) as ctx:
-            self.decide(run_id, [item, {**item, "ops": [{"op": "create_task", "title": "发议程"}]}])
-        self.assertIn("more than once", str(ctx.exception))
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], before)
-        self.decide(run_id, [{"feedback": fid, "outcome": "applied", "ops": [
-            {"op": "create_task", "title": "订会议室"}, {"op": "create_task", "title": "发议程"}]}])
+        two = [{"op": "create_task", "title": "订会议室"}, {"op": "create_task", "title": "发议程"}]
+        apply_feedback_ops(self.conn, self.cfg, fid, two)
+        apply_feedback_ops(self.conn, self.cfg, fid, two[:1])          # a retry after a lost response
+        self.decide(run_id, [{"feedback": fid, "outcome": "applied"}])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], before + 2)
+        self.assertEqual(feedback.get(self.conn, fid)["result"]["ops"], ["task create", "task create"])

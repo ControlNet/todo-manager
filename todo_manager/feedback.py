@@ -1,10 +1,10 @@
 """Human feedback: persisted before use, applied once, with its outcome recorded.
 
-Sources: Notion comments / property edits / page edits (gate B), Matrix and CLI (the main
-agent records what the user said while applying it). Each row keeps the original text,
-source id + version, author, scope, outcome and the rules version it was applied under.
+Sources: Notion comments / property edits / page edits (the feedback job), Matrix and CLI (the
+main agent records what the user said with each change it makes, ``ops.context``). Each row keeps
+the original text, source id + version, author, scope and outcome.
 
-``pending`` rows need semantic interpretation by the model (gate B wakes for them);
+``pending`` rows need interpretation by the model (the feedback job wakes for them);
 deterministic edits (e.g. a changed date property) are applied by code and stored as
 ``applied`` right away.
 """
@@ -15,8 +15,8 @@ import sqlite3
 from datetime import timedelta
 from typing import Any
 
-from . import clock, ids
-from .db import dumps, loads, rules_version, tx
+from . import clock, effects, i18n, ids
+from .db import dumps, loads, tx
 
 ORIGINS = ("notion_comment", "notion_property", "notion_page", "matrix", "cli", "kanban")
 FINAL = ("applied", "clarify", "ignored", "superseded", "failed")
@@ -46,7 +46,7 @@ def record(conn: sqlite3.Connection, *, origin: str, source_id: str, text: str |
             (fid, origin, source_id, source_version, author, 1 if author_is_user else 0, now, text,
              dumps(payload or {}), scope_type, scope_id, kind, status,
              dumps(result) if result is not None else None, now if status in FINAL else None,
-             rules_version(conn) if status in FINAL else None, reply_to))
+             None, reply_to))
         if cur.rowcount == 1:
             return fid, True
         row = conn.execute("SELECT id FROM feedback WHERE origin=? AND source_id=? AND source_version=?",
@@ -92,9 +92,34 @@ def resolve(conn: sqlite3.Connection, feedback_id: str, status: str, result: Any
             error: str | None = None) -> None:
     if status not in FINAL:
         raise FeedbackError(f"invalid final status {status!r}")
-    conn.execute("UPDATE feedback SET status=?, result=?, applied_at=?, rules_version=?, last_error=? WHERE id=?",
-                 (status, dumps(result) if result is not None else None, clock.iso(), rules_version(conn), error,
-                  feedback_id))
+    conn.execute("UPDATE feedback SET status=?, result=?, applied_at=?, last_error=? WHERE id=?",
+                 (status, dumps(result) if result is not None else None, clock.iso(), error, feedback_id))
+
+
+def fail(conn: sqlite3.Connection, feedback_id: str, attempts: int) -> None:
+    """Give up on an item no run resolved; the user is told on its task."""
+    row = conn.execute("SELECT scope_type, scope_id FROM feedback WHERE id=?", (feedback_id,)).fetchone()
+    resolve(conn, feedback_id, "failed", error=f"not resolved after {attempts} runs")
+    if row is not None and row["scope_type"] == "task" and row["scope_id"]:
+        effects.task_comment(conn, row["scope_id"], f"feedback-failed:{feedback_id}",
+                             i18n.t("fb.failed_alert", n=attempts, id=feedback_id))
+
+
+def release(conn: sqlite3.Connection, feedback_ids: list[str], max_attempts: int) -> dict[str, int]:
+    """Claimed items a finished run left unresolved: offered to a later run, or failed once
+    ``max_attempts`` runs had them (inside the caller's transaction)."""
+    stats = {"released": 0, "failed": 0}
+    for fid in feedback_ids:
+        row = conn.execute("SELECT attempts FROM feedback WHERE id=? AND status='pending'", (fid,)).fetchone()
+        if row is None:
+            continue
+        if row["attempts"] >= max_attempts:
+            fail(conn, fid, row["attempts"])
+            stats["failed"] += 1
+        else:
+            conn.execute("UPDATE feedback SET claimed_run=NULL, claimed_at=NULL WHERE id=?", (fid,))
+            stats["released"] += 1
+    return stats
 
 
 def supersede(conn: sqlite3.Connection, feedback_ids: list[str], reason: str, by: str | None = None) -> int:

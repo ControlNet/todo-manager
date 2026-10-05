@@ -2,7 +2,7 @@
 point, and a retry after a lost response checks the card before deciding anything.
 
 C04 * An accept needs a delivered version under review when it is queued: the CLI, Matrix
-      (apply-direct) and the scheduled feedback run share ``delegation.add_message``, which
+      (``--request``) and the scheduled feedback run (``--feedback``) share ``delegation.add_message``, which
       refuses an accept with nothing to accept instead of storing one that would later complete
       whatever arrives next.
     * Messages queued by older code: ``target_seq`` NULL (before versions were bound) is bound
@@ -19,7 +19,9 @@ import contextlib
 import io
 from datetime import timedelta
 
-from todo_manager import cli, clock, delegation, feedback_flow
+from todo_manager import cli, clock, delegation
+from todo_manager.ops import OpError
+from tests.flow import apply_direct, apply_feedback_ops, user_feedback
 from tests.helpers import T0
 from tests.test_delegation_binding import BindingBase
 
@@ -42,12 +44,11 @@ class AcceptNeedsADeliveryTests(BindingBase):
     def test_matrix_and_scheduled_feedback_refuse_it_too(self):
         did, card = self.running()
         ops = [{"op": "message", "delegation": did, "kind": "accept", "body": "可以"}]
-        with self.assertRaises(feedback_flow.FeedbackDecisionError):
-            feedback_flow.apply_direct(self.conn, self.cfg, origin="matrix", text="可以", ops=ops,
-                                       source_id="$evt1")
-        fb = {"id": "fbk_x", "origin": "notion_comment", "author_is_user": 1, "payload": {}}
-        with self.assertRaises(delegation.DelegationError):
-            feedback_flow.apply_ops(self.conn, self.cfg, fb, ops)   # even past the decision validation
+        with self.assertRaises(OpError):
+            apply_direct(self.conn, self.cfg, text="可以", op_list=ops, source_id="$evt1")
+        with self.assertRaises(OpError):
+            apply_feedback_ops(self.conn, self.cfg, user_feedback(self.conn, "c-x", origin="notion_comment"), ops)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM delegation_messages WHERE kind='accept'").fetchone()[0], 0)
 
     def test_an_accept_stored_without_a_version_is_never_sent(self):
         did, card = self.running()

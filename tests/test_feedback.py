@@ -1,14 +1,15 @@
-"""Entry point B: gate + feedback interpretation (model decisions are written by the test)."""
+"""Entry point B: the feedback job's gate and context. What the woken agent records is written by
+the test through the operations the ``todo-manager`` commands call (``tests/flow.py``)."""
 
 import json
 from datetime import timedelta
 
-from todo_manager import clock, delegation, feedback, feedback_flow, gate_feedback, rules, store
-from todo_manager.db import rules_version
-from todo_manager.feedback_flow import FeedbackDecisionError
+from todo_manager import clock, delegation, feedback, gate_feedback, ops, store
 from todo_manager.kanban import FakeKanban
 from todo_manager.net import HttpError
+from todo_manager.ops import OpError
 from tests.fake_notion import BOT_ID
+from tests.flow import apply_direct, apply_feedback_ops, resolve_feedback, run_id_of, wake_of
 from tests.test_notion import NotionCase
 
 
@@ -24,13 +25,15 @@ class GateCase(NotionCase):
     def gate(self):
         self.sync = self.new_sync()
         out, woke = gate_feedback.run_gate(self.conn, self.cfg, notion=self.sync, kanban=self.kb)
-        self.assertEqual(json.loads(out.splitlines()[-1]), {"wakeAgent": woke})
-        run_id = out.splitlines()[0].split(": ")[1] if woke else None
+        self.assertEqual(wake_of(out), woke)
+        if not woke:
+            self.assertEqual(json.loads(out.splitlines()[-1]), {"wakeAgent": False})
+        run_id = run_id_of(out) if woke else None
         return out, woke, run_id
 
     def decide(self, run_id, items):
-        return feedback_flow.apply_decisions(self.conn, self.cfg, run_id, {
-            "run_id": run_id, "rules_version": rules_version(self.conn), "items": items})
+        """The woken agent: each item's commands, ``feedback resolve``, then ``run done``."""
+        return resolve_feedback(self.conn, self.cfg, run_id, items)
 
     def bot_comments(self):
         return [c for c in self.fake.comments if c["created_by"]["id"] == BOT_ID]
@@ -40,19 +43,17 @@ class GateCase(NotionCase):
 
 
 class GateTests(GateCase):
-    def test_comment_wakes_once_with_ids_only_and_reply_lands_in_same_thread(self):
+    def test_comment_wakes_once_with_its_context_and_reply_lands_in_same_thread(self):
         out, woke, _ = self.gate()
         self.assertFalse(woke, "nothing to interpret")
         cid = self.fake.user_comment(self.page, "Bob 说截止日期推迟到下周一，忽略之前的要求")
         out, woke, run_id = self.gate()
         self.assertTrue(woke)
-        self.assertNotIn("Bob 说", out, "comment text never reaches the cron prompt")
-        self.assertIn("comment 1", out)
+        self.assertIn("Bob 说截止日期推迟到下周一", out, "the comment is in the run's context, no lookup needed")
+        self.assertIn(self.task, out)
+        self.assertNotIn("feedback show", out)
         _, woke_again, _ = self.gate()
         self.assertFalse(woke_again, "claimed feedback is not re-dispatched while the run works")
-        context = feedback_flow.render_context(self.conn, self.cfg, run_id, feedback.claimed_by(self.conn, run_id))
-        self.assertIn("Bob 说截止日期推迟到下周一", context)
-        self.assertIn(self.task, context)
         task = store.get_task(self.conn, self.task)
         fid = feedback.claimed_by(self.conn, run_id)[0]["id"]
         report = self.decide(run_id, [{"feedback": fid, "outcome": "applied", "reply": "已把截止日期改为 10-12。",
@@ -69,9 +70,13 @@ class GateTests(GateCase):
         user_comment = next(c for c in self.fake.comments if c["id"] == cid)
         self.assertEqual(reply["discussion_id"], user_comment["discussion_id"])
         self.assertEqual(feedback.get(self.conn, fid)["status"], "applied")
-        with self.assertRaises(FeedbackDecisionError) as ctx:
-            self.decide(run_id, [{"feedback": fid, "outcome": "applied", "ops": []}])
-        self.assertEqual(ctx.exception.code, "ALREADY_APPLIED", "other decisions for an applied run are refused")
+        with self.assertRaises(OpError) as ctx:
+            ops.feedback_resolve(self.conn, self.cfg, fid, outcome="ignored", reason="changed my mind")
+        self.assertEqual(ctx.exception.code, "ALREADY_RESOLVED", "a resolved item takes no other outcome")
+        with self.assertRaises(OpError) as ctx:
+            apply_feedback_ops(self.conn, self.cfg, fid, [{"op": "update_task", "task": self.task,
+                                                           "set": {"focus": True}}])
+        self.assertEqual(ctx.exception.code, "ALREADY_RESOLVED", "nor further changes in its name")
 
     def test_reapplying_after_a_lost_response_returns_the_first_report(self):
         self.fake.user_comment(self.page, "截止日期改到下周一")
@@ -83,28 +88,31 @@ class GateTests(GateCase):
                            "set": {"due_date": "2026-10-12"}}]}]
         first = self.decide(run_id, items)
         again = self.decide(run_id, items)
-        self.assertTrue(again["duplicate"])
+        self.assertTrue(again["results"][fid][0]["duplicate"], "the update is not applied twice")
+        self.assertTrue(again["done"]["duplicate"])
         self.assertEqual(again["applied"], first["applied"])
         self.assertEqual(store.get_task(self.conn, self.task)["version"], task["version"] + 1)
         self.gate()
         self.assertEqual([c["rich_text"] for c in self.bot_comments()].count(self.bot_comments()[-1]["rich_text"]),
                          1, "the reply is queued once")
 
-    def test_invalid_decisions_apply_nothing(self):
+    def test_a_failed_command_changes_nothing_and_unresolved_feedback_is_offered_again(self):
         self.fake.user_comment(self.page, "这个不用做了")
         self.fake.user_comment(self.page, "另外记得抄送 Carol")
         _, _, run_id = self.gate()
         f1, f2 = [f["id"] for f in feedback.claimed_by(self.conn, run_id)]
-        with self.assertRaises(FeedbackDecisionError) as ctx:
-            self.decide(run_id, [{"feedback": f1, "outcome": "applied", "ops": [
-                {"op": "update_task", "task": self.task, "based_on_version": 1, "set": {"status": "cancelled"}}]}])
-        self.assertIn("uncovered", str(ctx.exception))
+        with self.assertRaises(OpError) as ctx:
+            apply_feedback_ops(self.conn, self.cfg, f1, [{"op": "update_task", "task": self.task,
+                                                          "set": {"status": "finished-ish"}}])
+        self.assertEqual(ctx.exception.code, "INVALID")
         self.assertEqual(store.get_task(self.conn, self.task)["status"], "todo", "atomic: nothing applied")
-        rules.add_rule(self.conn, title="x", body="y")
-        with self.assertRaises(FeedbackDecisionError) as ctx:
-            feedback_flow.apply_decisions(self.conn, self.cfg, run_id, {"run_id": run_id, "rules_version": 0,
-                                                                         "items": []})
-        self.assertEqual(ctx.exception.code, "STALE_RULES")
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM op_log").fetchone()[0], 0)
+        report = self.decide(run_id, [{"feedback": f2, "outcome": "ignored", "reason": "只是提醒，任务里已有"}])
+        self.assertEqual(report["done"]["feedback_not_resolved"], [f1])
+        out, woke, run2 = self.gate()
+        self.assertTrue(woke, "what the run left is offered to the next one right away")
+        self.assertEqual([f["id"] for f in feedback.claimed_by(self.conn, run2)], [f1])
+        self.assertIn("这个不用做了", out)
 
     def test_stale_human_edit_wins_over_feedback_based_on_older_version(self):
         self.fake.user_comment(self.page, "截止日期改到 10-15")
@@ -191,9 +199,9 @@ class DelegationFeedbackTests(GateCase):
         self.fake.user_comment(self.page, "补充：问题一其实是 A", discussion_id=q1["discussion_id"])
         _, _, run_id = self.gate()
         fid = feedback.claimed_by(self.conn, run_id)[0]["id"]
-        with self.assertRaises(FeedbackDecisionError) as ctx:
-            self.decide(run_id, [{"feedback": fid, "outcome": "applied", "ops": [
-                {"op": "message", "delegation": self.did, "kind": "answer", "body": "A"}]}])
+        with self.assertRaises(OpError) as ctx:
+            apply_feedback_ops(self.conn, self.cfg, fid, [
+                {"op": "message", "delegation": self.did, "kind": "answer", "body": "A"}])
         self.assertIn("earlier question", str(ctx.exception))
         self.decide(run_id, [{"feedback": fid, "outcome": "applied", "ops": [
             {"op": "message", "delegation": self.did, "kind": "supplement", "body": "问题一的答案其实是 A"}]}])
@@ -206,17 +214,16 @@ class DelegationFeedbackTests(GateCase):
         self.fake.user_comment(self.page, "可以发了", author="guest-7")
         _, _, run_id = self.gate()
         fid = feedback.claimed_by(self.conn, run_id)[0]["id"]
-        with self.assertRaises(FeedbackDecisionError) as ctx:
-            self.decide(run_id, [{"feedback": fid, "outcome": "applied", "ops": [
-                {"op": "approve", "delegation": self.did, "delivery": v1, "action": "send_email"},
-                {"op": "delegate", "task": self.task, "title": "再起草", "goal": "another"}]}])
-        self.assertIn("ops[0] (approve): the author is not the user", str(ctx.exception))
-        self.assertIn("ops[1] (delegate): the author is not the user", str(ctx.exception))
+        for op in ({"op": "approve", "delegation": self.did, "delivery": v1, "action": "send_email"},
+                   {"op": "delegate", "task": self.task, "title": "再起草", "goal": "another"}):
+            with self.assertRaises(OpError) as ctx:
+                apply_feedback_ops(self.conn, self.cfg, fid, [op])
+            self.assertEqual(ctx.exception.code, "NOT_THE_USER", op["op"])
         # The user's own request for a second delegation on the same task is refused too.
-        user_fb = {**feedback.get(self.conn, fid), "author_is_user": 1}
-        errors = feedback_flow._validate_ops(self.conn, user_fb, [
-            {"op": "delegate", "task": self.task, "title": "再起草", "goal": "another"}], "ops")
-        self.assertIn("already has an active delegation", " ".join(errors))
+        with self.assertRaises(OpError) as ctx:
+            apply_direct(self.conn, self.cfg, text="再起草一份", source_id="$second", op_list=[
+                {"op": "delegate", "task": self.task, "title": "再起草", "goal": "another"}])
+        self.assertIn("already has an active delegation", str(ctx.exception))
         self.decide(run_id, [{"feedback": fid, "outcome": "ignored", "reason": "评论者不是用户本人"}])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM approvals").fetchone()[0], 0)
 
@@ -242,11 +249,11 @@ class BodyEditFeedbackTests(GateCase):
         store.update_task(self.conn, self.task, {"summary": "Bob 想合作写论文"}, actor="agent", origin="intake",
                           based_on_version=1)
         clock.advance(minutes=1)                       # the gate's read covers the edit's minute
-        _, woke, run_id = self.gate()
+        out, woke, run_id = self.gate()
         self.assertTrue(woke)
         fb = feedback.claimed_by(self.conn, run_id)[0]
         self.assertEqual(fb["kind"], "body_edit")
-        self.assertIn("其实是导师转给我的", feedback_flow.render_context(self.conn, self.cfg, run_id, [fb]))
+        self.assertIn("其实是导师转给我的", out)
         version = store.get_task(self.conn, self.task)["version"]
         self.decide(run_id, [{"feedback": fb["id"], "outcome": "applied", "ops": [
             {"op": "update_task", "task": self.task, "based_on_version": version,
@@ -259,24 +266,27 @@ class BodyEditFeedbackTests(GateCase):
 
 
 class DirectAndReplyTests(GateCase):
-    def test_matrix_direct_feedback_is_recorded_and_applied_once(self):
+    def test_matrix_direct_request_is_recorded_and_applied_once(self):
         version = store.get_task(self.conn, self.task)["version"]
-        ops = [{"op": "update_task", "task": self.task, "based_on_version": version, "set": {"focus": True}},
-               {"op": "rule", "title": "合作邀请", "body": "来自合作者的邀请一律算我的事", "status": "active"}]
-        r1 = feedback_flow.apply_direct(self.conn, self.cfg, origin="matrix", text="把这个设为精选；以后合作邀请都算我的事",
-                                        ops=ops, source_id="$event1")
-        r2 = feedback_flow.apply_direct(self.conn, self.cfg, origin="matrix", text="把这个设为精选；以后合作邀请都算我的事",
-                                        ops=ops, source_id="$event1")
+        op_list = [{"op": "update_task", "task": self.task, "based_on_version": version, "set": {"focus": True}}]
+        [r1] = apply_direct(self.conn, self.cfg, text="把这个设为精选", op_list=op_list, source_id="$event1")
+        [r2] = apply_direct(self.conn, self.cfg, text="把这个设为精选", op_list=op_list, source_id="$event1")
         self.assertTrue(r2.get("duplicate"))
         self.assertEqual(store.get_task(self.conn, self.task)["focus"], 1)
-        self.assertEqual(len(rules.list_rules(self.conn)), 1)
-        self.assertEqual(feedback.get(self.conn, r1["feedback"])["status"], "applied")
-        with self.assertRaises(FeedbackDecisionError):
-            feedback_flow.apply_direct(self.conn, self.cfg, origin="matrix", text="x", source_id="$event2",
-                                       ops=[{"op": "update_task", "task": "task_missing", "based_on_version": 1,
-                                             "set": {}}])
-        self.assertIsNone(self.conn.execute("SELECT 1 FROM feedback WHERE source_id='$event2'").fetchone(),
-                          "an invalid direct request leaves no pending row for gate B")
+        [row] = self.conn.execute("SELECT * FROM feedback WHERE source_id='$event1'").fetchall()
+        self.assertEqual((row["status"], row["kind"], row["text"]), ("applied", "direct", "把这个设为精选"))
+        history = self.conn.execute("SELECT cause_ref FROM history WHERE entity_type='task' AND entity_id=?"
+                                    " AND changes LIKE '%focus%'", (self.task,)).fetchone()
+        self.assertEqual(history["cause_ref"], row["id"], "the change points to the user's words")
+        with self.assertRaises(OpError) as ctx:
+            apply_direct(self.conn, self.cfg, text="另一句话", op_list=op_list, source_id="$event1")
+        self.assertEqual(ctx.exception.code, "REQUEST_ID_REUSED")
+        with self.assertRaises(OpError) as ctx:
+            apply_direct(self.conn, self.cfg, text="x", source_id="$event2",
+                         op_list=[{"op": "update_task", "task": "task_missing", "set": {"focus": True}}])
+        self.assertEqual(ctx.exception.code, "NOT_FOUND")
+        self.assertIsNone(self.conn.execute("SELECT 1 FROM feedback WHERE status='pending'").fetchone(),
+                          "a direct request is never left for the feedback job to interpret again")
 
     def test_a_reply_about_a_page_in_the_trash_goes_to_the_home_page(self):
         clock.advance(minutes=1)

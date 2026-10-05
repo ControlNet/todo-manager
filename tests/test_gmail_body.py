@@ -5,7 +5,8 @@ recorded as an incomplete body, never silently dropped. HTTP is ``FakeHttp`` (te
 
 import json
 
-from todo_manager import gate_intake, intake
+from todo_manager import gate_intake
+from todo_manager.context import run_items
 from todo_manager.net import HttpError
 from todo_manager.sources.base import SourceError, item_body, persist_fetch
 from todo_manager.sources.gmail import GmailSource
@@ -87,7 +88,8 @@ class GmailBodyTests(WorkspaceCase):
 class GmailContextTests(WorkspaceCase):
     def test_a_clipped_item_in_the_context_says_how_to_read_the_rest(self):
         from tests.helpers import mail
-        from tests.test_intake import FakeSource, run_id_of
+        from tests.flow import run_id_of
+        from tests.test_intake import FakeSource
         from todo_manager import clock
         gmail = FakeSource("gmail", "mailbox:primary")
         self.cfg.data["email"]["min_wake_interval_minutes"] = 0
@@ -96,8 +98,8 @@ class GmailContextTests(WorkspaceCase):
         clock.advance(minutes=16)
         out, _ = gate_intake.run_gate(self.conn, self.cfg, [gmail], [])
         run_id = run_id_of(out)
-        context = intake.render_context(self.conn, self.cfg, run_id, gate_intake.manifest_for(self.cfg, run_id))
+        context = out
         self.assertNotIn(TAIL, context)
         self.assertIn("source show", context)
-        [item] = intake.run_new_items(self.conn, run_id)
+        [item] = run_items(self.conn, run_id)
         self.assertTrue(item_body(self.conn, item["id"]).endswith(TAIL))

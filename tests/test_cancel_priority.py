@@ -9,7 +9,7 @@
 * A cancelled Task always gets a cancel, even when an accept is queued; an explicit cancel is
   never replaced by an accept, and no new answer/accept/... is queued while a cancel is pending.
 * Reopening the Task before the cancel was processed withdraws the cancel and keeps the queue.
-* Entry points: Notion status property, Matrix (apply-direct), CLI task update, explicit cancel
+* Entry points: Notion status property, Matrix (``--request``), CLI task update, explicit cancel
   message (CLI and Matrix).
 
 Kanban is ``FakeKanban`` and Notion is ``FakeNotion`` (test doubles).
@@ -18,7 +18,8 @@ Kanban is ``FakeKanban`` and Notion is ``FakeNotion`` (test doubles).
 import contextlib
 import io
 
-from todo_manager import cli, delegation, feedback_flow, store
+from todo_manager import cli, delegation, store
+from tests.flow import apply_direct
 from todo_manager.kanban import FakeKanban
 from tests.test_delegation_binding import BindingBase
 from tests.test_notion import NotionCase
@@ -71,7 +72,7 @@ class CancelFirstTests(BindingBase):
         did, card = self.blocked()
         mid = delegation.add_message(self.conn, did, "answer", "周五", feedback_id="fbk_a")
         version = store.get_task(self.conn, self.task)["version"]
-        feedback_flow.apply_direct(self.conn, self.cfg, origin="matrix", text="这个不做了", source_id="$evt9", ops=[
+        apply_direct(self.conn, self.cfg, text="这个不做了", source_id="$evt9", op_list=[
             {"op": "update_task", "task": self.task, "based_on_version": version, "set": {"status": "cancelled"}}])
         self.tick()
         self.assert_archived_without(card, "unblocked")
@@ -87,7 +88,7 @@ class CancelFirstTests(BindingBase):
 
     def test_nothing_new_is_queued_behind_a_pending_cancel(self):
         did, card = self.delivered()
-        feedback_flow.apply_direct(self.conn, self.cfg, origin="matrix", text="取消委派", source_id="$evt10", ops=[
+        apply_direct(self.conn, self.cfg, text="取消委派", source_id="$evt10", op_list=[
             {"op": "message", "delegation": did, "kind": "cancel", "body": "取消"}])
         with self.assertRaises(delegation.DelegationError):
             delegation.add_message(self.conn, did, "accept", "可以")

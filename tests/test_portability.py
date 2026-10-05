@@ -1,5 +1,5 @@
-"""R16: a workspace moves to a fresh directory from its export (config without secrets, rules,
-history, run context, delegations and delivery files with relative paths and hashes); after an
+"""R16: a workspace moves to a fresh directory from its export (config without secrets, the
+conventions file ``AGENTS.md`` and its archive, history, run context, delegations and delivery files with relative paths and hashes); after an
 import or a backup restore nothing is replayed and no worker is started until the user releases
 the hold. Kanban is ``FakeKanban`` (test double)."""
 
@@ -9,7 +9,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from todo_manager import clock, config, db, delegation, effects, export, health, rules, runs, store
+from todo_manager import clock, config, db, delegation, effects, export, health, prefs, runs, store
 from todo_manager.kanban import FakeKanban
 from tests.helpers import WorkspaceCase
 
@@ -39,10 +39,12 @@ class PortabilityBase(WorkspaceCase):
         delegation.sync_cards(conn or self.conn, cfg or self.cfg, self.kb)
 
     def delivered(self):
-        """A task with history, a rule, and a delegation whose result has a file."""
+        """A task with history, a convention of the user, and a delegation whose result has a file."""
         self.task = store.create_task(self.conn, "回复 Alice", origin="cli", actor="human")
         store.update_task(self.conn, self.task, {"next_step": "看草稿"}, actor="human", origin="cli")
-        rules.add_rule(self.conn, title="周报", body="周五前发周报")
+        agents = prefs.agents_path(self.tmp)
+        agents.write_text(agents.read_text(encoding="utf-8") + "\n- 周报：周五前发周报\n", encoding="utf-8")
+        prefs.archive_path(self.tmp).write_text("# Rules archive\n\n- 旧规则\n", encoding="utf-8")
         self.did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草", goal="Draft only")
         self.tick()
         card = delegation.get(self.conn, self.did)["card_id"]
@@ -82,7 +84,7 @@ class ExportImportTests(PortabilityBase):
     def export_bundle(self):
         self.run_x = runs.start(self.conn, "feedback")
         runs.write_json(self.tmp, self.run_x, "manifest.json", {"run_id": self.run_x})
-        (self.tmp / "runs" / self.run_x / "decisions.json").write_text('{"items": []}', encoding="utf-8")
+        (self.tmp / "runs" / self.run_x / "context.md").write_text("# Todo Manager feedback run", encoding="utf-8")
         return export.export_snapshot(self.conn, self.cfg)
 
     def test_round_trip_into_a_fresh_directory(self):
@@ -99,13 +101,14 @@ class ExportImportTests(PortabilityBase):
         try:
             self.assertEqual(store.get_task(conn2, self.task)["next_step"], "看草稿")
             self.assertEqual(len(store.history(conn2, "task", self.task)), len(store.history(self.conn, "task", self.task)))
-            self.assertEqual([r["title"] for r in rules.list_rules(conn2, ("active",))], ["周报"])
+            self.assertIn("周报：周五前发周报", prefs.agents_path(self.target).read_text(encoding="utf-8"))
+            self.assertIn("旧规则", prefs.archive_path(self.target).read_text(encoding="utf-8"))
             [dlv] = delegation.deliveries(conn2, self.did)
             [art] = dlv["artifacts"]
             self.assertEqual(sha(self.target / art["path"]), art["sha256"])
         finally:
             conn2.close()
-        self.assertTrue((self.target / "runs" / self.run_x / "decisions.json").exists(), "run context moves along")
+        self.assertTrue((self.target / "runs" / self.run_x / "context.md").exists(), "run context moves along")
         self.assertTrue((self.target / "runs" / self.run_x / "manifest.json").exists())
 
     def test_a_tampered_or_incomplete_bundle_is_refused(self):

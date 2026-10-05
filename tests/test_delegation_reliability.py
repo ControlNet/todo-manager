@@ -8,7 +8,7 @@ reliability review (docs/acceptance.md).
 import contextlib
 import io
 
-from todo_manager import cli, delegation, gate_feedback, health, store
+from todo_manager import cli, clock, delegation, gate_feedback, health, store
 from todo_manager.kanban import FakeKanban
 from tests.helpers import WorkspaceCase
 
@@ -392,36 +392,41 @@ class DeliveryRunTests(Base):
 
 
 class HermesSettingsTests(Base):
-    """Gap B: the board protocol needs ``kanban.review_dispatch`` and ``kanban.auto_decompose`` off.
-    Both are global Hermes switches: a wrong value is reported and new cards wait; the settings
-    are never changed by todo-manager. ``FakeKanban.settings_values`` stands in for the Hermes config."""
+    """``kanban.review_dispatch`` and ``kanban.auto_decompose`` are global Hermes switches and the
+    user's choice: todo-manager reads them at most once a day, explains them in ``health`` as
+    notes (not problems), never changes them and never holds cards back because of them.
+    ``FakeKanban.settings_values`` stands in for the Hermes config."""
 
-    def problems(self):
-        return health.report(self.conn, self.cfg)["problems"]
+    def notes(self):
+        return health.report(self.conn, self.cfg)["notes"]
 
-    def test_no_card_is_created_while_review_dispatch_is_on(self):
+    def gate(self):
+        gate_feedback.run_gate(self.conn, self.cfg, notion=None, kanban=self.kb)
+
+    def test_cards_are_created_whatever_the_switches_and_the_switches_are_explained(self):
         self.kb.settings_values["review_dispatch"] = True
         did = self.delegate()
-        stats = delegation.submit_pending(self.conn, self.cfg, self.kb)
-        self.assertEqual(self.kb.cards, {}, "an sdlc-review worker would take the review from the user")
-        self.assertEqual((stats["unsafe_settings"], self.d(did)["status"]), (1, "pending_submit"))
-        [problem] = [p for p in self.problems() if "review_dispatch" in p]
-        self.assertIn("hermes config set kanban.review_dispatch false", problem)
+        self.gate()
+        self.assertEqual(len(self.kb.cards), 1, "Hermes decides how its board runs")
+        self.assertEqual(self.d(did)["status"], "queued")
+        [note] = [n for n in self.notes() if "review_dispatch" in n]
+        self.assertIn("hermes config set kanban.review_dispatch false", note)
+        self.assertFalse([p for p in health.report(self.conn, self.cfg)["problems"] if "review_dispatch" in p])
         self.assertEqual(self.kb.settings_values["review_dispatch"], True, "the global switch is not touched")
-        self.kb.settings_values["review_dispatch"] = False          # the user changed it
-        self.tick()
-        self.assertEqual(len(self.kb.cards), 1)
-        self.assertFalse([p for p in self.problems() if "review_dispatch" in p])
 
-    def test_cards_already_on_the_board_are_reported(self):
-        did, card = self.delivered()
+    def test_the_switches_are_read_once_a_day(self):
+        self.gate()
+        self.assertEqual(self.notes(), [])
         self.kb.settings_values["auto_decompose"] = True
-        gate_feedback.run_gate(self.conn, self.cfg, notion=None, kanban=self.kb)
-        self.assertTrue([p for p in self.problems() if "auto_decompose" in p], "re-read while cards are in flight")
-        self.assertEqual(self.d(did)["status"], "review", "existing work is not cancelled")
+        clock.advance(hours=1)
+        self.gate()
+        self.assertEqual(self.notes(), [], "read again only after a day")
+        clock.advance(hours=24)
+        self.gate()
+        self.assertTrue([n for n in self.notes() if "auto_decompose" in n])
 
-    def test_unknown_settings_do_not_create_cards(self):
+    def test_unreadable_switches_do_not_hold_cards(self):
         self.kb.fail_next["settings"] = delegation.KanbanError("bridge returned no result")
         self.delegate()
-        stats = delegation.submit_pending(self.conn, self.cfg, self.kb)
-        self.assertEqual((self.kb.cards, stats["errors"]), ({}, 1))
+        self.gate()
+        self.assertEqual(len(self.kb.cards), 1)

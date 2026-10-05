@@ -2,9 +2,11 @@
 
 * ``export_snapshot`` first copies the database with SQLite's online backup (one consistent
   read, safe while gates and applies run), then writes from that copy only: human-readable
-  Markdown (tasks/, projects/, rules/, views/), ``data.json`` (every table) and ``workspace/``
-  (config.toml without secrets, AGENTS.md, the run context ``runs/<id>`` of the runs in the
-  snapshot, the delivery files the snapshot's deliveries refer to) into ``exports/<stamp>/``;
+  Markdown (tasks/, projects/, views/, and rules/ for the rules of a pre-8 workspace),
+  ``data.json`` (every table, including the board linkage) and ``workspace/`` (config.toml
+  without secrets, the conventions AGENTS.md and rules-archive.md, the run context
+  ``runs/<id>`` of the runs in the snapshot, the delivery files the snapshot's deliveries refer
+  to) into ``exports/<stamp>/``;
   ``manifest.json`` lists every file with its SHA-256, every table with its row hash, kept
   files that differ from their delivery record, and the history check.
 * ``integrity_problems``: each task's and project's history holds exactly the versions 1..its
@@ -33,14 +35,14 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from . import clock, db, delegation, i18n, rules, store
+from . import clock, db, delegation, i18n, prefs, store
 from .db import loads
 from .config import Config
 from .files import sha256_file
 from .notion.schema import label as option_label
 
 EXPORT_FORMAT = "todo-manager-export/2"
-WORKSPACE_FILES = ("config.toml", "AGENTS.md")
+WORKSPACE_FILES = ("config.toml", prefs.AGENTS, prefs.ARCHIVE)
 SECRET_KEY = re.compile(r"(token|secret|password|passwd|api_?key|private_?key|credential)", re.I)
 SAFE_KEYS = {"token_env", "token_file"}   # names of where a secret lives, not the secret
 
@@ -202,17 +204,22 @@ def export_snapshot(conn: sqlite3.Connection, cfg: Config, out_dir: Path | None 
 
 def _write_export(conn: sqlite3.Connection, cfg: Config, root: Path) -> None:
     """Everything below reads ``conn``, the snapshot: Markdown, data and files agree."""
-    for sub in ("tasks", "projects", "rules", "views"):
+    for sub in ("tasks", "projects", "views"):
         (root / sub).mkdir(parents=True, exist_ok=True)
     projects = {p["id"]: p["title"] for p in store.list_projects(conn, ("active", "paused", "done", "archived"))}
     for t in store.list_tasks(conn, store.TASK_STATUSES):
         (root / "tasks" / f"{t['id']}.md").write_text(_task_md(conn, t, projects), encoding="utf-8")
     for pid in projects:
         (root / "projects" / f"{pid}.md").write_text(_project_md(conn, store.get_project(conn, pid)), encoding="utf-8")
-    rule_lines = [f"# {_t('rules')}", ""]
-    for status in ("active", "suggested", "retired"):
-        rule_lines += [f"## {status}", "", rules.render_rules(rules.list_rules(conn, (status,))), ""]
-    (root / "rules" / "rules.md").write_text("\n".join(rule_lines), encoding="utf-8")
+    legacy = conn.execute("SELECT * FROM rules ORDER BY status, created_at, id").fetchall()
+    if legacy:
+        # Rules of a workspace from before schema 8 (their content now lives in AGENTS.md and
+        # rules-archive.md, exported under workspace/); kept for audit.
+        (root / "rules").mkdir(parents=True, exist_ok=True)
+        rule_lines = [f"# {_t('rules')}", ""] + [
+            f"- [{r['status']}] {r['id']} r{r['revision']} ({r['scope_type']}{':' + r['scope_id'] if r['scope_id'] else ''})"
+            f" {' '.join(r['title'].split())}: {' '.join(r['body'].split())}" for r in legacy]
+        (root / "rules" / "rules.md").write_text("\n".join(rule_lines) + "\n", encoding="utf-8")
     view_lines = [f"# {_t('views_title', when=f'{clock.local_dt(cfg.tz):%Y-%m-%d %H:%M}')}", ""]
     for key, rows in view_rows(conn, cfg).items():
         view_lines += [f"## {i18n.t(f'home.section.{key}')}", ""] + [

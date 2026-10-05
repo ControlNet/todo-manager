@@ -82,42 +82,43 @@ class CliTests(CliCase):
         self.assertIn(tid, out)
         self.assertIn("due 2026-10-08", out)
         code, out = self.tm("task", "update", tid, "--set", "status=waiting", "--set", "waiting_on=导师确认时间")
-        self.assertEqual(json.loads(out)["applied"]["status"], "waiting")
+        self.assertTrue({"status", "waiting_on"} <= set(json.loads(out)["applied"]))
+        _, out = self.tm("task", "show", tid)
+        self.assertEqual(json.loads(out)["status"], "waiting")
         code, out = self.tm("task", "update", tid, "--set", "bogus=1")
         self.assertEqual(code, 2)
         code, out = self.tm("history", tid)
         self.assertIn("v2", out)
 
-    def test_gate_prints_only_the_wake_line_and_direct_feedback_flow(self):
+    def test_gate_context_and_feedback_commands(self):
         code, out = self.tm("gate", "feedback")
         self.assertEqual(out.strip(), '{"wakeAgent": false}')
         _, out = self.tm("task", "create", "--title", "回复 Carol")
         tid = json.loads(out)["task"]
-        _, out = self.tm("feedback", "request-id")
-        self.tm("feedback", "record", "--origin", "cli", "--text", "这个周五前要做完", "--scope", f"task:{tid}",
-                "--source-id", json.loads(out)["request_id"])
-        code, out = self.tm("gate", "feedback")
-        lines = out.strip().splitlines()
-        self.assertEqual(lines[-1], '{"wakeAgent": true}')
-        self.assertNotIn("周五", out)
-        run_id = lines[0].split(": ")[1]
-        code, out = self.tm("feedback", "show", run_id)
-        self.assertIn("这个周五前要做完", out)
-        self.assertIn("Feedback decisions format", out)
-        fid = next(line.split()[1] for line in out.splitlines() if line.startswith("### fbk_"))
-        decisions = self.home / "runs" / run_id / "decisions.json"
-        self.assertIn(str(decisions), out)
-        decisions.write_text(json.dumps({"run_id": run_id, "rules_version": 0, "items": [
-            {"feedback": fid, "outcome": "applied", "ops": [
-                {"op": "update_task", "task": tid, "based_on_version": 1, "set": {"due_date": "2026-10-09"}}]}]}))
-        code, out = self.tm("feedback", "apply", run_id, "--file", str(decisions))
+        code, out = self.tm("feedback", "record", "--origin", "cli", "--request", "req-1005-a", "--said",
+                            "这个周五前要做完", "--scope", f"task:{tid}")
         self.assertEqual(code, 0, out)
+        code, out = self.tm("gate", "feedback")
+        self.assertEqual(code, 0)
+        lines = out.strip().splitlines()
+        self.assertNotIn("wakeAgent", lines[-1], "a context wakes the agent")
+        self.assertIn("这个周五前要做完", out, "the context is in the output: no lookup needed")
+        run_id = lines[0].rsplit(" ", 1)[1]
+        fid = next(line.split()[1] for line in lines if line.startswith("### fbk_"))
+        update = ("task", "update", tid, "--feedback", fid, "--set", "due_date=2026-10-09")
+        code, out = self.tm(*update)
+        self.assertEqual(code, 0, out)
+        code, out = self.tm(*update)
+        self.assertEqual((code, json.loads(out)["duplicate"]), (0, True), "a retry returns the first result")
+        code, out = self.tm("feedback", "resolve", fid, "--outcome", "applied")
+        self.assertEqual(code, 0, out)
+        code, out = self.tm("run", "done", run_id)
+        self.assertEqual(code, 0, out)
+        code, out = self.tm("run", "show", run_id, "--context")
+        self.assertIn("这个周五前要做完", out, "what the agent was shown is kept with the run")
         _, out = self.tm("task", "show", tid)
-        self.assertEqual(json.loads(out)["due_date"], "2026-10-09")
-        code, out = self.tm("feedback", "apply", run_id, "--file", str(decisions))
-        self.assertEqual((code, json.loads(out)["duplicate"]), (0, True), "same file again: the first report")
-        _, out = self.tm("task", "show", tid)
-        self.assertEqual(json.loads(out)["version"], 2, "applied once")
+        task = json.loads(out)
+        self.assertEqual((task["due_date"], task["version"]), ("2026-10-09", 2), "applied once")
 
     def test_export_verify_backup_restore(self):
         _, out = self.tm("task", "create", "--title", "A")

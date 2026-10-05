@@ -514,6 +514,8 @@ class Install:
 
     # ------------------------------------------------------------------ 6. kanban
     def step_kanban(self) -> None:
+        """The board todo-manager's cards go to. Hermes' global switches are the user's: they are
+        read and explained, never changed (``delegation.SWITCH_NOTES``)."""
         from .kanban import KanbanError
         cfg = self.cfg()
         board = cfg.get("kanban.board", "todo-manager")
@@ -524,30 +526,21 @@ class Install:
         except (KanbanError, OSError) as exc:
             self.note("kanban", f"Hermes Kanban is not reachable ({exc}); delegations stay local")
             return
-        wrong = {k: want for k, want in delegation.REQUIRED_SETTINGS.items() if bool(values.get(k, True)) != want}
-        changes = [f"hermes config set kanban.{k} {str(w).lower()}  (global: applies to every Hermes board)"
-                   for k, w in wrong.items()]
         if not exists:
-            changes.append(f"create the Hermes board {board!r}")
-        if changes:
-            if not self.prompter.confirm("kanban", "Delegating work to Hermes agents needs these Hermes changes:",
-                                         changes):
+            if not self.prompter.confirm("kanban", "Delegating work to Hermes agents needs its own board:",
+                                         [f"create the Hermes board {board!r}"]):
                 self.note("kanban", "not changed (declined); delegations stay local")
                 return
-            for k, w in wrong.items():
-                if self.hermes("config", "set", f"kanban.{k}", str(w).lower()) is None:
-                    raise InstallError(f"hermes config set kanban.{k} failed")
-            if not exists:
-                kb.create_board("Todo Manager", "Delegations from Todo Manager")
-            still = [k for k, want in delegation.REQUIRED_SETTINGS.items() if bool(kb.settings().get(k, True)) != want]
-            if still:
-                raise InstallError(f"Hermes still reports {', '.join('kanban.' + k for k in still)} unchanged")
+            kb.create_board("Todo Manager", "Delegations from Todo Manager")
         if not cfg.get("kanban.enabled"):
-            if changes or "enabled" not in self.explicit("kanban"):
+            if not exists or "enabled" not in self.explicit("kanban"):
                 self.write({"kanban.enabled": True})
             else:
                 self.note("kanban", "ready, but kanban.enabled = false in config.toml: delegations stay local")
                 return
+        for key, text in delegation.SWITCH_NOTES.items():
+            if bool(values.get(key, True)):
+                self.note("kanban", text)
         self.note("kanban", f"board {board!r} ready; delegations enabled")
 
     # ------------------------------------------------------------------ 7. hermes

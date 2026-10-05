@@ -400,7 +400,7 @@ class NotionSync:
             feedback.supersede(self.conn, stale_ids, "withdrawn: the note was removed or reverted")
             return []
         added, removed = "\n".join(net_added), "\n".join(net_removed)
-        # Stored in full (``complete``); only the display is budgeted (feedback_flow.render_context).
+        # Stored in full (``complete``); only the display is budgeted (context.feedback_item).
         payload = {"page_id": row["page_id"], "added": added, "removed": removed, "notes": notes,
                    "truncated": truncated, "revision": revision, "complete": True}
         if stale_ids:

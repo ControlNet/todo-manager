@@ -10,15 +10,15 @@ import re
 from dataclasses import replace
 from datetime import timedelta
 
-from todo_manager import clock, gate_intake, intake
-from todo_manager.db import rules_version
+from todo_manager import clock, gate_intake, ops
+from todo_manager.context import run_items
 from todo_manager.sources.base import FetchResult, Item, persist_fetch
 from todo_manager.sources.github import GitHubNotificationSource, GitHubRepoSource
 from todo_manager.sources import registry
 from todo_manager.sources.gmail import GmailSource
 from tests.helpers import WorkspaceCase
 from tests.test_sources import gmail_message
-from tests.test_intake import run_id_of
+from tests.flow import intake_context, run_ctx, run_id_of
 
 REPO = "octo/repo"
 
@@ -182,10 +182,10 @@ class RepoContextTests(WorkspaceCase):
         self.wake_and_finish(src)                     # first read: the recent discussion is processed
         self.api.comment(7, 99, "alice", "any progress on the split?", ago(minutes=1))
         run_id = self.wake(src)
-        context = intake.render_context(self.conn, self.cfg, run_id, gate_intake.manifest_for(self.cfg, run_id))
+        context = intake_context(self.conn, self.cfg, run_id)
         self.assertIn("ORIGINAL: test images overlap with train", context, "the first message is always shown")
         self.assertIn("state: open; opened by bob; assignees: me-gh", context)
-        self.assertIn("you: assignee", context)
+        self.assertIn("the user: assignee", context)
 
     def wake(self, src):
         """Gate runs until the matter is mature and the email/GitHub wake interval allows it."""
@@ -198,11 +198,10 @@ class RepoContextTests(WorkspaceCase):
 
     def wake_and_finish(self, src):
         run_id = self.wake(src)
-        ids = [i["id"] for i in intake.run_new_items(self.conn, run_id)]
-        intake.apply_decisions(self.conn, self.cfg, run_id, {
-            "run_id": run_id, "rules_version": rules_version(self.conn),
-            "items": [{"op": "ignore", "items": ids, "category": "fyi_no_action", "rationale": "test"}]},
-            gate_intake.manifest_for(self.cfg, run_id))
+        ids = [i["id"] for i in run_items(self.conn, run_id)]
+        ops.item_dismiss(self.conn, self.cfg, run_ctx(self.conn, self.cfg, run_id), ids, outcome="informational",
+                         reason="test")
+        ops.run_done(self.conn, self.cfg, run_id)
 
 
 class NotificationContextTests(WorkspaceCase):

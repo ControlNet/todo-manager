@@ -274,26 +274,40 @@ def release_hold(conn: sqlite3.Connection) -> dict[str, Any] | None:
     return previous
 
 
-# Global Hermes switches the board protocol needs (docs/board-protocol.md). todo-manager only
-# reads them: with review_dispatch on, an sdlc-review worker takes every review card (the user's
-# review); with auto_decompose on, a card parked in triage is fanned out into new cards.
-REQUIRED_SETTINGS = {"review_dispatch": False, "auto_decompose": False}
-SETTINGS_KEY = "kanban.settings_problems"
+# Global Hermes switches that change how Hermes treats our cards. They are the user's Hermes
+# choices: todo-manager reads them (at most once a day), shows what they mean in ``health`` and
+# never changes them or holds cards back because of them.
+SWITCH_NOTES = {
+    "review_dispatch": "kanban.review_dispatch is on: Hermes' review worker reviews delivered agent work, so a delivery"
+                       " may be completed or sent back before you see it; accept and revision apply while a delivery"
+                       " waits in review (to review every delivery yourself: `hermes config set"
+                       " kanban.review_dispatch false`, a global Hermes setting)",
+    "auto_decompose": "kanban.auto_decompose is on: Hermes may split a card it parks in triage into new cards;"
+                      " todo-manager follows the original card (to keep such cards for your decision: `hermes config"
+                      " set kanban.auto_decompose false`, a global Hermes setting)",
+}
+SETTINGS_KEY = "kanban.settings"
+SETTINGS_CHECK_HOURS = 24
 
 
-def check_settings(conn: sqlite3.Connection, kb: Kanban) -> list[str]:
-    """Read the Hermes switches and record what is wrong (shown by ``health``); never changes them.
-    An unreadable value raises KanbanError and counts as not verified."""
+def observe_settings(conn: sqlite3.Connection, kb: Kanban, force: bool = False) -> dict[str, Any] | None:
+    """Read the Hermes switches (unset means on, as the installed dispatcher reads them) and keep
+    what they mean for ``health``. Returns None when the last reading is recent enough."""
+    last = loads(get_meta(conn, SETTINGS_KEY), None) or {}
+    age = clock.minutes_since(last.get("at")) if last.get("at") else None
+    if not force and age is not None and age < SETTINGS_CHECK_HOURS * 60:
+        return None
     values = kb.settings()
-    wrong = [f"kanban.{key} is {str(values.get(key, True)).lower()}; the board needs {str(want).lower()}"
-             f" (`hermes config set kanban.{key} {str(want).lower()}`, a global Hermes change you make)"
-             for key, want in REQUIRED_SETTINGS.items() if bool(values.get(key, True)) != want]
+    notes = [text for key, text in SWITCH_NOTES.items() if bool(values.get(key, True))]
+    record = {"values": {k: bool(values.get(k, True)) for k in SWITCH_NOTES}, "notes": notes, "at": clock.iso()}
     with tx(conn):
-        if wrong:
-            set_meta(conn, SETTINGS_KEY, dumps({"problems": wrong, "at": clock.iso()}))
-        else:
-            conn.execute("DELETE FROM meta WHERE key=?", (SETTINGS_KEY,))
-    return wrong
+        set_meta(conn, SETTINGS_KEY, dumps(record))
+        conn.execute("DELETE FROM meta WHERE key='kanban.settings_problems'")   # kept by earlier versions
+    return record
+
+
+def settings_notes(conn: sqlite3.Connection) -> list[str]:
+    return (loads(get_meta(conn, SETTINGS_KEY), None) or {}).get("notes", [])
 
 
 def _failed(stats: dict[str, Any], counter: str, error: str) -> None:
@@ -302,22 +316,18 @@ def _failed(stats: dict[str, Any], counter: str, error: str) -> None:
     stats.setdefault("error", error[:500])
 
 
-def settings_problems(conn: sqlite3.Connection) -> list[str]:
-    return (loads(get_meta(conn, SETTINGS_KEY), None) or {}).get("problems", [])
-
-
-def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, Any]:
-    stats: dict[str, Any] = {"submitted": 0, "linked": 0, "waiting_capacity": 0, "errors": 0, "quarantined": 0, "held": 0,
-             "unsafe_settings": 0}
-    settings_ok: bool | None = None
+def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str | None = None) -> dict[str, Any]:
+    """Create the cards of new delegations (``only``: just that one, right after it was created)."""
+    stats: dict[str, Any] = {"submitted": 0, "linked": 0, "waiting_capacity": 0, "errors": 0, "quarantined": 0, "held": 0}
     if held(conn):
         stats["held"] = conn.execute("SELECT COUNT(*) FROM delegations WHERE status IN ('pending_submit','reconcile')"
                                      ).fetchone()[0]
         return stats
     with file_lock(lock_path(cfg.home, "kanban-submit"), blocking=True, timeout=60):
         # A pause holds back a create, never the read-only lookup of one that may have happened.
-        rows = conn.execute("SELECT id FROM delegations WHERE status='reconcile'"
-                            " OR (status='pending_submit' AND pause_requested=0) ORDER BY created_at").fetchall()
+        rows = conn.execute("SELECT id FROM delegations WHERE (status='reconcile'"
+                            " OR (status='pending_submit' AND pause_requested=0)) AND (? IS NULL OR id=?)"
+                            " ORDER BY created_at", (only, only)).fetchall()
         for row in rows:
             d = get(conn, row["id"])
             task = store.get_task(conn, d["task_id"])
@@ -360,18 +370,6 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[st
                 continue
             if capacity(conn, cfg, exclude=d["id"]) <= 0:
                 stats["waiting_capacity"] += 1
-                continue
-            if settings_ok is None:
-                try:
-                    settings_ok = not check_settings(conn, kb)
-                except KanbanError as exc:
-                    with tx(conn):
-                        _set(conn, d["id"], last_error=f"Hermes settings not verified: {exc}")
-                    _failed(stats, "errors", f"Hermes settings not verified: {exc}")
-                    settings_ok = False
-                    continue
-            if not settings_ok:
-                stats["unsafe_settings"] += 1
                 continue
             extra = [m["body"] for m in conn.execute(
                 "SELECT body FROM delegation_messages WHERE delegation_id=? AND kind='supplement' AND status='pending'"

@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from todo_manager import config, delegation, i18n, prompts, store
+from todo_manager import config, context, delegation, i18n, store, templates
 from todo_manager.notion import body, schema, setup
 from todo_manager.notion.client import NotionClient
 from todo_manager.notion.sync import NotionSync, load_state
@@ -57,13 +57,17 @@ class CatalogTests(unittest.TestCase):
 
     def test_source_has_no_hardcoded_user_text(self):
         """User-facing text lives in the catalogs. Allowed: the legacy-migration schema (data of the
-        old system), the reply-quote parser (data) and the language's own display name."""
+        old system), the reply-quote parser (data), the language's own display name, the localized
+        workspace template (``AGENTS.<lang>.md``) and the verbatim copies of earlier shipped
+        assets kept as merge bases (``hermes_assets/legacy``)."""
         allowed = {"migration.py": ("LEGACY", "ACTIVE", "CLOSED", "INBOX", '"task":', '"project":',
                                     '"fingerprint"', "high_confidence"),
-                   "intake.py": ("QUOTE_START",), "i18n.py": ("LANGUAGES",)}
+                   "context.py": ("QUOTE_START",), "i18n.py": ("LANGUAGES",)}
         offenders = []
         for path in PACKAGE.rglob("*"):
-            if path.suffix not in (".py", ".md") or "locales" in path.parts:
+            if path.suffix not in (".py", ".md") or "locales" in path.parts or "legacy" in path.parts:
+                continue
+            if path.parent.name == "workspace" and path.name == "AGENTS.zh-CN.md":
                 continue
             for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                 if CJK.search(line) and not any(a in line for a in allowed.get(path.name, ())):
@@ -86,15 +90,16 @@ class LanguageSelectionTests(unittest.TestCase):
             self.assertEqual(config.load(self.tmp).language, "en")
         self.assertEqual(i18n.t("label.task_status.done"), "Done")
 
-    def test_prompts_stay_english_and_name_the_language(self):
-        i18n.set_language("zh-CN")
-        text = prompts.load("intake_decisions.md") + prompts.load("feedback_decisions.md")
-        self.assertIn("Simplified Chinese", text)
-        self.assertNotIn("{language}", text)
+    def test_model_facing_text_stays_english_and_names_the_language(self):
+        (self.tmp / "config.toml").write_text('language = "zh-CN"\n', encoding="utf-8")
+        with mock.patch.dict(os.environ, {"TODO_MANAGER_LANG": ""}):
+            cfg = config.load(self.tmp)
+        head = "\n".join(context.header(cfg, "intake", "run_x"))
+        self.assertIn("Write for the user in Simplified Chinese", head)
+        for name in ("skill/SKILL.md", "cron/intake.md", "cron/feedback.md"):
+            self.assertIsNone(CJK.search(templates.asset(name)), name)
         protocol = delegation.WORKER_PROTOCOL.format(allowed="read", pause="X", language=i18n.language_name())
         self.assertIn("summary in Simplified Chinese", protocol)
-        i18n.set_language("en")
-        self.assertIn("is in English", prompts.load("intake_decisions.md"))
 
 
 class EnglishSetupTests(NotionCase):

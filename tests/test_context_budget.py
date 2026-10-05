@@ -1,19 +1,19 @@
-"""Boundary 1: a model run never starts over its context budget unless the user opted in.
+"""Boundary 1: the context budget limits how much one run takes; it never keeps material waiting.
 
-* Intake: when even one conversation does not fit (the fixed part, rules and open tasks, is too
-  large) the run is deferred by default: nothing is claimed or woken, the batch keeps its
-  attempts, and health reports it. ``wake.over_budget = "proceed"`` opts into the
-  old behaviour (wake anyway, reported as over budget).
+* Intake: conversations that do not fit ``wake.max_context_chars`` wait for the next run; the
+  first one is always taken, its items clipped (``wake.max_item_chars``) with a pointer to the
+  full text. A run whose context is still over budget runs anyway and is reported by ``health``.
 * Feedback: ``feedback.max_context_chars`` bounds the rendered feedback context; a run claims
-  the oldest items that fit and leaves the rest pending for the next run; an item that cannot
-  fit even alone defers the run the same way.
+  the oldest items that fit and leaves the rest pending, untouched, for the next run; an item
+  that cannot fit even alone is clipped and handled, never deferred.
 
 Sources are ``FakeSource`` (test double); feedback rows are recorded directly.
 """
 
-from todo_manager import clock, feedback, feedback_flow, gate_feedback, gate_intake, health
+from todo_manager import clock, feedback, gate_feedback, gate_intake, health
+from tests.flow import feedback_context, run_id_of, run_summary, wake_of
 from tests.helpers import WorkspaceCase, mail
-from tests.test_intake import FakeSource, wake_of
+from tests.test_intake import FakeSource
 
 
 class IntakeOverBudgetTests(WorkspaceCase):
@@ -21,38 +21,21 @@ class IntakeOverBudgetTests(WorkspaceCase):
         super().setUp()
         self.gmail = FakeSource("gmail", "mailbox:primary")
         self.cfg.data["email"]["min_wake_interval_minutes"] = 0
-        self.cfg.data["wake"]["max_context_chars"] = 3000   # smaller than the decisions format alone
+        self.cfg.data["wake"]["max_context_chars"] = 1500   # smaller than the fixed part of the context
         self.gmail.push(mail("m1", "t1", "Can you send the report?"))
         gate_intake.run_gate(self.conn, self.cfg, [self.gmail], [])
         clock.advance(minutes=16)
 
-    def gate(self):
+    def test_an_oversize_context_still_runs_and_is_reported(self):
         out, woke = gate_intake.run_gate(self.conn, self.cfg, [self.gmail], [])
         self.assertEqual(woke, wake_of(out))
-        return out, woke
-
-    def test_an_oversize_context_defers_the_run_and_is_reported(self):
-        out, woke = self.gate()
-        self.assertFalse(woke, "no model run over budget by default")
-        batch = self.conn.execute("SELECT state, attempts, claimed_run FROM batches").fetchone()
-        self.assertEqual((batch["state"], batch["attempts"], batch["claimed_run"]), ("mature", 0, None))
+        self.assertTrue(woke, "material never waits on the budget")
+        self.assertIn("Can you send the report?", out)
+        batch = self.conn.execute("SELECT state, claimed_run FROM batches").fetchone()
+        self.assertEqual((batch["state"], batch["claimed_run"]), ("claimed", run_id_of(out)))
+        self.assertGreater(run_summary(self.conn, run_id_of(out))["context_over_budget"], 1500)
         problems = health.report(self.conn, self.cfg)["problems"]
-        self.assertTrue(any("deferred" in p and "over budget" in p for p in problems), problems)
-        clock.advance(minutes=5)
-        _, woke = self.gate()
-        self.assertFalse(woke, "still deferred while the cause is there")
-        self.cfg.data["wake"]["max_context_chars"] = 60000          # the user fixes the cause
-        clock.advance(minutes=5)
-        _, woke = self.gate()
-        self.assertTrue(woke, "nothing was lost while deferred")
-        self.assertFalse(any("deferred" in p for p in health.report(self.conn, self.cfg)["problems"]))
-
-    def test_proceeding_over_budget_is_an_explicit_choice(self):
-        self.cfg.data["wake"]["over_budget"] = "proceed"
-        out, woke = self.gate()
-        self.assertTrue(woke)
-        self.assertIn("over budget", out)
-        self.assertTrue(any("context" in p and "budget" in p for p in health.report(self.conn, self.cfg)["problems"]))
+        self.assertTrue(any("over budget" in p and "wake.max_context_chars" in p for p in problems), problems)
 
 
 class FeedbackBudgetTests(WorkspaceCase):
@@ -64,37 +47,32 @@ class FeedbackBudgetTests(WorkspaceCase):
 
     def gate(self):
         out, woke = gate_feedback.run_gate(self.conn, self.cfg, notion=None, kanban=None)
-        run_id = out.splitlines()[0].split(": ")[1] if woke else None
-        return out, woke, run_id
+        self.assertEqual(woke, wake_of(out))
+        return out, woke, run_id_of(out) if woke else None
 
     def fixed(self):
-        return len(feedback_flow.render_context(self.conn, self.cfg, "run_00000000000000000000", []))
+        return len(feedback_context(self.conn, self.cfg, "run_00000000000000000000", []))
 
     def test_a_run_claims_only_the_oldest_items_that_fit(self):
         self.record(5)
-        two = len(feedback_flow.render_context(self.conn, self.cfg, "run_00000000000000000000",
-                                               feedback.pending(self.conn)[:2]))
+        two = len(feedback_context(self.conn, self.cfg, "run_00000000000000000000", feedback.pending(self.conn)[:2]))
         self.cfg.data["feedback"]["max_context_chars"] = two + 100      # room for two, not three
-        _, woke, run_id = self.gate()
+        out, woke, run_id = self.gate()
         self.assertTrue(woke)
         claimed = feedback.claimed_by(self.conn, run_id)
         self.assertEqual([f["source_id"] for f in claimed], ["req_0", "req_1"])
-        context = feedback_flow.render_context(self.conn, self.cfg, run_id, claimed)
-        self.assertLessEqual(len(context), self.cfg.get("feedback.max_context_chars"))
+        self.assertLessEqual(len(out), self.cfg.get("feedback.max_context_chars"))
         unclaimed = [f for f in feedback.pending(self.conn) if f["claimed_run"] is None]
         self.assertEqual(len(unclaimed), 3, "the rest waits for the next run, untouched")
         self.assertTrue(all(f["attempts"] == 0 for f in unclaimed))
 
-    def test_an_item_that_cannot_fit_alone_defers_and_alerts(self):
+    def test_an_item_that_cannot_fit_alone_is_clipped_and_handled(self):
         self.record(1, size=8000)
         self.cfg.data["feedback"]["max_context_chars"] = self.fixed() + 1000
-        _, woke, _ = self.gate()
-        self.assertFalse(woke)
-        [fb] = feedback.pending(self.conn)
-        self.assertEqual((fb["claimed_run"], fb["attempts"]), (None, 0))
+        out, woke, run_id = self.gate()
+        self.assertTrue(woke, "never deferred")
+        [fb] = feedback.claimed_by(self.conn, run_id)
+        self.assertIn(f"todo-manager feedback item {fb['id']}", out, "a pointer to the full text")
+        self.assertNotIn("x" * 5000, out)
         problems = health.report(self.conn, self.cfg)["problems"]
-        self.assertTrue(any(p.startswith("feedback run deferred") for p in problems), problems)
-        self.cfg.data["feedback"]["over_budget"] = "proceed"
-        _, woke, run_id = self.gate()
-        self.assertTrue(woke, "opted in: the item is handled over budget")
-        self.assertEqual(len(feedback.claimed_by(self.conn, run_id)), 1)
+        self.assertTrue(any("over budget" in p and "feedback.max_context_chars" in p for p in problems), problems)

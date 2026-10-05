@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -28,40 +27,6 @@ def finish(conn: sqlite3.Connection, run_id: str, *, status: str, wake: bool = F
             (clock.iso(), status, 1 if wake else 0, dumps(reasons or []), dumps(summary or {}), error, run_id))
 
 
-def mark_agent_completed(conn: sqlite3.Connection, run_id: str, summary: dict[str, Any] | None = None) -> None:
-    row = conn.execute("SELECT summary FROM runs WHERE id=?", (run_id,)).fetchone()
-    merged = loads(row["summary"], {}) if row else {}
-    merged.update(summary or {})
-    with tx(conn):
-        conn.execute("UPDATE runs SET agent_completed_at=?, summary=? WHERE id=?",
-                     (clock.iso(), dumps(merged), run_id))
-
-
-class AlreadyApplied(Exception):
-    """The run's decisions were applied before with a different decisions file."""
-
-
-def decisions_hash(decisions: Any) -> str:
-    return hashlib.sha256(dumps(decisions).encode("utf-8")).hexdigest()
-
-
-def applied_report(conn: sqlite3.Connection, run_id: str, digest: str) -> dict[str, Any] | None:
-    """The stored report when this run's decisions were already applied (exactly once per run:
-    a repeated apply after a lost response returns it; different decisions are refused)."""
-    row = conn.execute("SELECT * FROM applied_runs WHERE run_id=?", (run_id,)).fetchone()
-    if row is None:
-        return None
-    if row["decisions_hash"] != digest:
-        raise AlreadyApplied(f"run {run_id} was already applied at {row['applied_at']} with other decisions")
-    return {**loads(row["report"], {}), "duplicate": True}
-
-
-def record_applied(conn: sqlite3.Connection, run_id: str, entry: str, digest: str, report: dict[str, Any]) -> None:
-    """Inside the transaction that applied the decisions."""
-    conn.execute("INSERT INTO applied_runs(run_id, entry, decisions_hash, report, applied_at) VALUES (?,?,?,?,?)",
-                 (run_id, entry, digest, dumps(report), clock.iso()))
-
-
 def get(conn: sqlite3.Connection, run_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
     if row is None:
@@ -84,6 +49,19 @@ def write_json(home: Path, run_id: str, name: str, data: Any) -> Path:
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
     return path
+
+
+def write_text(home: Path, run_id: str, name: str, text: str) -> Path:
+    path = run_dir(home, run_id) / name
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def read_text(home: Path, run_id: str, name: str) -> str | None:
+    path = home / "runs" / run_id / name
+    return path.read_text(encoding="utf-8") if path.exists() else None
 
 
 def read_json(home: Path, run_id: str, name: str) -> Any:

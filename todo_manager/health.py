@@ -8,7 +8,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from . import clock
+from . import clock, prefs
 from .config import Config
 from .db import dumps, get_meta, loads, set_meta, tx
 
@@ -82,7 +82,8 @@ def record_problems(conn: sqlite3.Connection, origin: str, found: list[str]) -> 
 
 def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
     out: dict[str, Any] = {"at": clock.iso(), "schema": get_meta(conn, "schema_version"),
-                           "rules_version": int(get_meta(conn, "rules_version", "0") or 0)}
+                           "conventions": {"path": str(prefs.agents_path(cfg.home)),
+                                           "version": prefs.file_hash(cfg.home)}}
     out["sources"] = [{"source": r["source"], "scope": r["scope"], "last_success_at": r["last_success_at"],
                        "minutes_since_success": round(clock.minutes_since(r["last_success_at"]) or -1),
                        "failures": r["consecutive_failures"], "error": (r["last_error"] or "")[:200],
@@ -124,16 +125,16 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
         last = conn.execute("SELECT * FROM runs WHERE entry=? ORDER BY started_at DESC LIMIT 1", (entry,)).fetchone()
         woke = conn.execute("SELECT * FROM runs WHERE entry=? AND wake=1 ORDER BY started_at DESC LIMIT 1",
                             (entry,)).fetchone()
-        deferred = loads(last["summary"], {}) if last else {}
         out["runs"][entry] = {
-            "last": dict(id=last["id"], at=last["started_at"], status=last["status"], error=last["error"],
-                         deferred_over_budget=[deferred["context_over_budget"], deferred["deferred_over_budget"]]
-                         if deferred.get("deferred_over_budget") else None) if last else None,
+            "last": dict(id=last["id"], at=last["started_at"], status=last["status"], error=last["error"])
+            if last else None,
             "last_wake": dict(id=woke["id"], at=woke["started_at"], completed=bool(woke["agent_completed_at"]),
                               over_budget=loads(woke["summary"], {}).get("context_over_budget"))
             if woke else None}
     out["delegations_held"] = loads(get_meta(conn, "delegations.hold"), None)
-    out["kanban_settings"] = loads(get_meta(conn, "kanban.settings_problems"), None)
+    # Information, not problems: how the user's Hermes settings treat agent work.
+    out["notes"] = (loads(get_meta(conn, "kanban.settings"), None) or {}).get("notes", [])
+    out["conventions_problems"] = prefs.problems(cfg.home)
     out["notion_ready"] = bool(get_meta(conn, "notion.tasks_data_source_id") or cfg.get("notion.tasks_data_source_id"))
     out["recorded_problems"] = {r["key"].split(".", 2)[2]: loads(r["value"], {})
                                 for r in conn.execute("SELECT key, value FROM meta WHERE key LIKE 'health.problems.%'")}
@@ -169,6 +170,8 @@ def problem_items(rep: dict[str, Any], cfg: Config) -> list[tuple[str, str]]:
     for origin, recorded in sorted((rep.get("recorded_problems") or {}).items()):
         for text in recorded.get("problems", []):
             add(f"{origin}:{text}", f"{origin}: {text}")
+    for text in rep.get("conventions_problems") or []:
+        add(f"conventions:{text.split(':', 1)[0]}", f"conventions: {text}")
     if rep.get("notion_ready") and not cfg.get("identity.notion_user_ids"):
         add("identity.notion_user_ids", "identity.notion_user_ids is empty: Notion comments and edits are treated as"
             " evidence only, never as the user's instructions")
@@ -185,10 +188,6 @@ def problem_items(rep: dict[str, Any], cfg: Config) -> list[tuple[str, str]]:
         hold = rep["delegations_held"]
         add("delegations_held", f"delegations held since {hold.get('reason')} at {hold.get('at')}: check the Kanban"
             " board, then `todo-manager delegate release-hold`")
-    if rep.get("kanban_settings"):
-        for problem in rep["kanban_settings"].get("problems", []):
-            add(f"kanban_settings:{problem.split(' ', 1)[0]}",
-                f"Hermes {problem}; new delegations wait, cards already on the board are at risk")
     attention = rep.get("delegation_attention") or {}
     if attention.get("cancel_unconfirmed"):
         add("cancel_unconfirmed", f"cancelled delegations whose worker was not confirmed stopped: "
@@ -208,19 +207,15 @@ def problem_items(rep: dict[str, Any], cfg: Config) -> list[tuple[str, str]]:
             add(f"gate_idle:{entry}", f"{entry} gate has not run for {round(age)} min")
         if last["status"] == "error":
             add(f"gate_error:{entry}", f"{entry} gate error: {last['error']}")
-        if last.get("deferred_over_budget"):
-            size, budget = last["deferred_over_budget"]
-            setting = "wake.max_context_chars" if entry == "intake" else "feedback.max_context_chars"
-            add(f"over_budget:{entry}", f"{entry} run deferred: its context is over budget ({size} > {budget} chars"
-                f" even for one item): fewer open tasks/rules, a larger {setting}, or"
-                f" {setting.split('.')[0]}.over_budget = \"proceed\"")
         woke = info["last_wake"]
         if woke and woke.get("over_budget"):
-            add(f"over_budget:{entry}", f"{entry} run {woke['id']} context is over budget ({woke['over_budget']} chars):"
-                " fewer open tasks/rules or a larger wake.max_context_chars")
+            setting = "wake.max_context_chars" if entry == "intake" else "feedback.max_context_chars"
+            add(f"over_budget:{entry}", f"{entry} run {woke['id']} context was over budget ({woke['over_budget']}"
+                f" chars) even with one conversation or item, clipped: it ran anyway; fewer open tasks/projects or"
+                f" a larger {setting}")
         if woke and not woke["completed"] and (clock.minutes_since(woke["at"]) or 0) > 90:
-            add(f"never_applied:{entry}:{woke['id']}", f"{entry} run {woke['id']} woke the model but never applied"
-                " its decisions")
+            add(f"never_done:{entry}:{woke['id']}", f"{entry} run {woke['id']} woke the model but never reported"
+                " `todo-manager run done`; what it left was offered again after the claim expired")
     return found
 
 

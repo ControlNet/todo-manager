@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from todo_manager import clock, config, db
+from todo_manager import clock, config, db, templates
 from todo_manager.sources.base import FetchResult, Item, persist_fetch
 
 T0 = datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc)  # 13:00 Auckland (NZDT)
@@ -24,6 +24,8 @@ class WorkspaceCase(unittest.TestCase):
         base = {"language": "zh-CN", "timezone": "Pacific/Auckland", "identity": {"emails": ["me@example.edu"], "github_logins": ["me-gh"],
                              "slack_user_ids": ["UME"], "display_names": ["Test User"]}}
         self.cfg = config.load(self.tmp, overrides=config._deep_merge(base, self.overrides))
+        # As `todo-manager init` leaves it: the workspace conventions file Hermes loads.
+        (self.tmp / "AGENTS.md").write_text(templates.workspace_agents(self.cfg.language), encoding="utf-8")
         self.conn = db.connect(self.cfg.db_path)
 
     def tearDown(self) -> None:
