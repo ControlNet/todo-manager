@@ -39,6 +39,7 @@ class FakeHermes:
             skills = [args[i + 1] for i, a in enumerate(args) if a == "--skill"]
             data["jobs"].append({"id": f"job{len(data['jobs'])}", "name": name, "skills": skills,
                                  "script": args[args.index("--script") + 1], "state": "paused", "enabled": False,
+                                 "interpreter": args[args.index("--interpreter") + 1],
                                  "prompt": args[-1], "schedule": {"expr": args[-2]}, "deliver": "local",
                                  "workdir": None})
             del opts
@@ -185,9 +186,10 @@ class HermesInstallTests(CliCase):
             self.assertNotIn("--workdir", c)
             self.assertEqual(c[c.index("--deliver") + 1], "local")
         self.assertEqual({c[-2] for c in creates}, {"*/5 * * * *", "2-59/5 * * * *"})
-        # Re-running changes nothing on disk and only re-applies job definitions.
+        # Re-running changes nothing: files, skill and jobs are up to date.
         actions = self.installer().plan()
-        self.assertEqual({a.kind for a in actions if a.target.endswith((".py", "todo-manager", "SKILL.md"))}, {"noop"})
+        self.assertEqual({a.kind for a in actions}, {"noop"})
+        self.assertFalse([a for a in actions if a.run and a.kind != "noop"])
 
     def test_existing_skill_is_never_overwritten(self):
         inst = self.installer()
@@ -232,6 +234,7 @@ class HermesInstallTests(CliCase):
         data = json.loads(self.fake.jobs_file.read_text())
         for j in data["jobs"]:
             j["deliver"] = "matrix"                  # set in Hermes: deliver run results to the home channel
+            j["prompt"] = "old prompt"               # and a shipped prompt change to apply
         self.fake.jobs_file.write_text(json.dumps(data))
         self.fake.calls.clear()
         inst = self.installer()

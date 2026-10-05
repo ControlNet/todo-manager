@@ -18,6 +18,7 @@ from . import config, db, delegation, feedback, feedback_flow, health, i18n, rul
 from .db import dumps, loads
 
 EXIT_INVALID = 2
+EXIT_NEEDS_INPUT = 3   # `install` stopped at a question or a confirmation (see its JSON)
 _CONNECTIONS: list[Any] = []
 
 
@@ -482,78 +483,56 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    cfg = config.load(args.home)
-    for sub in ("state", "runs", "exports", "backups", "notes"):
-        (cfg.home / sub).mkdir(parents=True, exist_ok=True)
-    agents = cfg.home / "AGENTS.md"
-    if not agents.exists():   # the workspace guide may be edited locally: never overwritten
-        from importlib import resources
-        agents.write_text(resources.files("todo_manager.hermes_assets").joinpath("workspace/AGENTS.md")
-                          .read_text(encoding="utf-8"), encoding="utf-8")
-    target = cfg.home / "config.toml"
-    created = False
+    from .install import init_workspace
     language = i18n.normalize(args.language) if args.language else i18n.from_environment()
     if args.language and not language:
         raise SystemExit(f"unsupported language {args.language!r}; choose one of {', '.join(i18n.LANGUAGES)}")
-    if not target.exists():
-        target.write_text(CONFIG_TEMPLATE.replace('language = "en"', f'language = "{language}"')
-                          .replace('timezone = "UTC"', f'timezone = "{config.local_timezone()}"'), encoding="utf-8")
-        created = True
-    else:
-        language = config.load(args.home).language   # an existing config is never rewritten
-    db.connect(cfg.db_path).close()
-    _print({"home": str(cfg.home), "config": str(target), "config_created": created, "db": str(cfg.db_path),
-            "language": language})
+    _print(init_workspace(args.home, language))
     return 0
 
 
-CONFIG_TEMPLATE = """\
-# Todo Manager runtime configuration. Secrets are NOT stored here: connectors name
-# environment variables (optionally loaded from notion.env_file).
-timezone = "UTC"     # IANA name; `init` fills in the system time zone
-# Language of what you read in Notion (pages, comments, replies): en, zh-CN.
-# Notion property/option names keep the language used at `notion setup`.
-language = "en"
+def cmd_install(args: argparse.Namespace) -> int:
+    import shlex
 
-[identity]
-# Your own identities (never guessed). Messages from these are yours.
-emails = []
-github_logins = []
-slack_user_ids = []
-notion_user_ids = []
-display_names = []
-
-[notion]
-enabled = false
-token_env = "NOTION_API_KEY"
-env_file = "~/.hermes/.env"
-
-[kanban]
-enabled = false
-board = "todo-manager"
-
-[email]
-enabled = false
-accounts = []   # [{name = "work", address = "me@example.org", token_command = ["~/.hermes/scripts/<token helper>", "work"]}]
-
-[slack]
-enabled = false
-token_env = "SLACK_USER_TOKEN"   # or token_file = "~/.hermes/credentials/<file>" (only the token, mode 0600)
-team = ""                        # workspace id (T...)
-conversations = []               # channel / DM ids (C..., G..., D...)
-direct_messages = false          # true: also read every 1:1 DM of yours, new ones included
-group_direct_messages = false    # true: also read every group DM of yours
-channels = false                 # true: also read every channel you are a member of
-exclude = []                     # blacklist for the above: ids or name globs, e.g. ["#alerts-*", "C0123"]
-
-[github]
-enabled = false
-repos = []
-
-[commits]
-enabled = false
-repos = []
-"""
+    from . import config_file, install
+    if args.language and not i18n.normalize(args.language):
+        raise SystemExit(f"unsupported language {args.language!r}; choose one of {', '.join(i18n.LANGUAGES)}")
+    answers: dict[str, str] = {}
+    for pair in args.answer or []:
+        key, sep, value = pair.partition("=")
+        if not sep:
+            return _fail("INVALID", f"--answer expects key=value, got {pair!r}")
+        answers[key.strip()] = value.strip()
+    unknown = sorted((set(args.yes or []) | set(args.no or [])) - {*install.STEPS, "all"})
+    if unknown:
+        return _fail("INVALID", f"unknown step(s) {', '.join(unknown)}; steps: {', '.join(install.STEPS)}, all")
+    interactive = sys.stdin.isatty() and not (answers or args.yes or args.no)
+    prompter = install.TerminalPrompter() if interactive else install.AnswerPrompter(
+        answers, set(args.yes or []), set(args.no or []), output=lambda _line: None)
+    run = install.Install(args.home, prompter, install.Env(), language=args.language)
+    try:
+        report = run.run()
+    except (install.NeedsAnswer, install.NeedsConfirmation) as exc:
+        prior = (["--home", args.home] if args.home else []) + (["--language", args.language] if args.language else [])
+        prior += [x for k, v in answers.items() for x in ("--answer", f"{k}={v}")]
+        prior += [x for step in args.yes or [] for x in ("--yes", step)]
+        prior += [x for step in args.no or [] for x in ("--no", step)]
+        out = {**exc.to_json(shlex.join(prior)), "done": run.report}
+        if interactive:
+            print(f"stopped: {exc}")
+        else:
+            _print(out)
+        return EXIT_NEEDS_INPUT
+    except (EOFError, KeyboardInterrupt):
+        print("\nstopped; what was done so far is kept, run `todo-manager install` again to continue")
+        return EXIT_NEEDS_INPUT
+    except (install.InstallError, config_file.ConfigEditError) as exc:
+        return _fail("INSTALL", [*run.report, str(exc)])
+    if interactive:
+        print("install complete; `todo-manager health` shows how it runs")
+    else:
+        _print({"status": "complete", "done": report})
+    return 0
 
 
 # --------------------------------------------------------------------------- parser
@@ -563,7 +542,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--home", help="runtime workspace (default: $TODO_HOME or ~/.hermes/workspace/todo-manager)")
     sub = p.add_subparsers(dest="command", required=True)
 
-    s = sub.add_parser("init", help="create the runtime workspace and database")
+    s = sub.add_parser("install", help="install or update everything (settings inferred from Hermes); re-runnable")
+    s.add_argument("--language", help="en or zh-CN for a new workspace (default: Hermes' display.language)")
+    s.add_argument("--answer", action="append", metavar="KEY=VALUE",
+                   help="answer a question without the terminal, e.g. notion.home_page=<page id or URL>")
+    s.add_argument("--yes", action="append", metavar="STEP", help="confirm a step's changes (or: all)")
+    s.add_argument("--no", action="append", metavar="STEP", help="decline a step's changes")
+    s.set_defaults(fn=cmd_install)
+
+    s = sub.add_parser("init", help="create only the runtime workspace and database (install does this too)")
     s.add_argument("--language", help="en or zh-CN (default: from TODO_MANAGER_LANG / the system locale)")
     s.set_defaults(fn=cmd_init)
 

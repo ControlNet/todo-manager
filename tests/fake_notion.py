@@ -39,6 +39,7 @@ class FakeNotion:
         self.precise_times = False   # True: page edit times keep their seconds (default: rounded to the minute)
         self.truncate_markdown_at: int | None = None   # imitate the API cutting a large body (``truncated``)
         self.lose_response: set[tuple[str, str]] = set()
+        self.people: list[dict[str, Any]] = [{"object": "user", "id": USER_ID, "type": "person", "name": "Me"}]
         self._ids = itertools.count(1)
 
     # ------------------------------------------------------------------ helpers
@@ -157,6 +158,13 @@ class FakeNotion:
             return [r["id"] for r in raw["relation"]]
         return raw.get(t)
 
+    def user_top_level_page(self, title: str, markdown: str = "", author: str = USER_ID) -> str:
+        """A workspace-level page the user made and shared with the integration."""
+        page = self._new_page({"type": "workspace", "workspace": True}, {}, markdown, author)
+        page["properties"]["title"] = {"id": "title", "type": "title",
+                                       "title": [{"type": "text", "text": {"content": title}, "plain_text": title}]}
+        return page["id"]
+
     def pages_in(self, data_source_id: str) -> list[dict[str, Any]]:
         return [p for p in self.pages.values() if p["parent"].get("data_source_id") == data_source_id]
 
@@ -213,9 +221,13 @@ class FakeNotion:
             return {"object": "user", "id": BOT_ID, "type": "bot", "name": "Fake bot",
                     "bot": {"workspace_name": "Test"}}
         if parts == ["users"]:
-            return {"results": [{"object": "user", "id": USER_ID, "type": "person", "name": "Me"},
-                                {"object": "user", "id": BOT_ID, "type": "bot", "name": "Fake bot"}],
+            return {"results": copy.deepcopy(self.people) + [{"object": "user", "id": BOT_ID, "type": "bot",
+                                                              "name": "Fake bot"}],
                     "has_more": False, "next_cursor": None}
+        if parts == ["search"] and method == "POST":
+            kinds = {(body.get("filter") or {}).get("value")} - {None}
+            pages = [self._page_view(p) for p in self.pages.values() if not kinds or "page" in kinds]
+            return {"results": pages, "has_more": False, "next_cursor": None}
         if parts == ["databases"] and method == "POST":
             return self._create_database(body)
         if parts[0] == "databases" and method == "GET":

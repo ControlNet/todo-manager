@@ -152,6 +152,19 @@ class NotionClient:
     def retrieve_page(self, page_id: str) -> dict[str, Any]:
         return self.get(f"/pages/{page_id}")
 
+    def top_level_pages(self) -> list[dict[str, Any]]:
+        """Workspace-level pages shared with the integration (``POST /search``, read only), newest
+        edit first: the candidates for the home page, which an internal integration cannot create."""
+        out = []
+        for page in self.paginate("POST", "/search", body={"filter": {"property": "object", "value": "page"}}):
+            if (page.get("parent") or {}).get("type") != "workspace" or page.get("in_trash") or page.get("archived"):
+                continue
+            title = next((plain_text(v.get("title")) for v in (page.get("properties") or {}).values()
+                          if v.get("type") == "title"), "")
+            out.append({"id": page["id"], "title": title, "url": page.get("url", ""),
+                        "last_edited_time": page.get("last_edited_time", "")})
+        return sorted(out, key=lambda p: p["last_edited_time"], reverse=True)
+
     def create_page(self, parent: dict[str, Any], properties: dict[str, Any], markdown: str | None = None,
                     icon: dict[str, Any] | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {"parent": parent, "properties": properties}

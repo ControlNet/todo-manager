@@ -302,17 +302,25 @@ class Installer:
             changes.append("prompt")
         if existing.get("script") != self.paths.script(entry).name:
             changes.append("script")
+        if existing.get("interpreter") != self.paths.python:
+            changes.append("interpreter")
         sched = (existing.get("schedule") or {}).get("expr")
         if sched != spec["schedule"]:
             changes.append("schedule")
+        if not (existing.get("skills") or []):
+            changes.append("skill")
+        for key in ("model", "provider", "reasoning_effort"):
+            if self.cfg.get(f"hermes.{key}") and existing.get(key) != str(self.cfg.get(f"hermes.{key}")):
+                changes.append(key)
         if existing.get("workdir"):
             changes.append("workdir (cleared: no AGENTS.md for this job)")
+        state = "paused" if existing.get("state") == "paused" or not existing.get("enabled", True) else "enabled"
+        if not changes:
+            return Action("noop", spec["name"], f"cron job {existing['id']} ({state}) up to date")
         cmd = ["cron", "edit", existing["id"], "--schedule", spec["schedule"], *args]
         if existing.get("workdir"):
             cmd += ["--workdir", ""]
-        state = "paused" if existing.get("state") == "paused" or not existing.get("enabled", True) else "enabled"
-        summary = (f"update cron job {existing['id']} ({state}, kept as is): " + ", ".join(changes)) if changes \
-            else f"cron job {existing['id']} ({state}) definition re-applied"
+        summary = f"update cron job {existing['id']} ({state}, kept as is): " + ", ".join(changes)
         return Action("update", spec["name"], summary, run=lambda: self.hermes(*cmd))
 
     # ---------------------------------------------------------------- plan / apply
