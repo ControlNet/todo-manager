@@ -49,7 +49,10 @@ command; do not edit its database, its Notion pages or its cards directly.
   | how this skill works | this skill (chat only) |
 
   Example: "analyse Slack only after an hour of silence" is
-  `todo-manager config set slack.quiet_minutes 60`, not a sentence in `AGENTS.md`.
+  `todo-manager config set slack.quiet_minutes 60`, not a sentence in `AGENTS.md`. Add the
+  request's context as for any change (`--request <id> --said "..."` in a chat, `--feedback <id>`
+  for a Notion comment). Settings for identities, credentials, programs and agent work
+  (`identity.*`, `kanban.*`, `hermes.*`, tokens, accounts) change only in a chat with the user.
 - A one-off exception ("skip this one") is not a convention. Record a convention only when the
   user states it as lasting ("from now on", "always", "never again", in any language) or confirms
   your proposal. Conventions live in `AGENTS.md` only; do not copy them into Hermes memory.

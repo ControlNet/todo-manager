@@ -53,17 +53,51 @@ Answers are not remembered between runs until their step is done, so repeat them
 `init` (workspace only), `notion plan|setup`, `hermes install|status|resume|pause`.
 
 The `hermes` step writes a launcher `~/.local/bin/todo-manager`, two pre-run scripts under
-`~/.hermes/scripts/`, the skill (only if no skill of that name exists — Hermes may evolve it;
-an existing skill is never overwritten, differences are written to
-`state/hermes/skill-proposal/` for you to review) and two cron jobs:
+`~/.hermes/scripts/`, the skill `todo-manager` and two cron jobs. The jobs are created paused,
+deliver `local` (kept in Hermes, nothing sent) and run with `TODO_HOME` as their working
+directory, so Hermes loads `TODO_HOME/AGENTS.md` (your conventions) as their project context:
 
 | Job | Schedule | Pre-run gate |
 |---|---|---|
 | `todo-manager-intake` | `*/5 * * * *` | fetch sources, batch, wake the model only for mature batches, due follow-ups or the daily commit digest |
 | `todo-manager-feedback` | `2-59/5 * * * *` | Notion edits/comments, Kanban results, outbox, home freshness; wakes the model only for feedback that needs interpretation |
 
-Re-running `install` or `hermes install` updates scripts and job settings in place (keeping
-paused state) and leaves what is current untouched. `hermes install --dry-run` prints the plan only.
+`hermes install --dry-run` prints the plan only.
+
+## Upgrade
+
+```bash
+cd ~/src/todo-manager && git pull
+./bin/todo-manager install            # or: todo-manager hermes install --dry-run, then --yes
+```
+
+What an upgrade does with each part (the record is `TODO_HOME/state/hermes/install.json`, the
+texts installed last are under `state/hermes/baseline/`):
+
+| Part | Owner after install | Upgrade |
+|---|---|---|
+| gate scripts, launcher | Todo Manager | replaced (a file there without the Todo Manager mark is left alone and reported) |
+| skill `todo-manager`, the two cron prompts, `TODO_HOME/AGENTS.md` | you (and Hermes acting for you) | 3-way merge of the new template into your text; unchanged text is replaced; when you and the template changed the same lines your text is kept and the merge with conflict markers is written to `state/hermes/conflicts/<name>` (`health` reports it until you resolve it and run install again) |
+| cron job schedule, delivery, working directory, skills, model, provider, reasoning effort | you | a value that differs from what was installed is yours and kept; the others follow the new version |
+| cron job state (paused / running) | you | never changed by an upgrade |
+
+Hermes' job store is only read: every change is a `hermes cron create|edit` command. A job whose
+working directory is not `TODO_HOME` runs without your conventions; `health` reports it.
+
+## Change the automation
+
+Ask Hermes in chat (it uses the skill), or change it yourself:
+
+```bash
+todo-manager prefs show                               # your conventions (TODO_HOME/AGENTS.md)
+todo-manager config set slack.quiet_minutes 60        # e.g. "wait an hour of Slack silence before analysing"
+hermes cron edit <job id> --schedule "*/10 * * * *"   # a cron setting: kept by later upgrades
+hermes cron edit <job id> --prompt "$(cat my-intake-prompt.md)"
+```
+
+A scheduled run never changes the program, its prompts, the skill, `config.toml` or cron
+settings, and never grants itself permissions; it records a lasting preference in `AGENTS.md`
+only when your own comment says so. Changes take effect at the next run.
 
 ## Daily checks
 
@@ -71,7 +105,7 @@ paused state) and leaves what is current untouched. `hermes install --dry-run` p
 todo-manager health            # problems first; exit code 1 when there are problems
 todo-manager health --json     # sources, outbox, feedback, delegations, runs
 todo-manager metrics --days 7  # runs, wakes, completions, errors, tasks created, model token usage
-todo-manager hermes status     # launcher, scripts, skill state, jobs
+todo-manager hermes status     # launcher, scripts, skill/prompts/AGENTS.md state, upgrade conflicts, jobs
 todo-manager history <task id> # field-level history of one task or project
 ```
 
@@ -128,40 +162,57 @@ Roll back completely:
 2. `todo-manager backup` (keep the current state), then, if needed,
    `todo-manager restore <backups/…sqlite> --yes` to return to an earlier state
    (a `pre-restore` safety copy is taken automatically).
-3. To uninstall: `hermes cron list`, then `hermes cron remove <job id>` for both jobs; delete
-   `~/.hermes/scripts/todo_manager_gate_*.py` and `~/.local/bin/todo-manager` if you no longer need them.
-   The skill stays (it may contain Hermes' own learning); remove it only on purpose.
-4. Notion pages are not deleted by any command. Move them to the Notion trash yourself if you
+3. Notion pages are not deleted by any command. Move them to the Notion trash yourself if you
    want them gone.
+
+## Uninstall
+
+```bash
+todo-manager uninstall --dry-run      # what would be removed and what stays
+todo-manager export                   # optional: a portable copy of everything
+todo-manager uninstall --yes
+```
+
+Removed: the two cron jobs (`hermes cron remove`), the gate scripts, the launcher, and the
+skill only when it is unchanged since install (a skill you or Hermes changed is kept; remove it
+in Hermes if you no longer want it). Kept: the workspace (database, `config.toml`, `AGENTS.md`,
+`rules-archive.md`, exports, backups), the Notion pages and the Hermes board. Hermes' `USER.md`,
+`MEMORY.md`, `SOUL.md` and other skills are never touched. Close open delegations first
+(`todo-manager delegate cancel <id>`), otherwise Hermes keeps working on their cards. To delete
+the data as well, remove the workspace directory yourself after exporting. `install` again
+brings everything back on the same data.
 
 ## Export, backup, restore
 
 Two different things:
 
-- **Database snapshot** (`backup` / `restore`): one consistent SQLite file. It is the state of
-  this workspace (tasks, history, evidence, rules, feedback, delegations, deliveries, outbox,
-  cursors) but not the files next to it (delivery files, run context, config).
+- **Backup** (`backup` / `restore`): one consistent SQLite file (tasks, history, evidence,
+  feedback, delegations, deliveries, outbox, cursors, the retired rule tables) plus a copy of
+  `config.toml`, `AGENTS.md` and `rules-archive.md` in `backups/<name>.files/`. A restore puts
+  both back (the `pre-restore` safety backup keeps the current ones). Delivery files and run
+  context are not in a backup.
 - **Portable workspace** (`export` / `import`): everything needed to continue elsewhere. The
   database is first copied with SQLite's online backup (one consistent read, safe while gates and
   applies run) and everything is written from that copy: `data.json` (every table, including
   source bodies and history), Markdown views, `workspace/config.toml` with secret-looking values
   redacted (`token_env` / `token_file` names are kept, the secrets themselves stay in your
-  environment), `workspace/AGENTS.md`, `workspace/runs/<id>` for the runs in the snapshot
+  environment), `workspace/AGENTS.md`, `workspace/rules-archive.md`, `workspace/runs/<id>` for the runs in the snapshot
   (decision files and manifests) and the `workspace/deliveries/` files its deliveries refer to
   (copied out of the worker's scratch space at sync time, sealed under a temporary name and
   renamed once complete, with workspace-relative paths and SHA-256), plus a `manifest.json` with
   a hash for every file and table, `artifact_problems` (a kept file missing or changed since it
   was recorded) and `integrity` (each task's and project's history holds exactly versions
   1..its version; no dangling reference). Not included: credentials, `backups/`,
-  earlier `exports/`, `notes/`, `migration/` working files and `state/hermes/` skill proposals.
+  earlier `exports/`, `notes/`, `migration/` working files and `state/hermes/` (the install record,
+  baselines and conflict notes of this machine).
   History that exists only on the Hermes board (card comments, run logs) stays in Hermes; what
   todo-manager needs from it (questions, answers, deliveries and their files, failures) is
   already copied into its own tables when the card is synced.
 
 ```bash
-todo-manager export            # exports/<stamp>/: data.json, workspace/, tasks/*.md, projects/*.md, rules/, views/, manifest.json
+todo-manager export            # exports/<stamp>/: data.json, workspace/, tasks/*.md, projects/*.md, views/, manifest.json
 todo-manager export --verify   # also rebuilds a scratch database from data.json, compares every table, checks history
-todo-manager backup --keep 14  # consistent SQLite copy in backups/, keeps the newest 14
+todo-manager backup --keep 14  # consistent SQLite copy + workspace files in backups/, keeps the newest 14
 todo-manager restore backups/todo-<stamp>.sqlite --yes   # integrity-checked; takes both gate locks
 ```
 
@@ -192,108 +243,105 @@ board as it is.
 
 ## Upgrading an existing workspace (schema migrations)
 
-This version uses schema v7: v2 binds delegation messages to Kanban events, v3 records pending
-Notion writes, v4 tracks page-body reads, v5 adds exactly-once decision application and
-follow-up checks, v6 adds a revision per Notion comment / managed box / notes stream, the
-`op_key` identity of delegations and messages, and the delivery a message is bound to
-(`target_seq`, `target_message_id`); v7 adds where each message's comment sits on the card
-(`delegation_messages.card_event_before`, `card_event_id`), why a feedback item is held
-(`feedback.hold_reason`) and whether a Notion comment is still listed
-(`notion_comments.presence`, `presence_at`). v2–v5, v7 and most of v6 are additive (columns
-and indexes; the box fingerprint is seeded from the current box so an unchanged box is not
-re-read as an edit; rows written before v7 read as "position unknown, not held, listed"). One
-step of v6 rebuilds a table: `delegation_messages` is copied row by row (same ids, same order)
-into a table without its old table-level UNIQUE, then renamed; nothing is deleted. You do not
-need to delete or rebuild the database.
+This version uses schema v8. Earlier steps: v2 binds delegation messages to Kanban events, v3
+records pending Notion writes, v4 tracks page-body reads, v5 adds exactly-once decision
+application and follow-up checks, v6 adds a revision per Notion comment / managed box / notes
+stream and the identities of delegations and messages (one table, `delegation_messages`, is
+copied row by row into a table without its old UNIQUE constraint; nothing is deleted), v7 adds
+where each message's comment sits on the card, why a feedback item is held and whether a Notion
+comment is still listed. v8 adds `approvals.answer_message_id` (an approval given with the
+answer to a worker's question) and retires the rules engine:
+
+- active rules of the database, and the built-in categories and limits earlier versions applied
+  (calls for papers, unaccepted review invitations, at most about three questions per run),
+  become a "Migrated conventions" section of `TODO_HOME/AGENTS.md`; an `AGENTS.md` the earlier
+  version created and you did not change is first upgraded to the new template;
+- suggested and retired rules go to `TODO_HOME/rules-archive.md`, which Hermes does not read;
+- the old rule tables stay in the database for audit and export.
+
+New workspaces get no such conventions (an optional example:
+`todo_manager/hermes_assets/examples/academic.md`).
 
 The migration runs when any command first opens the database with the new code. Before it, a
-consistent copy is written to `backups/pre-schema-v7-from-v<old>-<UTC stamp>.sqlite` (one copy
-per upgrade, named after the schema the code brings).
+consistent copy is written to `backups/pre-schema-v8-from-v<old>-<UTC stamp>.sqlite`.
 
 ```bash
 todo-manager hermes pause --yes            # no gate runs during the upgrade
 todo-manager export --verify               # optional: a portable copy as well
 cd ~/src/todo-manager && git pull     # the new code
 todo-manager health                        # opens the database: migrates, then lists problems
-ls ~/.hermes/workspace/todo-manager/backups/pre-schema-v7-*
-todo-manager hermes install                # refresh scripts; jobs keep their paused state
+ls ~/.hermes/workspace/todo-manager/backups/pre-schema-v8-*
+todo-manager prefs show                    # the migrated conventions
+todo-manager install                       # skill, prompts and AGENTS.md merged; jobs get TODO_HOME as working directory
 todo-manager hermes resume --yes
 ```
 
-Expected: `health` runs without a traceback and a `pre-schema-v7-from-v<old>-*.sqlite` file
-exists. To check the schema version:
+Expected: `health` runs without a traceback, a `pre-schema-v8-from-v<old>-*.sqlite` file exists
+and `health` lists the keys of `config.toml` that no longer have an effect (see Configuration).
+To check the schema version:
 
 ```bash
 python3 -c "import sqlite3,os; c=sqlite3.connect(os.path.expanduser('~/.hermes/workspace/todo-manager/state/todo.sqlite')); print(c.execute(\"SELECT value FROM meta WHERE key='schema_version'\").fetchone()[0])"
 ```
 
-Expected: `7`.
+Expected: `8`.
 
-Rolling back to the previous code (verified 2026-10-05 for v7 on a copy of a v6 workspace:
-the 8cf3da5 code refuses the migrated file with "database schema 7 is newer than this code
-(6)" and reads the pre-migration copy after the swap below; verified 2026-10-04 the same way
-for v6 from v5 with 4b2791d; a task created after the upgrade stays only in the set-aside
-file). `restore` with the new code would migrate again, so the file is swapped while the jobs
-are paused. Changes made after the upgrade are lost (they stay in the set-aside file and the
-export).
+Rolling back to the previous code (verified 2026-10-05 on a scratch workspace created by
+232afdd: after the upgrade the 232afdd code refuses the file with "database schema 8 is newer
+than this code (7)" and reads the pre-migration copy after the swap below; a task created after
+the upgrade stays only in the set-aside file). `restore` with the new code would migrate again,
+so the file is swapped while the jobs are paused. Changes made after the upgrade are lost (they
+stay in the set-aside file and the export). `AGENTS.md` keeps the migrated section; the earlier
+code does not read it.
 
 ```bash
 todo-manager hermes pause --yes
 H=~/.hermes/workspace/todo-manager
-mv "$H/state/todo.sqlite" "$H/backups/todo-v7-set-aside.sqlite"   # keep, do not delete
+mv "$H/state/todo.sqlite" "$H/backups/todo-v8-set-aside.sqlite"   # keep, do not delete
 ls "$H/state"                       # no todo.sqlite-wal / -shm left (all connections closed)
-cp "$H"/backups/pre-schema-v7-from-v6-<stamp>.sqlite "$H/state/todo.sqlite"
-cd ~/src/todo-manager && git checkout <previous commit>    # e.g. 8cf3da5 for v6
+cp "$H"/backups/pre-schema-v8-from-v7-<stamp>.sqlite "$H/state/todo.sqlite"
+cd ~/src/todo-manager && git checkout <previous commit>    # e.g. 232afdd for v7
 todo-manager health                 # the previous code reads it
 ```
 
-Changes in behaviour you will see after the v7 upgrade (round 3):
+What changes for you after the v8 upgrade:
 
-- An accept is refused until a version has been delivered and is in review; a legacy accept
-  queued before any version is not sent (you are told: nothing to accept).
-- A second active delegation for the same Task is refused unless it is explicitly parallel:
-  `todo-manager delegate create … --parallel` (a delegate op takes `"parallel": true`).
-- A cancel goes out before anything else queued for that delegation and voids what has not
-  taken effect (one notice); while it is pending, answers, revisions, resumes, accepts and
-  approvals are refused.
-- Several approvals for one version are delivered together with one reopen of the review.
-- `todo-manager delegate list` and `task show` say "pause requested" while a pause has not taken effect;
-  "paused" only once our pause blocks the card.
-- Notion page notes, box edits and new-page bodies are stored in full; long items may take
-  longer to fit the feedback budget (deferred and reported, never cut). `todo-manager feedback
-  item <id>` prints a stored item in full (JSON).
-- A body edit is claimed only after a read past the minute of the edit (about a minute later).
-- A Notion comment deleted before it was handled is withdrawn; one in a resolved discussion is
-  held and listed by `health` until reopened or deleted.
-- GitHub: the first read of a matter (or after 14 idle days) turns a person's comment in the
-  read window into news even when a bot commented after it.
-- For scripts using the Kanban bridge: the `comment` op now returns
-  `{"comment_id": …, "event_id": …}` instead of the bare comment id.
+- The model reads what is new directly in its context and records outcomes with small
+  commands (`todo-manager task update …`, `feedback resolve …`). A long item is clipped with the
+  command that prints the rest; nothing waits because it is long.
+- Your conventions are `TODO_HOME/AGENTS.md`: change them by editing the file or by asking
+  Hermes in chat; a Notion comment that states a lasting preference is recorded there too.
+- Notion page notes are context for the task, not instructions; structured edits are the page
+  properties, discussion is comments.
+- How many delegations run at once is Hermes' (its dispatcher); an answer that arrives late
+  still goes to the card that asked. Closing a task cancels its agent work.
+- `todo-manager uninstall` exists (see Uninstall).
 
-Changes in behaviour you will see after the v6 upgrade:
+## Configuration
 
-- Direct requests from chat need an identity: `todo-manager feedback request-id` prints a fresh
-  `req_…` id; pass it as `--source-id` to `feedback apply-direct` / `feedback record` (a Matrix
-  event id works too). Reusing an id for the same text is a retry (applied once); for other text
-  it is refused (`REQUEST_ID_REUSED`). The skill tells Hermes to do this.
-- An intake or feedback run whose context does not fit even with one item is deferred and
-  reported instead of run over budget (see the configuration table).
-
-## Configuration added in this version
+Values are set with `todo-manager config set <key> <value>` (comments and other keys of
+`config.toml` stay as they are) and take effect at the next run. Selected keys:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `wake.max_evidence_chars` | 40000 | share of `wake.max_context_chars` for new evidence; the rest is rules, open tasks, follow-ups, format |
-| `wake.max_questions_per_run` | 3 | at most this many `ask` decisions (questions to you) per intake run |
+| `slack.quiet_minutes` | 30 | a Slack conversation is analysed after this many quiet minutes ("wait an hour" = 60) |
+| `email.min_wake_interval_minutes` | 60 | mail alone wakes the model at most this often |
+| `wake.max_context_chars` | 60000 | rendered context of one intake run; conversations that do not fit wait for the next run, the first always goes |
+| `wake.max_evidence_chars` | 40000 | share of it for new material |
+| `wake.max_item_chars` | 4000 | one message is shown up to this length, then a line with the command for the rest |
+| `feedback.max_context_chars` | 60000 | rendered context of one feedback run; the oldest items that fit are claimed, the rest waits; one item is always taken (clipped with a pointer) |
 | `slack.thread_watch_days` | 30 | threads with a reply this recent are watched for new replies |
-| `slack.thread_index_max` | 200 | at most this many watched threads per conversation |
-| `slack.thread_scan_minutes` | 60 | how often older thread parents are scanned |
-| `slack.thread_scan_pages` | 5 | history pages per scan (the rest waits for the next scan) |
 | `notion.body_reads_per_run` | 10 | page bodies read per feedback run after an edit by someone other than the bot |
-| `kanban.max_retries` | 1 | Hermes per-card failure breaker: a failed run parks the card for you instead of a respawn |
-| `wake.over_budget` | `"defer"` | intake run whose context does not fit even with one conversation: `"defer"` (no model run, health alert) or `"proceed"` (run over budget, reported) |
-| `feedback.max_context_chars` | 60000 | rendered context of one feedback run; the oldest items that fit are claimed, the rest waits |
-| `feedback.over_budget` | `"defer"` | as `wake.over_budget`, for a feedback item that cannot fit alone |
+| `kanban.max_retries` | 1 | Hermes per-card failure breaker; cards allowed an external action always get 1 |
+| `hermes.model`, `hermes.provider`, `hermes.reasoning_effort` | unset (Hermes' defaults) | set on the cron jobs by `install`; a value you change in Hermes is kept |
+
+Keys that no longer have an effect (`health` names them while `config.toml` still sets them):
+
+| Key | Why |
+|---|---|
+| `kanban.max_running` | Hermes schedules agent work; its dispatcher limits apply (`hermes config get kanban.max_in_progress`) |
+| `wake.over_budget`, `feedback.over_budget` | an over-budget context is clipped with pointers and the run goes ahead |
+| `wake.max_questions_per_run` | when to ask is a convention in `AGENTS.md` |
 
 ## Migrating an older Notion todo system
 

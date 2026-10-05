@@ -443,10 +443,27 @@ def backup(conn: sqlite3.Connection, cfg: Config, keep: int | None = None, prefi
         conn.backup(dest)
     finally:
         dest.close()
+    _copy_workspace_files(cfg.home, files_of(path))
     if keep:
         for old in sorted(target_dir.glob("todo-*.sqlite"))[:-keep]:
             old.unlink()
+            shutil.rmtree(files_of(old), ignore_errors=True)
     return path
+
+
+def files_of(backup_path: Path) -> Path:
+    """The workspace files (config.toml, AGENTS.md, rules-archive.md) kept with a backup."""
+    return backup_path.with_name(backup_path.stem + ".files")
+
+
+def _copy_workspace_files(src: Path, dest: Path) -> list[str]:
+    copied = []
+    for name in WORKSPACE_FILES:
+        if (src / name).is_file():
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src / name, dest / name)
+            copied.append(name)
+    return copied
 
 
 def check_backup(path: Path) -> dict[str, Any]:
@@ -470,13 +487,16 @@ def restore(conn: sqlite3.Connection, cfg: Config, path: Path) -> dict[str, Any]
         raise RuntimeError(f"backup failed integrity check: {info['integrity']}")
     if info["schema_version"] is None or info["schema_version"] > db.SCHEMA_VERSION:
         raise RuntimeError(f"backup schema {info['schema_version']} is not restorable by this code")
-    safety = backup(conn, cfg, prefix="pre-restore")
+    safety = backup(conn, cfg, prefix="pre-restore")     # also keeps the current workspace files
     src = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         src.backup(conn)
     finally:
         src.close()
     db.migrate(conn)
+    # The conventions and settings of that moment come back with the data (backups made before
+    # workspace files were kept have none: the current files stay).
+    files = _copy_workspace_files(files_of(path), cfg.home) if files_of(path).is_dir() else []
     # Reported, not refused: a restore is the way back, and the safety backup keeps what was live.
-    return {**info, "safety_backup": str(safety), **reconcile_after_restore(conn, "restore"),
+    return {**info, "safety_backup": str(safety), "files_restored": files, **reconcile_after_restore(conn, "restore"),
             "integrity_problems": integrity_problems(conn)}

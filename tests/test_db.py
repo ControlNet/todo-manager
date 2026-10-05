@@ -167,6 +167,37 @@ class MigrationTests(unittest.TestCase):
         finally:
             old.close()
 
+    def test_v7_delegations_keep_working_without_the_capacity_hold(self):
+        """Schema 8: Hermes schedules agent work, so messages held for local capacity go out;
+        a hold of the user's pause stays; pending page-notes feedback is closed (notes are
+        context now). Cards, bindings and approvals are untouched."""
+        make_v1(self.path)
+        conn = sqlite3.connect(str(self.path), isolation_level=None)
+        for version in range(2, 8):
+            for statement in db._split_sql(db.MIGRATIONS[version]):
+                conn.execute(statement)
+        conn.execute("UPDATE meta SET value='7' WHERE key='schema_version'")
+        conn.execute("INSERT INTO delegations(id, task_id, title, goal, allowed_actions, requirement_version, status,"
+                     " board, idem_key, card_id, created_at, updated_at) VALUES ('dlg_1', 'tsk_1', 't', 'g', '[]', 1,"
+                     " 'blocked', 'b', 'k', 'card_1', 'x', 'x')")
+        for mid, error in (("m_cap", "waiting for capacity"), ("m_pause", "paused by user")):
+            conn.execute("INSERT INTO delegation_messages(id, delegation_id, kind, body, requirement_version, status,"
+                         " error, created_at, target_seq) VALUES (?, 'dlg_1', 'answer', 'yes', 1, 'waiting_capacity',"
+                         " ?, 'x', 0)", (mid, error))
+        conn.execute("INSERT INTO feedback(id, origin, source_id, received_at, scope_type, kind, status)"
+                     " VALUES ('fb_n', 'notion_page', 'pg_1:notes', 'x', 'task', 'page_notes', 'pending')")
+        conn.close()
+        conn = db.connect(self.path)
+        try:
+            status = dict(conn.execute("SELECT id, status FROM delegation_messages").fetchall())
+            self.assertEqual(status, {"m_cap": "pending", "m_pause": "waiting_capacity"})
+            d = conn.execute("SELECT status, card_id FROM delegations WHERE id='dlg_1'").fetchone()
+            self.assertEqual(tuple(d), ("blocked", "card_1"))
+            self.assertEqual(conn.execute("SELECT status FROM feedback WHERE id='fb_n'").fetchone()[0], "superseded")
+            self.assertEqual(db.get_meta(conn, "prefs.migration_from"), "7", "the rules move on the next open")
+        finally:
+            conn.close()
+
     def test_fresh_database_takes_no_backup(self):
         db.connect(self.path).close()
         self.assertFalse((self.home / "backups").exists())

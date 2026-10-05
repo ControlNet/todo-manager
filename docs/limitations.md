@@ -80,14 +80,17 @@ verified and how.
   in that run.
 - Intake context budget: an oversize conversation is processed in segments over several runs
   (in message order); a segment not yet claimed waits while the conversation is active again.
-  If even one conversation does not fit (the fixed part — rules, open tasks, follow-ups,
-  format — is too large), the run is **deferred**: nothing is claimed, the model is not woken,
-  `health` and the Notion freshness box report it, until you shrink the fixed part,
-  raise `wake.max_context_chars`, or set `wake.over_budget = "proceed"` (then it runs over
-  budget, reported). Nothing is cut silently.
+  The first conversation of a run is always taken: a message longer than `wake.max_item_chars`
+  is shown clipped with a line naming the command that prints the rest
+  (`todo-manager source show <id>`), and a run whose context is still over
+  `wake.max_context_chars` (a large fixed part: open tasks, follow-ups) runs anyway and is
+  reported by `health`. Nothing waits because it is long, and nothing is cut without a pointer.
 - Feedback context budget: a run claims the oldest feedback items whose rendered context fits
   `feedback.max_context_chars` (default 60000); the rest waits for the next run. An item that
-  cannot fit alone defers the run the same way (`feedback.over_budget`).
+  cannot fit alone is clipped with a pointer (`todo-manager feedback item <id>`) and handled.
+- Items the model leaves for later (`todo-manager item defer`) come back at the date it gives,
+  at the latest after 7 days, or earlier with the next activity of their conversation. A
+  fetched item counts as processed only when a run recorded an outcome for it.
 - Health alerts are sent at most once per problem and day. A problem is identified by what is
   wrong (a source scope or channel, a kind of problem), so a changing error text does not
   re-alert, and a list-type problem (e.g. cancelled delegations not confirmed stopped) that gains

@@ -17,8 +17,9 @@ from unittest import mock
 
 from tests.fake_notion import USER_ID, FakeNotion
 from tests.helpers import T0
-from todo_manager import cli, clock, i18n, install
+from todo_manager import cli, clock, i18n, install, templates
 from todo_manager.hermes_install import Installer, Paths
+from tests.fake_hermes_cron import FakeCron
 from todo_manager.kanban import FakeKanban
 from todo_manager.net import HttpError
 from todo_manager.notion.client import NotionClient
@@ -100,19 +101,8 @@ class World:
         return fail
 
     def cron(self, args, ok):
-        data = json.loads(self.jobs_file.read_text())
-        if args[1] == "create":
-            flag = lambda f: args[args.index(f) + 1]
-            data["jobs"].append({"id": f"job{len(data['jobs'])}", "name": flag("--name"), "skills": [flag("--skill")],
-                                 "script": flag("--script"), "interpreter": flag("--interpreter"), "state": "paused",
-                                 "enabled": False, "prompt": args[-1], "schedule": {"expr": args[-2]},
-                                 "deliver": flag("--deliver"), "workdir": None})
-        elif args[1] in ("resume", "pause"):
-            for j in data["jobs"]:
-                if j["id"] == args[2]:
-                    j["state"], j["enabled"] = ("scheduled", True) if args[1] == "resume" else ("paused", False)
-        self.jobs_file.write_text(json.dumps(data))
-        return ok("ok")
+        code, out = FakeCron(self.jobs_file)(args)
+        return ok(out) if code == 0 else subprocess.CompletedProcess(["hermes", *args], code, out, "")
 
     def hermes_calls(self, *prefix):
         return [c for c in self.calls if c[0] == "hermes" and c[1:1 + len(prefix)] == list(prefix)]
@@ -206,7 +196,9 @@ class FreshInstallTests(InstallCase):
         self.assertEqual(len(jobs), 2)
         self.assertEqual({j["state"] for j in jobs}, {"scheduled"})
         self.assertEqual({j["deliver"] for j in jobs}, {"local"})
+        self.assertEqual({j["workdir"] for j in jobs}, {str(self.home)}, "Hermes loads TODO_HOME/AGENTS.md")
         self.assertTrue((self.world.hermes_home / "skills" / "productivity" / "todo-manager" / "SKILL.md").exists())
+        self.assertEqual((self.home / "AGENTS.md").read_text(), templates.workspace_agents("zh-CN"))
 
     def test_a_rerun_changes_nothing_and_asks_nothing(self):
         self.page()
@@ -220,6 +212,22 @@ class FreshInstallTests(InstallCase):
         self.assertEqual(self.world.notion_writes(), [])
         self.assertEqual(self.world.hermes_calls("config", "set") + self.world.hermes_calls("cron", "create")
                          + self.world.hermes_calls("cron", "edit") + self.world.hermes_calls("cron", "resume"), [])
+
+    def test_an_upgrade_keeps_the_users_prompt_and_cron_settings(self):
+        self.page()
+        self.install({"notion.home_page": "1"})
+        cron = FakeCron(self.world.jobs_file)
+        intake = cron.job("todo-manager-intake")
+        mine = intake["prompt"] + "\n\n每次最多提三个问题。"
+        self.assertEqual(cron(["cron", "edit", intake["id"], "--prompt", mine, "--schedule", "*/10 * * * *",
+                               "--deliver", "matrix"])[0], 0)
+        self.world.calls.clear()
+        prompter, run = self.install(yes=())
+        intake = cron.job("todo-manager-intake")
+        self.assertEqual((intake["prompt"], intake["schedule"]["expr"], intake["deliver"]),
+                         (mine, "*/10 * * * *", "matrix"))
+        self.assertEqual(self.world.hermes_calls("cron", "edit"), [])
+        self.assertTrue(any("kept as you set them: schedule, deliver" in n for n in run.report), run.report)
 
     def test_an_upgrade_updates_views_left_as_created_after_confirmation(self):
         self.page()

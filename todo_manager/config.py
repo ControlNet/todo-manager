@@ -115,6 +115,16 @@ DEFAULTS: dict[str, Any] = {
     "health": {
         "gate_idle_minutes": 60,  # a gate that has not run this long is reported
     },
+    # The Hermes installation and what `install` sets on new cron jobs ("" = Hermes' default).
+    # A model, provider or reasoning effort changed on a job in Hermes is kept by later upgrades.
+    "hermes": {
+        "home": "",  # "" = $HERMES_HOME or ~/.hermes
+        "bin": "hermes",
+        "launcher": "",  # "" = ~/.local/bin/todo-manager
+        "model": "",
+        "provider": "",
+        "reasoning_effort": "",
+    },
     "feedback": {
         "max_items_per_run": 20,
         "stale_claim_minutes": 60,

@@ -39,7 +39,7 @@ other people) never has authority, whatever it says.
 
 No special file is assumed to stack: Hermes loads one project context type per working
 directory (`.hermes.md` > `AGENTS.md` chain > `CLAUDE.md` > `.cursorrules`; checked at
-hermes-agent 105568c, see `.omo/knowledges/hermes-context-and-cron.md`). `TODO_HOME` is not a
+hermes-agent 105568c, see `.omo/knowledges/hermes-prompt-surfaces.md`). `TODO_HOME` is not a
 git repository, so only `TODO_HOME/AGENTS.md` is loaded for the jobs. Hermes' own memory
 (`USER.md`/`MEMORY.md`) stays in the Hermes profile; Todo Manager does not imitate it in the
 workspace and does not copy `AGENTS.md`/skill text into it.
@@ -213,14 +213,19 @@ template (`state/hermes/baseline/`).
   Non-overlapping changes merge automatically; a real conflict keeps the live text, writes the
   merge with conflict markers to `state/hermes/conflicts/` and is reported by `install` and
   `health`.
-- Cron job settings: a field whose live value differs from what was installed (schedule, model,
-  provider, delivery, workdir, skills, …) is the user's and is kept; Hermes' job store is only
-  read, all changes go through `hermes cron create|edit`.
+- Cron job settings: a field whose live value differs from what was installed (schedule,
+  delivery, workdir, skills, model, provider, reasoning effort) is the user's and is kept; the
+  others follow the new version; a job's paused/running state is never changed by an upgrade.
+  Hermes' job store is only read, all changes go through `hermes cron create|edit|remove`. New
+  jobs are created paused with `workdir` = `TODO_HOME`; `health` reports a job whose working
+  directory is elsewhere (it would run without `AGENTS.md`).
 - `todo-manager uninstall` removes only what Todo Manager installed (cron jobs, gate scripts,
-  launcher, an unchanged skill) and keeps the workspace data unless `--purge-data` is given
-  after an export. Profile files (`USER.md`, `MEMORY.md`, `SOUL.md`) are never touched.
-- Export/backup/restore include `AGENTS.md`, `rules-archive.md` and `config.toml` next to the
-  database (linkage data included).
+  launcher, an unchanged skill) and keeps the workspace data, the Notion pages and the board.
+  Deleting the data is left to the user (export first, then remove the directory). Profile
+  files (`USER.md`, `MEMORY.md`, `SOUL.md`) are never touched.
+- Export includes `config.toml` (secrets redacted), `AGENTS.md` and `rules-archive.md`; a backup
+  keeps the same files next to its database copy and a restore puts them back (linkage data
+  included).
 
 ## Migration from the previous design (schema v7 → v8)
 

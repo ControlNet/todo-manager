@@ -5,27 +5,39 @@ reads your email, Slack and GitHub, keeps the commitments that are really yours 
 local database, shows them in Notion where you read and edit, and hands explicit work to agents
 through a Hermes Kanban board.
 
-- **Evidence, not keywords.** A model judges new conversations with their full context once a
-  thread has gone quiet. Every new item ends up either linked to a task or ignored with a
-  category and a reason; nothing is dropped silently, and there is no "please triage" inbox.
-- **Your edits win.** Changes you make in Notion (properties, comments, the page body) are
-  imported as yours; agent judgements based on older versions never overwrite them, and tasks
-  you closed are never reopened automatically.
+It is a Todo automation **for** Hermes: Hermes runs the agent, its judgement, your conventions
+and skills, the board's workers, memory and delivery; Todo Manager adds what Hermes does not
+have - incremental reading of the sources, the task data and its history, the Notion UI and its
+sync, the durable link between a task and its agent cards, and install/upgrade/export. See
+[docs/architecture.md](docs/architecture.md).
+
+- **Evidence, not keywords.** Hermes judges new conversations with their full context once a
+  thread has gone quiet. Every new item ends up either linked to a task or dismissed with a
+  reason; nothing is dropped silently, and there is no "please triage" inbox.
+- **Your conventions, in your words.** What counts as your responsibility, what to ignore, when
+  to ask: `TODO_HOME/AGENTS.md`, which you (or Hermes, when you ask it) edit. Settings such as
+  "wait an hour of Slack silence" are `config.toml` values (`todo-manager config set`).
+- **Your edits win.** Changes you make in Notion properties are imported as yours; agent
+  judgements based on older versions never overwrite them, and tasks you closed are never
+  reopened automatically. Comments are discussion and instructions; your notes on a page are
+  context.
 - **Cheap when idle.** Two Hermes cron jobs run deterministic pre-run gates every five minutes
-  and wake the model only when there is something to judge.
-- **Safe delegation.** One card per delegation, duplicate-proof submission and recovery,
-  questions that block until you answer, deliveries that wait for your review, and external
-  actions only when allowed or approved for the exact delivered version.
+  and wake the model only when there is something to judge; the gate hands it the material
+  directly.
+- **Agent work on the Hermes board.** A Notion task can be delegated to one card on the board
+  `todo-manager`; Hermes schedules and runs it. Questions and late answers stay on the card that
+  asked, results come back to the task, closing the task cancels the work, and external actions
+  happen only when allowed or approved.
 - **Localized.** Everything you read follows `language` (English or Simplified Chinese);
   prompts for the model stay in English.
 
 ```
- Gmail / Slack / GitHub ──▶ intake gate ──(mature batches)──▶ model ──▶ decisions ──┐
-                                                                                    ▼
- Notion (home, Tasks, Projects) ◀──── push / import ────▶  SQLite (source of truth)  ◀── todo-manager CLI
-        comments, edits ──▶ feedback gate ──(needs judgement)──▶ model ──▶ decisions ──┘
+ Gmail / Slack / GitHub ──▶ intake gate ──(mature conversations, in the context)──▶ Hermes ──┐
+                                                                                             │ todo-manager task/item/… commands
+ Notion (home, Tasks, Projects) ◀──── push / import ────▶  SQLite (source of truth)  ◀───────┘
+        comments, edits ──▶ feedback gate ──(needs judgement)──▶ Hermes ──▶ commands
                                      │
-                                     └──▶ Hermes Kanban board "todo-manager" (delegations)
+                                     └──▶ Hermes Kanban board "todo-manager" (delegations, scheduled by Hermes)
 ```
 
 ## Quick start
@@ -46,6 +58,10 @@ and Kanban settings), asks only real choices (the home page, which mailboxes whe
 several) and shows every change outside the workspace before making it. It is safe to re-run;
 see [docs/operations.md](docs/operations.md#install).
 
+Upgrade with `git pull` and `./bin/todo-manager install` (your changes to the skill, the cron
+prompts, `AGENTS.md` and the cron settings are kept); remove with `todo-manager uninstall`
+(all data stays). See [docs/operations.md](docs/operations.md#upgrade).
+
 Runtime data (database, runs, exports, backups) lives only in the workspace
 (`TODO_HOME`, default `~/.hermes/workspace/todo-manager`); the tool refuses a workspace inside
 the source tree. Tokens are read from environment variables (for example `NOTION_API_KEY`);
@@ -53,17 +69,20 @@ never commit `.env` / `.env.local` files.
 
 ## Documentation
 
-- [docs/operations.md](docs/operations.md) – install, health, metrics, pause/resume/rollback,
-  export, backup/restore, migration
+- [docs/architecture.md](docs/architecture.md) – what Hermes does and what Todo Manager does,
+  the two jobs, authority, ownership of files and settings
+- [docs/operations.md](docs/operations.md) – install, upgrade, changing the automation, health,
+  pause/resume, uninstall, export, backup/restore, migration
 - [docs/notion-schema.md](docs/notion-schema.md) – Notion structure, field mapping, home views,
   sync rules
-- [docs/board-protocol.md](docs/board-protocol.md) – Hermes Kanban protocol and required settings
+- [docs/board-protocol.md](docs/board-protocol.md) – how delegations use the Hermes Kanban board
 - [docs/acceptance.md](docs/acceptance.md) – acceptance criteria and how each is verified
 - [docs/open-decisions.md](docs/open-decisions.md) – proposed defaults and user decisions
 - [docs/limitations.md](docs/limitations.md) – known limitations
 
-The Hermes skill and cron prompts ship in `todo_manager/hermes_assets/`; the authoritative
-decision formats the model follows are in `todo_manager/prompts/`.
+The Hermes skill, the cron prompts and the workspace `AGENTS.md` template ship in
+`todo_manager/hermes_assets/` (an optional example of conventions for academics:
+`hermes_assets/examples/academic.md`).
 
 ## License
 

@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import config, config_file, db, delegation, i18n
+from . import config, config_file, db, delegation, i18n, prefs
 from .net import HttpError, HttpTimeout, request_json
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -206,11 +206,6 @@ def init_workspace(home: str | os.PathLike[str] | None, language: str, timezone:
     cfg = config.load(home)
     for sub in ("state", "runs", "exports", "backups", "notes"):
         (cfg.home / sub).mkdir(parents=True, exist_ok=True)
-    agents = cfg.home / "AGENTS.md"
-    if not agents.exists():   # the workspace guide may be edited locally: never overwritten
-        from importlib import resources
-        agents.write_text(resources.files("todo_manager.hermes_assets").joinpath("workspace/AGENTS.md")
-                          .read_text(encoding="utf-8"), encoding="utf-8")
     target = cfg.home / "config.toml"
     created = False
     if not target.exists():
@@ -220,6 +215,9 @@ def init_workspace(home: str | os.PathLike[str] | None, language: str, timezone:
         created = True
     else:
         language = config.load(home).language   # an existing config is never rewritten here
+    # The conventions file is the user's: created from the template when missing, otherwise left
+    # to the Hermes step (3-way merge with the new template).
+    prefs.ensure(cfg.home, language)
     db.connect(cfg.db_path).close()
     return {"home": str(cfg.home), "config": str(target), "config_created": created, "db": str(cfg.db_path),
             "language": language}
@@ -564,10 +562,11 @@ class Install:
         inst = self.env.hermes_installer(self.cfg())
         actions = inst.plan()
         for a in actions:
-            if a.kind == "conflict":
+            if a.kind == "conflict" or a.kept:
                 self.note("hermes", f"{a.target}: {a.summary}")
-        pending = [a for a in actions if a.run and a.kind not in ("noop", "conflict", "keep")]
+        pending = [a for a in actions if a.changes]
         if not pending:
+            inst.apply(actions)                 # records what is installed, writes conflict notes
             self.note("hermes", "installed and current")
             return
         if not self.prompter.confirm("hermes", "Install into Hermes (the cron jobs are created paused):",

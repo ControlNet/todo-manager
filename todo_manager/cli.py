@@ -154,6 +154,8 @@ def cmd_paths(args: argparse.Namespace) -> int:
 def cmd_prefs(args: argparse.Namespace) -> int:
     from . import templates
     cfg = config.load(args.home)
+    if cfg.db_path.exists():
+        cfg, _conn = _open(args)        # an upgraded database moves its rules here first
     if args.action == "path":
         print(prefs.agents_path(cfg.home))
         return 0
@@ -208,7 +210,6 @@ def _config_value(key: str, raw: str) -> Any:
 
 
 def cmd_config(args: argparse.Namespace) -> int:
-    from . import config_file
     cfg = config.load(args.home)
     if args.action == "show":
         _print(cfg.data)
@@ -219,16 +220,12 @@ def cmd_config(args: argparse.Namespace) -> int:
             return _fail("UNKNOWN_KEY", f"{args.key} is not set; `todo-manager config show` lists the settings")
         _print({args.key: value})
         return 0
+    cfg, conn = _open(args)
     try:
         value = _config_value(args.key, args.value)
-        changed = config_file.set_values(cfg.home / "config.toml", {args.key: value})
     except ops.OpError as exc:
         return _fail(exc.code, exc.details)
-    except config_file.ConfigEditError as exc:
-        return _fail("INVALID", str(exc))
-    _print({"set": {args.key: value}, "changed": bool(changed), "file": str(cfg.home / "config.toml"),
-            "effective": "from the next run of the jobs"})
-    return 0
+    return _run(lambda: ops.config_set(conn, cfg, _ctx(conn, cfg, args), args.key, value))
 
 
 # --------------------------------------------------------------------------- tasks / projects
@@ -579,7 +576,8 @@ def cmd_restore(args: argparse.Namespace) -> int:
     path = Path(args.file).expanduser()
     if not args.yes:
         _print({"would_restore": str(path), "backup": export.check_backup(path),
-                "note": "this REPLACES the live database (a safety backup is made first); re-run with --yes"})
+                "note": "this REPLACES the live database and the workspace files kept with the backup (config.toml,"
+                        " AGENTS.md, rules-archive.md); a safety backup of both is made first; re-run with --yes"})
         return EXIT_INVALID
     with file_lock(lock_path(cfg.home, "intake"), blocking=True, timeout=300), \
             file_lock(lock_path(cfg.home, "feedback"), blocking=True, timeout=300):
@@ -735,6 +733,7 @@ def build_parser() -> argparse.ArgumentParser:
     x = cs.add_parser("set")
     x.add_argument("key", help="dotted key, e.g. slack.quiet_minutes")
     x.add_argument("value", help="lists: comma separated or JSON")
+    _add_ctx(x)
     s.set_defaults(fn=cmd_config)
 
     s = sub.add_parser("task", help="tasks")
@@ -932,10 +931,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("export", help="Markdown + JSON snapshot under TODO_HOME/exports")
     s.add_argument("--verify", action="store_true", help="also rebuild a scratch DB from the export and compare")
     s.set_defaults(fn=cmd_export)
-    s = sub.add_parser("backup", help="online SQLite backup under TODO_HOME/backups")
+    s = sub.add_parser("backup", help="online SQLite backup (plus config.toml, AGENTS.md) under TODO_HOME/backups")
     s.add_argument("--keep", type=int, help="keep only the newest N backups")
     s.set_defaults(fn=cmd_backup)
-    s = sub.add_parser("restore", help="replace the live DB with a backup (safety backup first)")
+    s = sub.add_parser("restore", help="replace the live DB and workspace files with a backup (safety backup first)")
     s.add_argument("file")
     s.add_argument("--yes", action="store_true")
     s.set_defaults(fn=cmd_restore)

@@ -20,6 +20,7 @@ versions, enums, claims, authorship); what the agent decides is its own judgemen
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -859,6 +860,38 @@ def delegate_approve(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, delegation
         return {"approval": aid}
 
     return perform(conn, ctx, "delegate approve", args, apply)
+
+
+# --------------------------------------------------------------------------- settings
+
+# Settings that decide who counts as the user, which credentials are read, which programs run
+# and whether agents work on the board. A change there widens what the automation may do, so it
+# is taken only from the user directly (terminal or chat), never from a scheduled run, even one
+# carrying out the user's Notion comment.
+GUARDED_SETTINGS = re.compile(r"^(identity|hermes|kanban)\.|(^|\.)(token\w*|\w*_command|env_file|accounts|\w*bin)$")
+
+
+def config_set(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, key: str, value: Any) -> dict[str, Any]:
+    """Change one ``config.toml`` value (effective from the next run), recorded with its context."""
+    from . import config_file
+    if ctx.kind == "run":
+        raise OpError("NOT_AUTHORIZED", "a scheduled run does not change settings; a lasting change comes from the user"
+                                        " (their chat request, or --feedback for their Notion comment)")
+    if ctx.kind == "feedback" and GUARDED_SETTINGS.search(key):
+        raise OpError("NOT_AUTHORIZED", f"{key} decides identities, credentials, programs or agent work: only the user"
+                                        " changes it (terminal, or a chat request with --request/--said)")
+    args = {"key": key, "value": value}
+
+    def apply() -> dict[str, Any]:
+        previous = cfg.get(key)
+        try:
+            changed = config_file.set_values(cfg.home / "config.toml", {key: value})
+        except config_file.ConfigEditError as exc:
+            raise OpError("INVALID", str(exc)) from None
+        return {"set": {key: value}, "previous": previous, "changed": bool(changed),
+                "file": str(cfg.home / "config.toml"), "effective": "from the next run of the jobs"}
+
+    return perform(conn, ctx, "config set", args, apply)
 
 
 # --------------------------------------------------------------------------- runs

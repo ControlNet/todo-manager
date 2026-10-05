@@ -1,4 +1,4 @@
-"""CLI, export/backup and Hermes installer (temporary HERMES_HOME; ``hermes`` is a test double)."""
+"""CLI and export/backup/restore (the Hermes installer: ``test_hermes_install``)."""
 
 import contextlib
 import io
@@ -18,33 +18,6 @@ def run(*argv):
     with contextlib.redirect_stdout(out):
         code = cli.main(list(argv))
     return code, out.getvalue()
-
-
-class FakeHermes:
-    """Test double for the ``hermes`` CLI: records calls and maintains a jobs.json."""
-
-    def __init__(self, hermes_home: Path):
-        self.calls = []
-        self.jobs_file = hermes_home / "cron" / "jobs.json"
-        self.jobs_file.parent.mkdir(parents=True, exist_ok=True)
-        self.jobs_file.write_text(json.dumps({"jobs": []}))
-
-    def __call__(self, cmd, **kw):
-        self.calls.append(cmd[1:])
-        data = json.loads(self.jobs_file.read_text())
-        args = cmd[1:]
-        if args[:2] == ["cron", "create"]:
-            opts = dict(zip(args[2::2], args[3::2]))
-            name = args[args.index("--name") + 1]
-            skills = [args[i + 1] for i, a in enumerate(args) if a == "--skill"]
-            data["jobs"].append({"id": f"job{len(data['jobs'])}", "name": name, "skills": skills,
-                                 "script": args[args.index("--script") + 1], "state": "paused", "enabled": False,
-                                 "interpreter": args[args.index("--interpreter") + 1],
-                                 "prompt": args[-1], "schedule": {"expr": args[-2]}, "deliver": "local",
-                                 "workdir": None})
-            del opts
-        self.jobs_file.write_text(json.dumps(data))
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
 
 class CliCase(unittest.TestCase):
@@ -144,6 +117,21 @@ class CliTests(CliCase):
         code, out = self.tm("delegate", "release-hold")
         self.assertEqual((code, json.loads(out)["released"]["reason"]), (0, "restore"))
 
+    def test_a_backup_keeps_the_conventions_and_settings_and_a_restore_brings_them_back(self):
+        agents = self.home / "AGENTS.md"
+        agents.write_text(agents.read_text() + "\n- Friday afternoons stay free.\n")
+        _, out = self.tm("backup")
+        backup = Path(json.loads(out)["backup"])
+        self.assertEqual((backup.with_name(backup.stem + ".files") / "AGENTS.md").read_text(), agents.read_text())
+        kept = agents.read_text()
+        agents.write_text("# Replaced by mistake\n")
+        code, out = self.tm("restore", str(backup), "--yes")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sorted(json.loads(out)["files_restored"]), ["AGENTS.md", "config.toml"])
+        self.assertEqual(agents.read_text(), kept)
+        safety = Path(json.loads(out)["safety_backup"])
+        self.assertEqual((safety.with_name(safety.stem + ".files") / "AGENTS.md").read_text(), "# Replaced by mistake\n")
+
     def test_export_imports_into_a_new_directory(self):
         _, out = self.tm("task", "create", "--title", "Moving task")
         tid = json.loads(out)["task"]
@@ -157,100 +145,3 @@ class CliTests(CliCase):
         self.assertEqual(json.loads(out)["title"], "Moving task")
         code, out = run("--home", str(new_home), "import", bundle, "--into", str(new_home))
         self.assertEqual(code, 2, "an existing workspace is never overwritten")
-
-
-class HermesInstallTests(CliCase):
-    def setUp(self):
-        super().setUp()
-        self.fake = FakeHermes(self.hermes_home)
-        self.cfg = config.load(self.home)
-        self.paths = hermes_install.Paths.from_config(self.cfg)
-
-    def installer(self):
-        return hermes_install.Installer(self.cfg, self.paths, runner=self.fake)
-
-    def test_fresh_install_creates_paused_jobs_scripts_skill_and_launcher(self):
-        inst = self.installer()
-        inst.apply(inst.plan())
-        self.assertTrue(self.paths.install_skill_path.exists())
-        self.assertEqual(self.paths.baseline.read_text(), self.paths.install_skill_path.read_text())
-        for entry in ("intake", "feedback"):
-            text = self.paths.script(entry).read_text()
-            self.assertIn(f'main(["gate", {entry!r}])', text)
-            self.assertIn(str(self.home), text)
-        self.assertTrue(self.paths.launcher.stat().st_mode & 0o100)
-        creates = [c for c in self.fake.calls if c[:2] == ["cron", "create"]]
-        self.assertEqual(len(creates), 2)
-        for c in creates:
-            self.assertIn("--paused", c)
-            self.assertIn("--skill", c)
-            self.assertNotIn("--workdir", c)
-            self.assertEqual(c[c.index("--deliver") + 1], "local")
-        self.assertEqual({c[-2] for c in creates}, {"*/5 * * * *", "2-59/5 * * * *"})
-        # Re-running changes nothing: files, skill and jobs are up to date.
-        actions = self.installer().plan()
-        self.assertEqual({a.kind for a in actions}, {"noop"})
-        self.assertFalse([a for a in actions if a.run and a.kind != "noop"])
-
-    def test_existing_skill_is_never_overwritten(self):
-        inst = self.installer()
-        inst.apply(inst.plan())
-        evolved = self.paths.install_skill_path.read_text() + "\n## Learned\n- prefer short replies\n"
-        self.paths.install_skill_path.write_text(evolved)
-        status = hermes_install.status(self.cfg)
-        self.assertEqual(status["skill"]["state"], "evolved-in-hermes")
-        self.installer().apply(self.installer().plan())
-        self.assertEqual(self.paths.install_skill_path.read_text(), evolved)
-        # A shipped update while Hermes also evolved it: proposal only.
-        self.paths.baseline.write_text("old baseline\n")
-        inst = self.installer()
-        actions = inst.plan()
-        skill = next(a for a in actions if "skill" in a.summary)
-        self.assertEqual(skill.kind, "propose")
-        inst.apply(actions)
-        self.assertEqual(self.paths.install_skill_path.read_text(), evolved)
-        self.assertTrue((self.paths.proposal_dir / "shipped-vs-live.diff").exists())
-
-    def test_existing_jobs_are_edited_in_place_keeping_state_and_skill_refs(self):
-        inst = self.installer()
-        inst.apply(inst.plan())
-        data = json.loads(self.fake.jobs_file.read_text())
-        for j in data["jobs"]:
-            j["skills"] = ["productivity-umbrella"]   # curator consolidated the skill
-            j["prompt"] = "old prompt"
-        self.fake.jobs_file.write_text(json.dumps(data))
-        self.fake.calls.clear()
-        inst = self.installer()
-        inst.apply(inst.plan())
-        edits = [c for c in self.fake.calls if c[:2] == ["cron", "edit"]]
-        self.assertEqual(len(edits), 2)
-        for c in edits:
-            self.assertNotIn("--skill", c, "a curator-rewritten skill reference is kept")
-            self.assertNotIn("resume", c)
-        self.assertFalse(any(c[:2] == ["cron", "create"] for c in self.fake.calls))
-
-    def test_delivery_is_left_to_the_hermes_job(self):
-        inst = self.installer()
-        inst.apply(inst.plan())
-        data = json.loads(self.fake.jobs_file.read_text())
-        for j in data["jobs"]:
-            j["deliver"] = "matrix"                  # set in Hermes: deliver run results to the home channel
-            j["prompt"] = "old prompt"               # and a shipped prompt change to apply
-        self.fake.jobs_file.write_text(json.dumps(data))
-        self.fake.calls.clear()
-        inst = self.installer()
-        actions = inst.plan()
-        inst.apply(actions)
-        edits = [c for c in self.fake.calls if c[:2] == ["cron", "edit"]]
-        self.assertEqual(len(edits), 2)
-        for c in edits:
-            self.assertNotIn("--deliver", c)
-            self.assertNotIn("--failure-deliver", c)
-        self.assertFalse([a for a in actions if "deliver" in a.summary])
-
-    def test_foreign_launcher_is_left_alone(self):
-        self.paths.launcher.parent.mkdir(parents=True, exist_ok=True)
-        self.paths.launcher.write_text("#!/bin/sh\necho someone else\n")
-        actions = self.installer().plan()
-        launcher = next(a for a in actions if a.target == str(self.paths.launcher))
-        self.assertEqual(launcher.kind, "conflict")

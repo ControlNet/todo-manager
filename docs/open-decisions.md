@@ -2,8 +2,9 @@
 
 Values marked `PROPOSED` in `todo_manager/config.py` are engineering defaults chosen during
 implementation. They work, but they encode preferences only the user can confirm. Override any
-of them in `config.toml`. (Slack's 30 quiet minutes is a requirement, not a proposal: lower values
-are raised to 30.)
+of them in `config.toml` or with `todo-manager config set <key> <value>` (Hermes does the same
+when you ask it in chat, e.g. "wait an hour of Slack silence before analysing" sets
+`slack.quiet_minutes` to 60). There is no hidden floor: the value you set is used.
 
 ## Proposed defaults
 
@@ -21,14 +22,14 @@ are raised to 30.)
 | `wake.max_context_chars` / `max_evidence_chars` / `max_items_per_run` | 60000 / 40000 / 60 | Whole rendered intake context / new evidence in it / new messages per run; the rest waits for the next run. The gate renders the context before waking and gives back conversations until it fits. Batches are taken round-robin across sources, so an email backlog cannot crowd out chat; a conversation larger than one run is split into segments in message order (each gets at most an even share per waiting source; a later segment waits for the earlier one). When more than one run's worth is waiting, the email/GitHub wake interval is skipped so a backlog drains every 5 minutes |
 | `feedback.max_items_per_run` | 20 | Feedback items per model run |
 | `feedback.max_attempts` | 3 | Model runs before an unapplied feedback item is marked failed (with a task comment) |
-| `kanban.max_running` | 1 | Delegations executing at once |
+| `kanban.max_retries` | 1 | A failed worker run parks the card for you instead of a respawn (always 1 for cards allowed an external action) |
 | `health.gate_idle_minutes` | 60 | A gate that has not run this long is reported |
 
 ## Agreed defaults
 
 | Setting | Default | Effect |
 |---|---|---|
-| `slack.quiet_minutes` | 30 | A Slack conversation matures only after 30 quiet minutes (floor) |
+| `slack.quiet_minutes` | 30 | A Slack conversation matures only after 30 quiet minutes (change it freely; no floor) |
 | `slack.active_hours` / `slack.quiet_poll_minutes` | 168 / 30 | A Slack conversation with a human (non-bot) message in the last 7 days is read every run; quieter ones about every 30 minutes (staggered), so all DMs and channels stay within Slack's rate limits. A new message in a long-quiet conversation is seen within ~30 minutes, before the 30 quiet minutes of batching |
 | GitHub: your own PR merged/closed | context unless an open task is about it | A merge/close of a PR you opened (with no newer comment by someone else) wakes the model only when that PR is evidence of an open task, so the task gets updated |
 
@@ -40,11 +41,14 @@ are raised to 30.)
   ids or channel name globs such as `"#alerts-*"`); `slack.conversations` lists single ones.
 - **Identities** (`identity.*`): your own addresses, logins and user ids. Never guessed; a
   message counts as yours only when it matches.
-- **Hermes Kanban settings** (`review_dispatch`, `auto_decompose`): global switches, both
-  `true` on this machine (checked 2026-10-04). Delegations stay local until you turn them off;
-  see [board-protocol.md](board-protocol.md). Also decide `kanban.max_retries` (default 1: a
-  failed worker run waits for you instead of an automatic retry).
-- **Model** for the two cron jobs (`hermes cron edit <id> --model … --provider …`); the jobs use
-  the Hermes default unless set.
+- **Hermes Kanban settings** (`review_dispatch`, `auto_decompose`): global Hermes switches.
+  Delegations do not depend on them; `install` and `health` say what they mean for agent work
+  (for example, with `review_dispatch` on Hermes' review worker may complete or send back a
+  delivery before you see it); see [board-protocol.md](board-protocol.md). Also decide
+  `kanban.max_retries` (default 1: a failed worker run waits for you instead of an automatic
+  retry).
+- **Model** for the two cron jobs (`hermes cron edit <id> --model … --provider …`, or
+  `hermes.model` / `hermes.provider` in `config.toml` before install); the jobs use the Hermes
+  default unless set, and a model you set in Hermes is kept by upgrades.
 - **Notion home page** and **migration** of an older system: both are production writes that
   are shown as a plan first (`notion plan`, `migrate propose` / `migrate apply` preview).
