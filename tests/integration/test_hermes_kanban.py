@@ -277,3 +277,64 @@ class HermesKanbanIntegration(WorkspaceCase):
         notices = [r["payload"] for r in self.conn.execute("SELECT payload FROM outbox")
                    if "有人在看板上改动了卡片" in r["payload"]]
         self.assertEqual(len(notices), 1)
+
+    # ----- round 3 (C01, C07, C09) on the installed Kanban code -----
+
+    def events(self, card, kind=None):
+        return [e for e in self.kb.snapshot(card)["events"] if kind is None or e["kind"] == kind]
+
+    def started(self):
+        did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草", goal="Draft only")
+        self.tick()
+        card = delegation.get(self.conn, did)["card_id"]
+        self.assertTrue(self.sim("claim", task_id=card))
+        self.tick()
+        self.assertEqual(delegation.get(self.conn, did)["status"], "running")
+        return did, card
+
+    def test_c01_a_revision_sent_after_the_worker_submitted_reopens_that_version(self):
+        did, card = self.started()
+        mid = delegation.add_message(self.conn, did, "revision", "必须增加附件", feedback_id="fbk_rev")
+        self.assertTrue(self.sim("review", task_id=card, summary="v1", metadata={"deliverable_markdown": "v1"}))
+        delegation.send_messages(self.conn, self.cfg, self.kb)      # our cache still says running
+        self.assertEqual(len(self.events(card, "review_reopened")), 1)
+        msg = self.conn.execute("SELECT * FROM delegation_messages WHERE id=?", (mid,)).fetchone()
+        commented = [e["id"] for e in self.events(card, "commented")]
+        self.assertIn(msg["card_event_id"], commented, "the bridge reports the comment's own event")
+        self.assertGreater(msg["card_event_id"], self._event_id(card, "review_requested"))
+        self.tick()
+        [v1] = delegation.deliveries(self.conn, did)
+        self.assertEqual(v1["requirement_version"], 1, "v1 was built without the revision")
+
+    def test_c01_a_revision_steered_into_the_running_worker_counts_for_its_result(self):
+        did, card = self.started()
+        delegation.add_message(self.conn, did, "revision", "必须增加附件", feedback_id="fbk_rev")
+        delegation.send_messages(self.conn, self.cfg, self.kb)
+        self.assertTrue(self.sim("review", task_id=card, summary="v1", metadata={"deliverable_markdown": "v1+"}))
+        self.tick()
+        self.assertEqual(self.events(card, "review_reopened"), [])
+        self.assertEqual(delegation.deliveries(self.conn, did)[0]["requirement_version"], 2)
+
+    def test_c07_a_queued_answer_is_not_sent_before_the_cancel(self):
+        did, card = self.started()
+        self.assertTrue(self.sim("block", task_id=card, reason="周四还是周五？", kind="needs_input"))
+        self.tick()
+        delegation.add_message(self.conn, did, "answer", "周五", feedback_id="fbk_a")
+        store.update_task(self.conn, self.task, {"status": "cancelled"}, actor="human", origin="cli")
+        self.tick()
+        self.assertEqual(self.sim("status", task_id=card)["status"], "archived")
+        self.assertEqual(self.events(card, "unblocked"), [], "not resumed only to be archived")
+
+    def test_c09_two_approvals_reach_one_run(self):
+        did, card = self.started()
+        self.assertTrue(self.sim("review", task_id=card, summary="v1", metadata={"deliverable_markdown": "v1"}))
+        self.tick()
+        v1 = delegation.deliveries(self.conn, did)[0]["id"]
+        delegation.record_approval(self.conn, did, v1, "send_email", "发给 Alice", "fbk_a")
+        delegation.record_approval(self.conn, did, v1, "comment_github", "", "fbk_b")
+        self.tick()
+        [reopen] = self.events(card, "review_reopened")
+        ours = [e["id"] for e in self.events(card, "commented")]
+        self.assertEqual(len(ours), 2)
+        self.assertTrue(all(e < reopen["id"] for e in ours), "both are on the card before the run starts")
+        self.assertEqual(self.sim("status", task_id=card)["status"], "ready")
