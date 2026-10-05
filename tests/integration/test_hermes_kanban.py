@@ -16,8 +16,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from todo_manager import delegation, kanban, store
-from todo_manager.kanban import BridgeKanban
+from todo_manager import delegation, gate_feedback, kanban, store
+from todo_manager.kanban import BridgeKanban, KanbanError
 from tests.helpers import WorkspaceCase
 
 HERMES_PY = Path(os.environ.get("TM_HERMES_PYTHON", "~/.hermes/hermes-agent/venv/bin/python")).expanduser()
@@ -338,3 +338,55 @@ class HermesKanbanIntegration(WorkspaceCase):
         self.assertEqual(len(ours), 2)
         self.assertTrue(all(e < reopen["id"] for e in ours), "both are on the card before the run starts")
         self.assertEqual(self.sim("status", task_id=card)["status"], "ready")
+
+    # ----- an approval confirmed after the sync read the end of its run -----
+
+    def sync_all(self):
+        gate_feedback.sync_all(self.conn, self.cfg, notion=None, kanban=self.kb, notifier=None)
+
+    def late_confirmed_approval(self, worker):
+        """The reopen lands on the installed Kanban and the simulated worker runs (``worker``);
+        only the RESPONSE of the reopen is lost (test double: an exception raised after the real
+        call). Then sync_all as the gate runs it: the sync reads the run's end first, the next
+        tick's retry confirms the reopen."""
+        did, card = self.started()
+        self.assertTrue(self.sim("review", task_id=card, summary="v1", metadata={"deliverable_markdown": "v1"}))
+        self.tick()
+        v1 = delegation.deliveries(self.conn, did)[0]["id"]
+        aid = delegation.record_approval(self.conn, did, v1, "send_email", "发给 Alice", "fbk_a")
+        real = self.kb.transition
+
+        def transition(card_id, action, anchor=None, summary=None):
+            result = real(card_id, action, anchor, summary)
+            if action == "reopen_review" and result["outcome"] == "done":
+                self.kb.transition = real
+                self.assertTrue(self.sim("claim", task_id=card))
+                worker(card)
+                raise KanbanError("lost response (test double)", uncertain=True)
+            return result
+
+        self.kb.transition = transition
+        self.sync_all()
+        msg = self.conn.execute("SELECT status FROM delegation_messages WHERE approval_id=?", (aid,)).fetchone()
+        self.assertEqual(msg["status"], "sending", "not confirmed before the sync read the run's end")
+        self.kb.transition = real
+        self.sync_all()
+        self.sync_all()
+        return did, card, self.conn.execute("SELECT * FROM approvals WHERE id=?", (aid,)).fetchone()
+
+    def test_late_confirmed_approval_whose_run_failed_is_unknown_and_paused(self):
+        did, card, a = self.late_confirmed_approval(lambda card: self.assertTrue(self.sim("fail", task_id=card)))
+        self.assertEqual(a["outcome"], "unknown")
+        self.assertTrue(a["consumed_at"])
+        self.assertEqual(delegation.get(self.conn, did)["pause_requested"], 1)
+        self.assertEqual(len(self.events(card, "review_reopened")), 1, "not reopened again")
+        self.assertEqual(len(self.events(card, "commented")), 1, "the approval is not posted again")
+        self.sim("recompute")
+        self.assertNotIn(card, self.sim("dispatch_dry")["spawned"])
+
+    def test_late_confirmed_approval_whose_run_delivered_is_reported(self):
+        did, card, a = self.late_confirmed_approval(lambda card: self.assertTrue(self.sim(
+            "review", task_id=card, summary="v2", metadata={"deliverable_markdown": "v2"})))
+        self.assertEqual(a["outcome"], "reported")
+        self.assertEqual(delegation.get(self.conn, did)["pause_requested"], 0)
+        self.assertEqual(len(delegation.deliveries(self.conn, did)), 2)

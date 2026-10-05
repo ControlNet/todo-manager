@@ -601,21 +601,74 @@ def _void_approval(conn: sqlite3.Connection, d: dict[str, Any], a: sqlite3.Row, 
                                 reason=i18n.t(f"dlg.reason.{reason}")))
 
 
-def _hold_unknown_external_action(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], event: str) -> None:
+def _hold_unknown_external_action(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], event: str,
+                                  handed: list[sqlite3.Row] | None = None) -> None:
     """A run that was handed an approval ended without reporting back: the external action
-    may or may not have happened. Pause the card so it is not retried automatically, and ask."""
-    handed = conn.execute("SELECT * FROM approvals WHERE delegation_id=? AND consumed_at IS NOT NULL AND outcome IS NULL"
-                          " ORDER BY consumed_at, rowid", (d["id"],)).fetchall()
+    may or may not have happened. Pause the card so it is not retried automatically, and ask.
+    ``handed``: the approvals that run had (default: every handed one not settled yet)."""
+    if handed is None:
+        handed = conn.execute("SELECT * FROM approvals WHERE delegation_id=? AND consumed_at IS NOT NULL"
+                              " AND outcome IS NULL ORDER BY consumed_at, rowid", (d["id"],)).fetchall()
     if not handed:
         return
     text = ""
     for a in handed:                       # approvals of one version go out to the same run
-        conn.execute("UPDATE approvals SET outcome='unknown' WHERE id=?", (a["id"],))
+        conn.execute("UPDATE approvals SET outcome='unknown' WHERE id=? AND outcome IS NULL", (a["id"],))
         text = i18n.t("dlg.approval_unknown", action=a["action"], title=d["title"], event=event)
         effects.task_comment(conn, d["task_id"], f"approval-unknown:{a['id']}", text)
         effects.notify(conn, cfg, f"approval-unknown:{a['id']}", text, task_id=d["task_id"])
-    if not d["pause_requested"]:
+    now = get(conn, d["id"])               # a pause queued meanwhile (by the user or for another approval) holds it
+    if not now["pause_requested"] and now["status"] not in ("ended", "cancelled") and not cancel_pending(conn, now):
         add_message(conn, d["id"], "pause", text, cause="approval_unknown")
+
+
+# Card events that end the run approvals were handed to: a result, or the run ending without one.
+HANDED_RUN_ENDS = ("review_requested", "completed") + RUN_ENDED_EVENTS
+
+
+def _handed_run_end(conn: sqlite3.Connection, d: dict[str, Any], a: sqlite3.Row, msg: dict[str, Any],
+                    events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The card event that ended the run approval ``a`` was handed to: the first result or run
+    end after the reopen of the approved version's review (the first ``review_reopened`` after
+    that version's review event: a review is reopened once) and after the approval's own comment.
+    Earlier runs and the approved version's own result come before it. None: not ended yet (or
+    the reopen is not among ``events``)."""
+    row = conn.execute("SELECT source_event_id FROM deliveries WHERE id=?", (a["delivery_id"],)).fetchone()
+    if row is None or row["source_event_id"] is None:
+        return None
+    ordered = sorted(events, key=lambda e: int(e["id"]))
+    reopen = next((int(e["id"]) for e in ordered
+                   if e["kind"] == "review_reopened" and int(e["id"]) > int(row["source_event_id"])), None)
+    if reopen is None:
+        return None
+    start = max(reopen, int(msg.get("card_event_id") or 0))
+    for e in ordered:
+        if int(e["id"]) <= start or e["kind"] not in HANDED_RUN_ENDS:
+            continue
+        if e["kind"] == "completed" and _accepted_by_us(conn, d["id"]):
+            continue                       # as in the sync: our own accept/cancel is not a result
+        return e
+    return None
+
+
+def _settle_late(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], msg: dict[str, Any],
+                 snap: dict[str, Any]) -> None:
+    """An approval confirmed as handed only now (the reopen's response was lost; a retry found
+    it on the card): the sync may already have read the end of its run - and moved its cursor
+    past it - while the approval did not count as handed yet. Settle it from the card's events
+    (``snap``: all of them, taken after that sync) as the sync would have; an end the sync has
+    not read yet is left to it."""
+    a = conn.execute("SELECT * FROM approvals WHERE id=?", (msg["approval_id"],)).fetchone()
+    if a is None or a["consumed_at"] is None or a["outcome"] is not None:
+        return
+    end = _handed_run_end(conn, d, a, msg, snap.get("events") or [])
+    cursor = conn.execute("SELECT event_cursor FROM delegations WHERE id=?", (d["id"],)).fetchone()[0]
+    if end is None or int(end["id"]) > int(cursor or 0):
+        return
+    if end["kind"] in RUN_ENDED_EVENTS:
+        _hold_unknown_external_action(conn, cfg, d, end["kind"], handed=[a])
+    else:
+        conn.execute("UPDATE approvals SET outcome='reported' WHERE id=? AND outcome IS NULL", (a["id"],))
 
 
 def _accepted_by_us(conn: sqlite3.Connection, delegation_id: str) -> bool:
@@ -1033,7 +1086,7 @@ def _cancel_unsubmitted(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: di
                 _set(conn, d["id"], card_id=card["id"], card_status=card["status"],
                      status="cancelled" if card["status"] == "archived" else _status_from_card(card["status"], d))
             return _deliver(conn, cfg, kb, get(conn, d["id"]), msg)
-    _settle_for_cancel(conn, kb, d, msg)
+    _settle_for_cancel(conn, cfg, kb, d, msg)
     with tx(conn):
         conn.execute("UPDATE delegation_messages SET status='sent', sent_at=? WHERE id=?", (clock.iso(), msg["id"]))
         _set(conn, d["id"], status="cancelled", cancel_state="confirmed")
@@ -1263,7 +1316,7 @@ def _send_approvals(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[s
             if m["status"] == "sending" or _has_marker(snap, m["id"]):
                 if _has_marker(snap, m["id"]):                    # records its place; nothing is posted
                     _post_comment(conn, kb, d, m, f"[{i18n.t('dlg.msg.approval')}] {m['body']}", snap)
-                _sent_transition(conn, d, m, reserved=False)
+                _sent_transition(conn, d, m, reserved=False, cfg=cfg, snap=snap)
             else:
                 _refuse_approval(conn, d, m, "sent_back_without_it")
         return "sent"
@@ -1289,19 +1342,24 @@ def _send_approvals(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[s
             _refuse_approval(conn, d, m, "not_in_review")
         return "superseded"
     for n, m in enumerate(group):
-        _sent_transition(conn, d, m, reserved=n == 0 and result["outcome"] in ("done", "raced"))
+        _sent_transition(conn, d, m, reserved=n == 0 and result["outcome"] in ("done", "raced"), cfg=cfg, snap=snap)
     if result["outcome"] == "raced":
         _raced(conn, cfg, d, msg)
     return "sent"
 
 
-def _sent_transition(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str, Any], reserved: bool) -> str:
+def _sent_transition(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str, Any], reserved: bool,
+                     cfg: Config | None = None, snap: dict[str, Any] | None = None) -> str:
+    """``cfg``/``snap`` (all card events, taken after the last sync): an approval is settled
+    from them in the same transaction when its run already ended (``_settle_late``)."""
     with tx(conn):
         conn.execute("UPDATE delegation_messages SET status='sent', sent_at=?, error=NULL WHERE id=?",
                      (clock.iso(), msg["id"]))
         if msg["kind"] == "approval" and msg.get("approval_id"):
             conn.execute("UPDATE approvals SET consumed_at=COALESCE(consumed_at, ?) WHERE id=?",
                          (clock.iso(), msg["approval_id"]))
+            if cfg is not None and snap is not None:
+                _settle_late(conn, cfg, d, msg, snap)
         if reserved:
             # The card is back in the pool: count it against max_running until the next sync.
             _set(conn, d["id"], status="queued")
@@ -1332,7 +1390,8 @@ def _landed(conn: sqlite3.Connection, d: dict[str, Any], m: dict[str, Any], snap
     return True   # its comment is what it does
 
 
-def _settle_for_cancel(conn: sqlite3.Connection, kb: Kanban, d: dict[str, Any], cancel: dict[str, Any]) -> bool:
+def _settle_for_cancel(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any],
+                       cancel: dict[str, Any]) -> bool:
     """The cancel goes first: every other message of the delegation that has not taken effect is
     void, and the user is told which - nothing is unblocked or reopened only to be archived. One
     in flight is checked on the card first and kept as history when it landed. Returns False when
@@ -1352,7 +1411,7 @@ def _settle_for_cancel(conn: sqlite3.Connection, kb: Kanban, d: dict[str, Any], 
             _accepted(conn, d, m, snap["task"]["status"])
             accepted = True
         else:
-            _sent_transition(conn, d, m, reserved=False)
+            _sent_transition(conn, d, m, reserved=False, cfg=cfg, snap=snap)
     if voided:
         items = "; ".join(f"{i18n.t('dlg.msg.' + m['kind'])}: {(m['body'] or '')[:120]}" for m in voided)
         with tx(conn):
@@ -1368,7 +1427,7 @@ def _settle_for_cancel(conn: sqlite3.Connection, kb: Kanban, d: dict[str, Any], 
 
 
 def _send_cancel(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any], msg: dict[str, Any]) -> str:
-    if not _settle_for_cancel(conn, kb, d, msg):
+    if not _settle_for_cancel(conn, cfg, kb, d, msg):
         return _unused(conn, d, msg, "accepted_before_cancel")
     with tx(conn):
         conn.execute("UPDATE delegation_messages SET status='sending' WHERE id=?", (msg["id"],))
