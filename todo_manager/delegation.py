@@ -213,9 +213,13 @@ def capacity(conn: sqlite3.Connection, cfg: Config, exclude: str | None = None) 
 
 def _closing_message(conn: sqlite3.Connection, d: dict[str, Any], task_status: str, reason: str,
                      feedback_id: str | None) -> str | None:
-    """Exactly one accept/cancel per delegation of a closed Task."""
-    if conn.execute("SELECT 1 FROM delegation_messages WHERE delegation_id=? AND kind IN ('accept','cancel')"
-                    " AND status IN ('pending','sending','sent','waiting_capacity')", (d["id"],)).fetchone():
+    """One closing message per delegation of a closed Task. A cancelled Task is always
+    cancelled, even with an accept queued (the cancel voids it when it is processed, or finds
+    it already carried out); an existing cancel is never replaced by an accept."""
+    closing = {r["kind"] for r in conn.execute(
+        "SELECT kind FROM delegation_messages WHERE delegation_id=? AND kind IN ('accept','cancel')"
+        " AND status IN ('pending','sending','sent','waiting_capacity')", (d["id"],))}
+    if "cancel" in closing or (closing and task_status != "cancelled"):
         return None
     kind = "accept" if d["status"] == "review" and task_status == "done" else "cancel"
     add_message(conn, d["id"], kind, reason, feedback_id=feedback_id, cause="task_closed")
@@ -672,6 +676,20 @@ def _placed(conn: sqlite3.Connection, delegation_id: str, mid: str, event_id: in
                 conn.execute("UPDATE deliveries SET requirement_version=? WHERE id=?", (known, dl["id"]))
 
 
+# Kinds that would act on the work; refused while a cancel is pending (pause/supplement are harmless).
+CONFLICTS_WITH_CANCEL = ("answer", "revision", "resume", "accept", "approval")
+
+
+def cancel_pending(conn: sqlite3.Connection, d: dict[str, Any]) -> bool:
+    """A cancel that will be processed: explicit, or for a Task that is still closed (reopening
+    the Task withdraws a task_closed cancel)."""
+    task = store.get_task(conn, d["task_id"])
+    task_closed = task is not None and task["status"] in store.CLOSED_STATUSES
+    return any(r["cause"] != "task_closed" or task_closed for r in conn.execute(
+        "SELECT cause FROM delegation_messages WHERE delegation_id=? AND kind='cancel'"
+        " AND status IN ('pending','sending','waiting_capacity')", (d["id"],)))
+
+
 def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: str,
                 feedback_id: str | None = None, approval_id: str | None = None, cause: str | None = None,
                 delivery_id: str | None = None, op_key: str | None = None) -> str:
@@ -687,6 +705,8 @@ def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: s
         raise DelegationError(f"delegation {delegation_id} not found")
     if d["status"] in ("ended", "cancelled") and kind not in ("supplement",):
         raise DelegationError(f"delegation is {d['status']}; create a new linked delegation for new work")
+    if kind in CONFLICTS_WITH_CANCEL and cancel_pending(conn, d):
+        raise DelegationError("the delegation is being cancelled; nothing more is sent to it")
     if kind == "accept":
         # Shared by every entry point: an accept is for a version the user has seen, never for
         # whatever the worker delivers next.
@@ -914,6 +934,8 @@ def send_messages(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str
         enforce_task_lifecycle(conn)
         rows = conn.execute("SELECT * FROM delegation_messages WHERE status IN ('pending','sending','waiting_capacity')"
                             " AND kind != 'requirement' ORDER BY created_at").fetchall()
+        # Cancels first: what the cancel voids must not be carried out before it.
+        rows = sorted(rows, key=lambda r: r["kind"] != "cancel")
         for msg in rows:
             msg = conn.execute("SELECT * FROM delegation_messages WHERE id=?", (msg["id"],)).fetchone()
             if msg["status"] not in ("pending", "sending", "waiting_capacity"):
@@ -979,6 +1001,7 @@ def _cancel_unsubmitted(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: di
                 _set(conn, d["id"], card_id=card["id"], card_status=card["status"],
                      status="cancelled" if card["status"] == "archived" else _status_from_card(card["status"], d))
             return _deliver(conn, cfg, kb, get(conn, d["id"]), msg)
+    _settle_for_cancel(conn, kb, d, msg)
     with tx(conn):
         conn.execute("UPDATE delegation_messages SET status='sent', sent_at=? WHERE id=?", (clock.iso(), msg["id"]))
         _set(conn, d["id"], status="cancelled", cancel_state="confirmed")
@@ -1251,7 +1274,68 @@ def _sent_transition(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str,
     return "sent"
 
 
+def _landed(conn: sqlite3.Connection, d: dict[str, Any], m: dict[str, Any], snap: dict[str, Any]) -> bool:
+    """Whether a message whose earlier attempt has an unknown outcome took effect on the card,
+    judged by the event it was bound to (and its marker for those that post a comment)."""
+    status, events, kind = snap["task"]["status"], snap["events"], m["kind"]
+    if kind == "accept":
+        anchor = _accept_anchor(conn, d, m)
+        return anchor is not None and transition_verdict(status, events, "complete", anchor) == "already"
+    if kind == "resume":
+        anchor = d.get("pause_event_id")
+        return anchor is not None and transition_verdict(status, events, "unblock", int(anchor)) == "already"
+    if not _has_marker(snap, m["id"]):
+        return False
+    if kind == "approval":
+        row = conn.execute("SELECT dl.source_event_id FROM deliveries dl JOIN approvals a ON a.delivery_id=dl.id"
+                           " WHERE a.id=?", (m.get("approval_id"),)).fetchone()
+        return row is not None and transition_verdict(status, events, "reopen_review",
+                                                      row["source_event_id"]) == "already"
+    if kind == "answer" and m.get("target_event_id") is not None:
+        return transition_verdict(status, events, "unblock", m["target_event_id"]) == "already"
+    if kind == "revision" and m.get("target_seq"):
+        return transition_verdict(status, events, "reopen_review", m["target_event_id"]) == "already"
+    return True   # its comment is what it does
+
+
+def _settle_for_cancel(conn: sqlite3.Connection, kb: Kanban, d: dict[str, Any], cancel: dict[str, Any]) -> bool:
+    """The cancel goes first: every other message of the delegation that has not taken effect is
+    void, and the user is told which - nothing is unblocked or reopened only to be archived. One
+    in flight is checked on the card first and kept as history when it landed. Returns False when
+    an accept of ours had already completed the card: the cancel came too late."""
+    others = [dict(m) for m in conn.execute(
+        "SELECT * FROM delegation_messages WHERE delegation_id=? AND id != ? AND kind NOT IN ('requirement','cancel')"
+        " AND status IN ('pending','sending','waiting_capacity') ORDER BY created_at, rowid", (d["id"], cancel["id"]))]
+    if not others:
+        return True
+    snap = kb.snapshot(d["card_id"], after_event=0) \
+        if d["card_id"] and any(m["status"] == "sending" for m in others) else None
+    accepted, voided = False, []
+    for m in others:
+        if snap is None or m["status"] != "sending" or not _landed(conn, d, m, snap):
+            voided.append(m)
+        elif m["kind"] == "accept":
+            _accepted(conn, d, m, snap["task"]["status"])
+            accepted = True
+        else:
+            _sent_transition(conn, d, m, reserved=False)
+    if voided:
+        items = "; ".join(f"{i18n.t('dlg.msg.' + m['kind'])}: {(m['body'] or '')[:120]}" for m in voided)
+        with tx(conn):
+            for m in voided:
+                conn.execute("UPDATE delegation_messages SET status='superseded', error=? WHERE id=?",
+                             (f"void: cancelled ({cancel['id']}) before it was carried out", m["id"]))
+                if m.get("approval_id"):
+                    conn.execute("UPDATE approvals SET revoked_at=COALESCE(revoked_at, ?) WHERE id=?",
+                                 (clock.iso(), m["approval_id"]))
+            effects.task_comment(conn, d["task_id"], f"cancel-voided:{cancel['id']}:{voided[0]['id']}",
+                                 i18n.t("dlg.cancel_voided", title=d["title"], items=items))
+    return not accepted
+
+
 def _send_cancel(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any], msg: dict[str, Any]) -> str:
+    if not _settle_for_cancel(conn, kb, d, msg):
+        return _unused(conn, d, msg, "accepted_before_cancel")
     with tx(conn):
         conn.execute("UPDATE delegation_messages SET status='sending' WHERE id=?", (msg["id"],))
     result = kb.transition(d["card_id"], "archive")
@@ -1314,15 +1398,19 @@ def _send_accept(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str,
     result = kb.transition(d["card_id"], "complete", anchor, summary=f"accepted by user: {msg['body']}"[:500])
     if result["outcome"] == "mismatch":
         return _unused(conn, d, msg, "card_moved", status=result["status"])
-    with tx(conn):
-        conn.execute("UPDATE delegation_messages SET status='sent', sent_at=?, error=NULL WHERE id=?",
-                     (clock.iso(), msg["id"]))
-        _set(conn, d["id"], status="ended", card_status=result["status"])
-        if not for_task_active_other(conn, d):
-            _task_state(conn, d["id"], "todo", "me", i18n.t("dlg.accepted"))
+    _accepted(conn, d, msg, result["status"])
     if result["outcome"] == "raced":
         _raced(conn, cfg, d, msg)
     return "sent"
+
+
+def _accepted(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str, Any], card_status: str) -> None:
+    with tx(conn):
+        conn.execute("UPDATE delegation_messages SET status='sent', sent_at=?, error=NULL WHERE id=?",
+                     (clock.iso(), msg["id"]))
+        _set(conn, d["id"], status="ended", card_status=card_status)
+        if not for_task_active_other(conn, d):
+            _task_state(conn, d["id"], "todo", "me", i18n.t("dlg.accepted"))
 
 
 def summary_line(d: dict[str, Any]) -> str:

@@ -254,6 +254,8 @@ def _validate_ops(conn: sqlite3.Connection, fb: dict[str, Any], ops: list[dict[s
                     errors.append(f"{at}: revision needs a delivery under review")
                 if d["status"] in ("ended", "cancelled") and op["kind"] != "supplement":
                     errors.append(f"{at}: delegation is {d['status']}; create a new linked delegation")
+                elif op["kind"] in delegation.CONFLICTS_WITH_CANCEL and delegation.cancel_pending(conn, d):
+                    errors.append(f"{at}: the delegation is being cancelled; nothing more is sent to it")
                 if op.get("delivery") and (op["kind"] not in ("accept", "revision") or conn.execute(
                         "SELECT 1 FROM deliveries WHERE id=? AND delegation_id=? AND kind='result'",
                         (op["delivery"], d["id"])).fetchone() is None):
@@ -270,6 +272,8 @@ def _validate_ops(conn: sqlite3.Connection, fb: dict[str, Any], ops: list[dict[s
             d = delegation.get(conn, op.get("delegation", ""))
             if d is not None and d["status"] != "review":
                 errors.append(f"{at}: delegation is {d['status']}; only a version waiting for review can be approved")
+            elif d is not None and delegation.cancel_pending(conn, d):
+                errors.append(f"{at}: the delegation is being cancelled; nothing more is sent to it")
             names = delegation.action_names([op.get("action") or ""])
             if len(names) != 1 or not names <= delegation.KNOWN_ACTIONS:
                 errors.append(f"{at}: unknown action")
