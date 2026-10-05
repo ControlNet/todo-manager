@@ -14,9 +14,9 @@ Import (gate B, every run)
     active delegations deterministically (accept a delivered review, cancel otherwise).
 
 Page bodies (gate B, after the property import)
-  * A page last edited by someone other than our bot gets its body read until a read
-    happened after the edit's timestamp plus ``BODY_TIME_SLACK`` (edit timestamps can be
-    coarse, so a read in the same minute may predate a later edit with the same stamp).
+  * A page last edited by someone other than our bot gets its body read until a read covers
+    the edit's timestamp (``body.edit_unread``: a whole-minute stamp may stand for any moment
+    of that minute, so a read in the same minute may predate a later edit with the same stamp).
     At most ``notion.body_reads_per_run`` reads per run, least recently read first. A change inside the managed box is ``body_edit``; a change to the
     user's own notes outside it is ``page_notes`` with the added/removed text. Both go to
     the model, which decides whether the text is information, a requirement for the task
@@ -56,7 +56,6 @@ from . import body, schema
 from .client import NotionClient, NotionError, NotionUncertain, plain_text
 
 TRASH_REASON = "sync.trash_reason"    # catalog keys
-BODY_TIME_SLACK = timedelta(minutes=1)
 HOME_MARKER = "home.marker"
 
 
@@ -300,11 +299,8 @@ class NotionSync:
 
     def body_unread(self, row: dict[str, Any]) -> bool:
         """The page's last edit (not ours) may not be reflected in our last body read."""
-        if not row["last_edited_time"] or row["last_edited_by"] == self.state.bot_user_id:
-            return False
-        if not row["body_read_at"]:
-            return True
-        return clock.parse(row["body_read_at"]) < clock.parse(row["last_edited_time"]) + BODY_TIME_SLACK
+        return body.edit_unread(row["last_edited_time"], row["last_edited_by"], row["body_read_at"],
+                                self.state.bot_user_id)
 
     def check_bodies(self, limit: int) -> int:
         """Read the bodies of pages edited by someone other than our bot since the last read.

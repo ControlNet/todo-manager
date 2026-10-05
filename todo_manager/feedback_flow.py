@@ -30,6 +30,7 @@ from typing import Any
 
 from . import clock, delegation, effects, feedback, i18n, ids, prompts, rules, runs, store
 from .config import Config
+from .notion import body as notion_body
 from .sources.base import quote
 from .db import dumps, get_meta, loads, rules_version, tx
 
@@ -454,22 +455,19 @@ def _queue_reply(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any], text
         effects.page_comment(conn, p["page_id"], key, text, discussion_id=fb.get("reply_to"))
 
 
-def _page_edited_since_read(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any]) -> bool:
-    """A box/notes interpretation is checked against the page before it is applied: a later
-    edit by someone else than our integration that the gate pulled but whose body it has not
-    read yet may have replaced or withdrawn the text. Edit times are compared by minute; an edit
-    in the same minute as the read is caught by the gate's next re-read instead."""
+def page_body_unread(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any]) -> bool:
+    """A box/notes interpretation is built from our last read of the page body; while a later
+    edit (pulled, not read yet - ``body.edit_unread``, the same check as the body re-read) may
+    have replaced or withdrawn its text, it is neither claimed nor applied: the next covering
+    read supersedes it or keeps it."""
     if fb["kind"] not in ("body_edit", "page_notes"):
         return False
     row = conn.execute("SELECT last_edited_time, last_edited_by, body_read_at FROM notion_pages WHERE page_id=?",
                        ((fb["payload"] or {}).get("page_id"),)).fetchone()
-    if row is None or not row["last_edited_time"] or not row["body_read_at"]:
+    if row is None:
         return False
     bot = cfg.get("notion.bot_user_id") or get_meta(conn, "notion.bot_user_id")
-    if row["last_edited_by"] == bot:
-        return False
-    minute = lambda ts: clock.parse(ts).replace(second=0, microsecond=0)  # noqa: E731
-    return minute(row["last_edited_time"]) > minute(row["body_read_at"])
+    return notion_body.edit_unread(row["last_edited_time"], row["last_edited_by"], row["body_read_at"], bot)
 
 
 def apply_decisions(conn: sqlite3.Connection, cfg: Config, run_id: str, decisions: dict[str, Any]) -> dict[str, Any]:
@@ -497,7 +495,7 @@ def apply_decisions(conn: sqlite3.Connection, cfg: Config, run_id: str, decision
                 "SELECT id FROM feedback WHERE claimed_run=? AND status='superseded'", (run_id,))}
             if not claimed and not superseded:
                 raise FeedbackDecisionError("STALE_RUN", ["this run holds no pending feedback (released)"])
-            deferred = {f["id"] for f in claimed if _page_edited_since_read(conn, cfg, f)}
+            deferred = {f["id"] for f in claimed if page_body_unread(conn, cfg, f)}
             errors = _validate(conn, decisions, [f for f in claimed if f["id"] not in deferred], superseded | deferred)
             if errors:
                 raise FeedbackDecisionError("INVALID", errors)

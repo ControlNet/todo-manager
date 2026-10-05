@@ -36,6 +36,7 @@ class FakeNotion:
         self.views: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, str]] = []
         self.fail_next: dict[tuple[str, str], Exception] = {}
+        self.precise_times = False   # True: page edit times keep their seconds (default: rounded to the minute)
         self.lose_response: set[tuple[str, str]] = set()
         self._ids = itertools.count(1)
 
@@ -44,7 +45,7 @@ class FakeNotion:
         return f"{prefix}-{next(self._ids):04d}-{uuid.uuid4().hex[:8]}"
 
     def _touch(self, page: dict[str, Any], who: str) -> None:
-        page["last_edited_time"] = _minute(clock.iso())
+        page["last_edited_time"] = clock.iso() if self.precise_times else _minute(clock.iso())
         page["last_edited_by"] = {"object": "user", "id": who}
 
     def _prop_id(self, ds: dict[str, Any], key: str) -> str:

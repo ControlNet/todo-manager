@@ -7,7 +7,7 @@ two edits within one minute share a timestamp; that is a property of the fake us
 the ordering, not a claim about the precision of the real API.
 """
 
-from todo_manager import feedback, store
+from todo_manager import clock, feedback, store
 from tests.test_feedback import GateCase
 from tests.test_notion import NotionCase
 
@@ -172,9 +172,11 @@ class EditAfterClaimTests(GateCase):
 
     def test_box_edited_after_claim_is_not_applied(self):
         self.edit_box("其实是 Alice 问我")
+        clock.advance(minutes=1)                       # the gate's read covers the edit's minute
         _, _, run_id = self.gate()
         [fb] = feedback.claimed_by(self.conn, run_id)
         self.edit_box("其实是 Carol 问我")
+        clock.advance(minutes=1)
         self.gate()
         task = store.get_task(self.conn, self.task)
         report = self.decide(run_id, [{"feedback": fb["id"], "outcome": "applied", "ops": [
@@ -190,9 +192,9 @@ class EditAfterClaimTests(GateCase):
     def test_an_edit_not_yet_read_defers_the_claimed_interpretation(self):
         self.cfg.data.setdefault("notion", {})["body_reads_per_run"] = 10
         self.edit_box("其实是 Alice 问我")
+        clock.advance(minutes=1)
         _, _, run_id = self.gate()
         [fb] = feedback.claimed_by(self.conn, run_id)
-        from todo_manager import clock
         clock.advance(minutes=2)
         self.edit_box("其实是 Carol 问我")
         self.cfg.data["notion"]["body_reads_per_run"] = 0      # the page is pulled, its body not yet read
@@ -213,9 +215,11 @@ class EditAfterClaimTests(GateCase):
 
     def test_notes_appended_after_claim_keep_the_claimed_note(self):
         self.fake.user_set_markdown(self.page, self.original + "\n\n要求：提到截止日期")
+        clock.advance(minutes=1)
         _, _, run_id = self.gate()
         [fb] = feedback.claimed_by(self.conn, run_id)
         self.fake.user_set_markdown(self.page, self.original + "\n\n要求：提到截止日期\n另外：抄送 Carol")
+        clock.advance(minutes=1)
         self.gate()
         report = self.decide(run_id, [{"feedback": fb["id"], "outcome": "ignored", "reason": "已知"}])
         self.assertEqual(report["ignored"], [fb["id"]], "an append does not invalidate the claimed note")

@@ -100,6 +100,7 @@ class BodyFeedbackTests(GateCase):
 
     def test_plain_note_can_be_ignored(self):
         self.fake.user_set_markdown(self.page, self.fake.markdown[self.page] + "\n（自己记一下：Bob 喜欢简短的邮件）")
+        clock.advance(minutes=1)                       # the gate's read covers the edit's minute
         _, _, run_id = self.gate()
         fid = feedback.claimed_by(self.conn, run_id)[0]["id"]
         self.decide(run_id, [{"feedback": fid, "outcome": "ignored", "reason": "个人笔记"}])

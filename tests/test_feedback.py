@@ -259,6 +259,7 @@ class BodyEditFeedbackTests(GateCase):
         self.fake.user_set_markdown(self.page, self.fake.markdown[self.page].replace("Bob 直接问我", "其实是导师转给我的"))
         store.update_task(self.conn, self.task, {"summary": "Bob 想合作写论文"}, actor="agent", origin="intake",
                           based_on_version=1)
+        clock.advance(minutes=1)                       # the gate's read covers the edit's minute
         _, woke, run_id = self.gate()
         self.assertTrue(woke)
         fb = feedback.claimed_by(self.conn, run_id)[0]

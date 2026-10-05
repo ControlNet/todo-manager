@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import timedelta
 from typing import Any
 
-from .. import i18n
+from .. import clock, i18n
 from ..files import artifact_label
 
 MARKER = "body.marker"        # catalog key of the task-page marker
@@ -23,6 +24,22 @@ MAX_DELIVERY_CHARS = 15000
 
 
 _LEADING = re.compile(r"^(\s*)([#>+-]|\d+[.)])")
+
+
+def edit_unread(last_edited_time: str | None, last_edited_by: str | None, body_read_at: str | None,
+                bot_user_id: str | None) -> bool:
+    """Whether the page's last edit (not ours) may postdate our last body read. The one check
+    for re-reading a body, claiming body_edit/page_notes items and applying them. No timestamp
+    precision is assumed: a stamp on a whole minute (Notion rounds edit times) may stand for any
+    moment of that minute, so only a read after the end of the minute covers it; a stamp with
+    seconds is taken as precise to the second."""
+    if not last_edited_time or last_edited_by == bot_user_id:
+        return False
+    if not body_read_at:
+        return True
+    edited = clock.parse(last_edited_time)
+    grain = timedelta(seconds=1) if edited.second or edited.microsecond else timedelta(minutes=1)
+    return clock.parse(body_read_at) < edited + grain
 
 
 def escape_inline(text: str) -> str:
