@@ -128,6 +128,48 @@ format, fixed in 1822899). Second answer after the fix: applied in the sandbox, 
 project, 29 items ignored, every task with a responsibility sentence. One sample of 10
 conversations: it shows the format works with the real model, not that its judgement holds.
 
+## Reliability round 3 (baseline 8cf3da5)
+
+Same layout. Schema v7 is additive (columns only: `delegation_messages.card_event_before` /
+`card_event_id`, `feedback.hold_reason`, `notion_comments.presence` / `presence_at`); migration,
+backup and rollback in [operations.md](operations.md#upgrading-an-existing-workspace-schema-migrations).
+Every item was reproduced by a failing test before the fix. Doubles named: FakeNotion,
+FakeKanban, FakeGitHubApi; *hermes* = the installed Hermes Kanban in an isolated `HERMES_HOME`
+with the simulated worker (`tests/integration/hermes_worker_sim.py`). No real model ran in this
+round.
+
+| Item | Root cause | Fix | Tests | Commit |
+|---|---|---|---|---|
+| C01 revision after the worker submitted | a revision was routed by our last sync ("running" → steer only), and a delivery's requirement version counted every message *sent before the sync* | the revision checks the card: a version already in review is reopened; a delivery counts only messages whose own comment event precedes its result event (card body = position 0); comment posts record the event before and the comment's own event (bridge `comment` returns `{comment_id, event_id}`) | `RevisionOnTheCardTests`, `SupplementPlacementTests`; *hermes* `test_c01_a_revision_sent_after_the_worker_submitted_reopens_that_version`, `test_c01_a_revision_steered_into_the_running_worker_counts_for_its_result` | c55555d |
+| C02 same-minute body edit applied an old interpretation | apply compared edit time and last read by minute; body re-read used a separate one-minute slack | one predicate `notion.body.edit_unread` for re-read, claim and apply; no precision assumed (whole-minute stamp covered only by a read after that minute; a stamp with seconds is precise to the second); body_edit/page_notes items stay unclaimed while the body is unread | `CoarseTimestampTests`, `PreciseTimestampTests`, `PredicateTests` | f434c50 |
+| C03 long Notion text cut silently | notes cut to 3000/1500 chars, a new page's body to 4000, the notes baseline to 50000; the model saw a cut text as whole and a cut baseline invented "added" lines | stored in full (`payload.complete`); context shows each item's own text in full, background cut with `…[+N chars]`, earlier items named by id for `todo-manager feedback item <id>`; text the API cut (or an older version stored cut) is marked INCOMPLETE and only takes `clarify`; an item over budget is deferred, not cut | `StoredInFullTests`, `DisplayCutTests`, `IncompleteTextTests` | a609421 |
+| C04 accept without a delivered version | `add_message` accepted it; legacy rows (`target_seq` NULL) resolved "latest" at send time | an accept needs a delivered version in review (CLI, Matrix and scheduled feedback share the check); legacy accepts bind to the latest version received strictly before they were queued; a tie or `target_seq` 0 is unused (`nothing_to_accept`) | `AcceptNeedsADeliveryTests` | c55555d |
+| C05 two active delegations for one Task | the rule was only checked in decision validation against the database, so ops in one batch, the CLI and concurrent writers each created one | checked in `delegation.create` inside the insert transaction (after the `op_key` lookup) unless `parallel`; validation counts delegations planned earlier in the batch; CLI `delegate create --parallel` | `SharedCreatePathTests` (incl. an interleaved writer), `SameGateRunTests` | 95b55c5 |
+| C06 retried accept turned into "failed" | the retry checked the delegation status, which a sync in between had set to done | a retried accept checks its bound review event on the card first (`already` → sent) | `AcceptRetryTests` | c55555d |
+| C07 cancel lost to queued messages | messages went out in queue order (an answer unblocked the card before the archive); a queued accept suppressed the cancel of a cancelled Task | cancels first; other messages that have not taken effect are void (approvals revoked) with one notice; one in flight is checked on the card and kept as history when it landed; an accept that already completed the card makes the cancel unused; answer/revision/resume/accept/approval refused while a cancel is pending | `CancelFirstTests`, `NotionStatusCancelTests`; *hermes* `test_c07_a_queued_answer_is_not_sent_before_the_cancel` | 164a288 |
+| C08 lost create + pause never reconciled | `submit_pending` skipped `pause_requested` rows, so the read-only lookup never ran | the lookup always runs; a found card is linked and the pause delivered at once; confirmed not created → `pending_submit` (nothing created until resumed); "paused" means the newest block is our pause | `PauseAfterLostCreateTests`, `PauseRequestedIsNotPausedTests` | e8229fe |
+| C09 second approval lost | one message per feedback + kind merged them; otherwise the first approval's reopen voided the second as `not_in_review` | own identity per approval (`op_key`); identical unsent approval is the same one; all valid approvals of one version are posted before one reopen; an approval that cannot reach that run is refused when received; a run ending without a report marks all its approvals unknown | `ApprovalGroupTests`; *hermes* `test_c09_two_approvals_reach_one_run` | 0488245 |
+| C10 deleted Notion comment applied | comments were only ever added or edited | after a complete list, each pending comment no longer listed is retrieved by id: 404 → deleted (all revisions superseded); found → resolved (held, user told once, health lists it; released when listed again); other answer → held, rechecked next run; applied feedback is never undone | `DeletedCommentTests`, `UnlistedCommentTests` | bf86ae4 |
+| C11 GitHub first read hid a person's request | on first sight / reactivation everything before the notification was context; a bot's latest comment made the notification context too | split at the read window (cursor `since`): a person's comment inside it is batch, bots context; the opening post is batch when a person wrote it inside the window; before the window: body + last 3 comments as context; delivered comments not repeated; a context row is promoted into a batch once | `FirstReadTests`, `PromotionTests` | 3d7fd9f |
+
+Interactions checked: C07 × C09 (a cancel revokes queued approvals; approvals refused while a
+cancel is pending), C07 × C04/C06 (an accept that landed before the cancel ends it as done, the
+cancel is unused), C08 × C07 (a pause/resume on a delegation that ended is unused), C01 × C08
+(a paused delegation's revision waits for the resume), C02 × C03 × C10 (a held or unread item is
+neither claimed nor applied; an INCOMPLETE item can only be clarified), C05 × B04 (a retried op
+returns its delegation instead of being refused).
+
+Migration v6 → v7 (2026-10-05) on a copy of the read-only evaluation sandbox (schema v6, 9
+tasks, 387 source items; copied with the online-backup API): `health` migrated it, integrity
+and foreign keys ok, counts unchanged, new columns present; `backups/pre-schema-v7-from-v6-*`
+is v6; the 8cf3da5 code refuses the migrated file ("database schema 7 is newer than this code
+(6)") and reads the backup after the file swap in operations.md; `restore <backup> --yes` with
+the new code restores and migrates again with a new backup. `test_v6_workspace_keeps_its_messages_and_feedback`
+covers the same in the suite. The production workspace (schema v1) was not touched.
+
+Full suite: 423 tests, 0 failures, 0 skips (`python3 -m unittest discover -s tests -t .`,
+including the 13 *hermes* integration tests).
+
 ## Still to verify with real data
 
 1. **Real-sample intake evaluation** (criteria 1–4, 6, 11): one sandbox run was decided by the

@@ -32,6 +32,15 @@ verified and how.
   conversation mail in the last 365 days, so real mail formats are unverified; a mail whose
   event cannot be identified is kept, never treated as a copy). Real Notion body-edit detection
   and pending-write echo recognition wait for the first production setup.
+- **Deleted and resolved Notion comments: the API's answer is assumed.** The comment list
+  returns only unresolved comments; a pending comment that is no longer listed is retrieved by id
+  (`GET /v1/comments/{id}`). Notion documents 404 for an id that does not exist, not what a
+  deleted comment or a comment of a resolved discussion returns. The code takes 404 as deleted
+  (feedback withdrawn) and "found but not listed" as resolved (feedback held); any other answer
+  holds the feedback as unverified and checks again next run. `FakeNotion` implements this
+  assumption; it is unverified on the real API until the first production setup.
+- **The Notion `truncated` flag of page markdown** is imitated by `FakeNotion`
+  (`truncate_markdown_at`); a body the real API cuts marks the item INCOMPLETE (clarify only).
 - **Hermes transitions are checked, not atomic.** The bridge checks the Kanban event an answer,
   acceptance or revision is bound to and then calls the Hermes state function; they cannot share
   one transaction (Hermes' `write_txn` refuses nesting and `complete_task` & co. must not run
@@ -44,6 +53,18 @@ verified and how.
 - Notion is polled, not pushed: edits are imported within ~5 minutes; comments on pages
   without recent activity are polled round-robin (default hourly), so a comment there can take
   up to that long to be noticed.
+- Page body edits wait for a covering read. Notion stamps edits to the minute, so a read in
+  the same minute as the last edit does not count as covering it: a body edit or page note is
+  claimed (and a claimed one applied) only after a read past the end of that minute, i.e. up to a
+  minute plus one gate interval later. Stamps with seconds are taken as precise to the second.
+- A Notion comment whose discussion was resolved before its feedback was handled is **held**:
+  not handed to the model, not applied, listed by `health` and announced once. It stays held
+  until you reopen the discussion (then it is handled) or delete the comment (then it is
+  withdrawn). Feedback already applied is never undone by a later delete.
+- A Notion text longer than the run's context budget waits (deferred and reported); nothing the
+  user wrote is cut. Background (task fields, deliveries, earlier feedback) may be shortened in
+  the context with a `…[+N chars]` mark; `todo-manager feedback item <id>` prints a stored item
+  in full.
 - The Notion structure language is fixed at setup. Changing `language` later changes replies,
   reminders and new text, but property and option names stay as created (sync keeps working
   because it reads by property id and accepts option names of every language).
@@ -83,6 +104,12 @@ verified and how.
   not detected automatically; they are blacklisted with `slack.exclude` (an unlisted one costs only
   API reads: bot messages are context only, never analysed, and do not make a channel "active").
   The Slackbot DM is skipped: the API does not return its history.
+- GitHub first read of a matter (or after 14 days without activity, `REACTIVATE_DAYS`): only what
+  happened inside the read window (since the source cursor; the lookback on a first run) can
+  become news: a person's comment there is batch, bot comments are context, the opening post is
+  news when a person wrote it inside the window. Older history is context only (the opening post
+  and the last 3 comments before the window): a request made before the window is shown to the
+  model but never turned into a todo by itself.
 - The "own PR merged/closed is news only for an open task" rule applies to the GitHub API sources.
   GitHub notification emails read through Gmail do not say who opened the PR, so such an email
   still reaches the model (which can ignore it as `automated_notice`).
@@ -108,6 +135,18 @@ verified and how.
   progress at export time may contain files written after the snapshot (such runs' claims are
   released on import, so they are context only), and a kept delivery file changed by hand later
   is exported as it is and listed in the manifest's `artifact_problems`.
+- Delegation messages: a comment counts for a result when its own card event precedes the
+  result event. Hermes hands a comment to the running worker as a steer, but whether the model
+  read it before submitting cannot be seen; a comment posted moments before the worker submitted
+  counts as received. If the result ignores it, send a revision.
+- A cancel takes priority: messages queued for the delegation that have not taken effect are
+  voided (one notice lists them), and while it is pending answers, revisions, resumes, accepts
+  and approvals are refused. An accept that completed the card before the cancel ran stands.
+- Approvals are per delivered version and go out together with one reopen; one that arrives
+  after that version was sent back (or while others for it are in flight) is refused, so
+  approve again for the next version.
+- One active delegation per Task; a second one needs `parallel` (`delegate create --parallel`,
+  or `"parallel": true` in a delegate op).
 - One user, one machine, one SQLite database. There is no multi-user or multi-host mode.
 - The Hermes Kanban switches `review_dispatch` and `auto_decompose` are global in Hermes; a
   human-review board needs both off for all boards. todo-manager only reads them: while either is

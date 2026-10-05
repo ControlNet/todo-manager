@@ -154,50 +154,85 @@ board as it is.
 
 ## Upgrading an existing workspace (schema migrations)
 
-This version uses schema v6: v2 binds delegation messages to Kanban events, v3 records pending
+This version uses schema v7: v2 binds delegation messages to Kanban events, v3 records pending
 Notion writes, v4 tracks page-body reads, v5 adds exactly-once decision application and
 follow-up checks, v6 adds a revision per Notion comment / managed box / notes stream, the
 `op_key` identity of delegations and messages, and the delivery a message is bound to
-(`target_seq`, `target_message_id`). v2–v5 and most of v6 are additive (columns and indexes;
-the box fingerprint is seeded from the current box so an unchanged box is not re-read as an
-edit). One step rebuilds a table: `delegation_messages` is copied row by row (same ids, same
-order) into a table without its old table-level UNIQUE, then renamed; nothing is deleted. You do
-not need to delete or rebuild the database.
+(`target_seq`, `target_message_id`); v7 adds where each message's comment sits on the card
+(`delegation_messages.card_event_before`, `card_event_id`), why a feedback item is held
+(`feedback.hold_reason`) and whether a Notion comment is still listed
+(`notion_comments.presence`, `presence_at`). v2–v5, v7 and most of v6 are additive (columns
+and indexes; the box fingerprint is seeded from the current box so an unchanged box is not
+re-read as an edit; rows written before v7 read as "position unknown, not held, listed"). One
+step of v6 rebuilds a table: `delegation_messages` is copied row by row (same ids, same order)
+into a table without its old table-level UNIQUE, then renamed; nothing is deleted. You do not
+need to delete or rebuild the database.
 
 The migration runs when any command first opens the database with the new code. Before it, a
-consistent copy is written to `backups/pre-schema-v6-from-v<old>-<UTC stamp>.sqlite`.
+consistent copy is written to `backups/pre-schema-v7-from-v<old>-<UTC stamp>.sqlite` (one copy
+per upgrade, named after the schema the code brings).
 
 ```bash
 todo-manager hermes pause --yes            # no gate runs during the upgrade
 todo-manager export --verify               # optional: a portable copy as well
 cd ~/src/todo-manager && git pull     # the new code
 todo-manager health                        # opens the database: migrates, then lists problems
-ls ~/.hermes/workspace/todo-manager/backups/pre-schema-v6-*
+ls ~/.hermes/workspace/todo-manager/backups/pre-schema-v7-*
 todo-manager hermes install                # refresh scripts; jobs keep their paused state
 todo-manager hermes resume --yes
 ```
 
-Expected: `health` runs without a traceback and a `pre-schema-v6-from-v<old>-*.sqlite` file
-exists.
+Expected: `health` runs without a traceback and a `pre-schema-v7-from-v<old>-*.sqlite` file
+exists. To check the schema version:
 
-Rolling back to the previous code (verified 2026-10-04 on a scratch workspace created by
-4b2791d at schema v5: the v5 code refuses the migrated file with "database schema 6 is newer
-than this code (5)"; after the swap below it reads the pre-migration state; a task created
-after the upgrade stays only in the set-aside file). `restore` with the new code would migrate
-again, so the file is swapped while the jobs are paused. Changes made after the upgrade are lost
-(they stay in the set-aside file and the export).
+```bash
+python3 -c "import sqlite3,os; c=sqlite3.connect(os.path.expanduser('~/.hermes/workspace/todo-manager/state/todo.sqlite')); print(c.execute(\"SELECT value FROM meta WHERE key='schema_version'\").fetchone()[0])"
+```
+
+Expected: `7`.
+
+Rolling back to the previous code (verified 2026-10-05 for v7 on a copy of a v6 workspace:
+the 8cf3da5 code refuses the migrated file with "database schema 7 is newer than this code
+(6)" and reads the pre-migration copy after the swap below; verified 2026-10-04 the same way
+for v6 from v5 with 4b2791d; a task created after the upgrade stays only in the set-aside
+file). `restore` with the new code would migrate again, so the file is swapped while the jobs
+are paused. Changes made after the upgrade are lost (they stay in the set-aside file and the
+export).
 
 ```bash
 todo-manager hermes pause --yes
 H=~/.hermes/workspace/todo-manager
-mv "$H/state/todo.sqlite" "$H/backups/todo-v6-set-aside.sqlite"   # keep, do not delete
+mv "$H/state/todo.sqlite" "$H/backups/todo-v7-set-aside.sqlite"   # keep, do not delete
 ls "$H/state"                       # no todo.sqlite-wal / -shm left (all connections closed)
-cp "$H"/backups/pre-schema-v6-from-v5-<stamp>.sqlite "$H/state/todo.sqlite"
-cd ~/src/todo-manager && git checkout <previous commit>
+cp "$H"/backups/pre-schema-v7-from-v6-<stamp>.sqlite "$H/state/todo.sqlite"
+cd ~/src/todo-manager && git checkout <previous commit>    # e.g. 8cf3da5 for v6
 todo-manager health                 # the previous code reads it
 ```
 
-Changes in behaviour you will see after this upgrade:
+Changes in behaviour you will see after the v7 upgrade (round 3):
+
+- An accept is refused until a version has been delivered and is in review; a legacy accept
+  queued before any version is not sent (you are told: nothing to accept).
+- A second active delegation for the same Task is refused unless it is explicitly parallel:
+  `todo-manager delegate create … --parallel` (a delegate op takes `"parallel": true`).
+- A cancel goes out before anything else queued for that delegation and voids what has not
+  taken effect (one notice); while it is pending, answers, revisions, resumes, accepts and
+  approvals are refused.
+- Several approvals for one version are delivered together with one reopen of the review.
+- `todo-manager delegate list` and `task show` say "pause requested" while a pause has not taken effect;
+  "paused" only once our pause blocks the card.
+- Notion page notes, box edits and new-page bodies are stored in full; long items may take
+  longer to fit the feedback budget (deferred and reported, never cut). `todo-manager feedback
+  item <id>` prints a stored item in full (JSON).
+- A body edit is claimed only after a read past the minute of the edit (about a minute later).
+- A Notion comment deleted before it was handled is withdrawn; one in a resolved discussion is
+  held and listed by `health` until reopened or deleted.
+- GitHub: the first read of a matter (or after 14 idle days) turns a person's comment in the
+  read window into news even when a bot commented after it.
+- For scripts using the Kanban bridge: the `comment` op now returns
+  `{"comment_id": …, "event_id": …}` instead of the bare comment id.
+
+Changes in behaviour you will see after the v6 upgrade:
 
 - Direct requests from chat need an identity: `todo-manager feedback request-id` prints a fresh
   `req_…` id; pass it as `--source-id` to `feedback apply-direct` / `feedback record` (a Matrix
