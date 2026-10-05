@@ -223,6 +223,56 @@ runs on UTC).
 
 Full suite: 499 tests, 0 failures, 0 skips, including the *hermes* integration tests.
 
+## Hermes-native refactor (baseline 232afdd, Hermes 0.21.5 / hermes-agent 105568c)
+
+Commits: 453bf8f (design and migration plan), f4d1e5e (3-way merge, Hermes prompt-scan
+checks), 72149a5 (direct context, small commands, conventions in `AGENTS.md`), 8c8227c (agent
+work as its own state, native worker tools, closing cancels), afc6978 (install / upgrade /
+uninstall with ownership, settings authority, backups with workspace files).
+
+### Required scenarios
+
+| Scenario | Verified by | Kind |
+|---|---|---|
+| No new material: no model run | `test_intake.IntakeWakeTests.test_no_change_never_wakes`, `test_feedback.GateTests.test_notion_failure_does_not_stop_kanban_and_never_wakes` | unit |
+| The model gets the material directly, no `show` call on the normal path | `test_cli.CliTests.test_gate_context_and_feedback_commands`, `test_context_budget.IntakeOverBudgetTests`, `test_feedback.GateTests.test_comment_wakes_once_with_its_context_and_reply_lands_in_same_thread`; the assembled prompt passes Hermes' own scanner: `integration/test_hermes_prompts` | unit, hermes |
+| An oversized item is clipped with a pointer and handled, never stuck | `test_context_budget` (both classes), `test_gmail_body.test_a_clipped_item_in_the_context_says_how_to_read_the_rest`, `test_full_feedback_text.test_over_the_context_budget_it_is_clipped_and_handled_never_waits`, `test_intake_budget.test_an_oversize_fixed_context_is_reported_not_silent_and_never_waits` | unit |
+| Fetched is not processed; deferral is bounded | `test_intake.RecordTests.test_items_without_an_outcome_stay_unprocessed_and_come_back`, `test_deferred_material_returns_with_new_activity_or_at_its_date`, `test_unhandled_material_fails_visibly_after_bounded_runs` | unit |
+| Idle = success; a failing source degrades visibly; a gate failure is a Hermes script error | `test_intake.IntakeWakeTests.test_gate_failure_is_reported_not_turned_into_idle`, `test_a_source_down_for_an_hour_is_reported_once_a_day` | unit |
+| A convention changed in chat or by a Notion comment applies from the next run | `test_prefs.NextRunTests.test_a_convention_changed_in_chat_or_from_a_notion_comment_applies_from_the_next_run`, `test_intake.RecordTests.test_dismissal_refused_when_conventions_changed_during_the_run` | unit |
+| "Slack 安静一小时再分析" changes the collection setting | `test_prefs.NextRunTests.test_a_setting_changed_on_request_is_used_by_the_next_gate` (`config set slack.quiet_minutes 60`), `test_intake.IntakeWakeTests.test_a_shorter_slack_quiet_window_is_honoured`, `test_hermes_assets.ScheduledRunAuthorityTests` | unit |
+| A scheduled run never changes the program or widens permissions | `test_prefs.SettingAuthorityTests` (all three), `test_answer_approvals.test_a_scheduled_run_cannot_approve_and_unknown_actions_are_refused`, `test_hermes_assets.ScheduledRunAuthorityTests` | unit |
+| An upgrade keeps the user's prompts, skill, `AGENTS.md` and cron settings | `test_hermes_install.UserFileUpgradeTests` (4), `CronSettingTests` (5), `test_install.FreshInstallTests.test_an_upgrade_keeps_the_users_prompt_and_cron_settings`, `test_merge3` | unit |
+| New users get no academic conventions | `test_prefs.NewWorkspaceTests.test_a_new_user_gets_no_academic_conventions`, `test_hermes_install.FreshInstallTests.test_a_new_workspace_starts_from_the_template_in_its_language` | unit |
+| A Notion delegation becomes one native card | `test_notion.test_assigning_agent_asks_the_model_once`, `test_delegation.test_submit_creates_one_card_and_hands_the_task_to_the_agent`, `integration/test_hermes_kanban.test_full_draft_cycle_against_real_kanban` | unit, hermes |
+| A late answer goes to the original card | `test_delegation.test_block_answer_resume_and_stale_answer`, `test_answer_approvals`, `integration/test_hermes_kanban.test_an_approval_given_with_an_answer_reaches_the_worker_once` | unit, hermes |
+| Sync down, then caught up | `test_delegation_reliability.test_offline_recovery_and_replay_do_not_duplicate`, `test_notion_body.test_body_reads_are_bounded_and_catch_up` | unit |
+| Lost responses and restarts never duplicate | `test_delegation.test_lost_create_response_is_reconciled_not_duplicated`, `test_notion.test_lost_create_response_does_not_duplicate_page`, `test_lost_comment_response_is_not_posted_twice`, `test_intake_reliability.ApplyOnceTests`, `test_delegation_reliability.test_lost_archive_response_is_confirmed_not_repeated` | unit |
+| The agent's draft is done ≠ the personal task is done; closing cancels, never accepts | `test_delegation.TaskLinkTests.test_card_events_never_change_the_status`, `test_notion.test_marking_done_stops_the_agent_work_and_never_accepts`, `integration/test_hermes_kanban.test_a_worker_completing_natively_ends_the_work_but_not_the_task` | unit, hermes |
+| Old workspace and delegations migrate | `test_prefs.RulesMigrationTests` (3), `test_db.test_v7_delegations_keep_working_without_the_capacity_hold`; rollback to 232afdd checked on a scratch workspace (operations.md) | unit, manual |
+| Uninstall keeps exportable data | `test_hermes_install.UninstallTests` (4) | unit |
+| Backups and exports carry the conventions | `test_cli.test_a_backup_keeps_the_conventions_and_settings_and_a_restore_brings_them_back`, `test_prefs.RulesMigrationTests.test_the_export_carries_both_files`, `test_portability` | unit |
+
+### Tests removed or rewritten, by reason
+
+499 tests at 232afdd, 551 now (75 test functions gone or renamed, 127 new or renamed). No
+reliability guarantee lost its test: where the interface changed, the scenario was ported.
+
+| Reason | Tests at 232afdd | Now |
+|---|---|---|
+| Ported: decision files (`intake apply`, `feedback apply`) replaced by small commands; the same guarantee is checked through the commands | `test_intake.ApplyTests` (6), `test_intake_reliability.ApplyOnceTests` (4), `FollowupTests` (2), `test_feedback.GateTests` (2), `test_feedback_authority.DecisionFileTests`, `test_single_delegation.SharedCreatePathTests` (3), `test_approval_grouping` retried op, `test_direct_requests` (3), `test_cli` gate test, `test_feedback.DirectAndReplyTests` direct request, `test_intake_format` | `test_intake.RecordTests` (11), `test_intake_reliability.ApplyOnceTests` (4) / `FollowupTests` (4), `test_feedback.GateTests` (2), `test_feedback_authority.OneFeedbackManyCommandsTests`, `test_single_delegation.SharedCreatePathTests` (3), retried-command tests, `test_direct_requests` (3), `test_cli.test_gate_context_and_feedback_commands`, `test_intake_format.test_the_command_help_lists_every_evidence_role` |
+| Requirement removed the mechanism: coverage check, fixed ignore categories, question budget | `test_every_new_item_must_be_covered`, `test_ignore_needs_category_and_reason`, `AmbiguityTests` (3) | `test_items_without_an_outcome_stay_unprocessed_and_come_back`, `test_dismiss_takes_a_generic_outcome_and_an_optional_label`, `test_any_number_of_questions_is_accepted` |
+| Requirement removed the Slack 30-minute floor | `test_slack_waits_for_30_quiet_minutes_without_forced_cap` | `test_slack_waits_for_its_quiet_window_without_forced_cap`, `test_a_shorter_slack_quiet_window_is_honoured` |
+| Requirement: no infinite defer; over-budget context is clipped and runs | `test_context_budget` (3), `test_intake_budget` (2), `test_full_feedback_text.test_over_the_context_budget_it_waits_instead_of_being_cut` | `test_context_budget` (2), `test_intake_budget` (2), `test_over_the_context_budget_it_is_clipped_and_handled_never_waits` |
+| Requirement: Hermes schedules the board (no `max_running`, no switch gating) | `CapacityTests` (2), `test_capacity_one_queues_second_delegation_locally`, `HermesSettingsTests` (3) | `SchedulingTests` (2), `test_a_second_delegation_is_submitted_at_once_hermes_schedules_both`, `RemovedSettingTests`, `HermesSettingsTests` (3, switches explained, never gating) |
+| Requirement: closing a task cancels, never accepts | `test_closing_task_through_feedback_accepts_the_delivery`, `test_marking_done_accepts_a_delivered_review`, `test_submit_creates_one_card_and_updates_task` | `test_closing_task_through_feedback_stops_the_agent_work_and_keeps_the_delivery`, `test_marking_done_stops_the_agent_work_and_never_accepts`, `test_an_explicit_accept_before_marking_done_is_still_carried_out`, `TaskLinkTests` (3) |
+| Requirement: page notes are context, not feedback | notes revision / supersede / carry-over (`test_feedback_revisions` 6, `test_body_edit_timing` 4, `test_notion_body` 3, `test_full_feedback_text` 7, `test_feedback` notes reply) | box-edit timing (3), `NotesAsContextTests` (3), `test_the_notes_are_always_the_latest_text_and_never_feedback`, full-text tests on comments, box edits and new pages (5), `test_a_reply_to_a_page_edit_is_a_new_comment_on_the_task_page` |
+| Requirement: install by 3-way merge instead of "never overwrite the skill" | `test_cli.HermesInstallTests` (5) | `test_hermes_install` (16) with a cron double that follows Hermes' `cron create/edit/remove` semantics |
+| Wording of model-facing text changed | `test_hermes_assets.test_every_model_facing_text_forbids_changing_the_system_itself`, `test_i18n.test_prompts_stay_english_and_name_the_language` | `ScheduledRunAuthorityTests` (3), `test_model_facing_text_stays_english_and_names_the_language` |
+
+Full suite: 551 tests, 0 failures (unit), plus 22 *hermes* integration tests against
+the installed Hermes code in a temporary `HERMES_HOME`.
+
 ## Still to verify with real data
 
 1. **Real-sample intake evaluation** (criteria 1–4, 6, 11): one sandbox run was decided by the
@@ -233,8 +283,14 @@ Full suite: 499 tests, 0 failures, 0 skips, including the *hermes* integration t
    once; incremental cursors, Gmail history expiry and Slack edits/deletions over days are so far
    covered only by recorded-shape tests.
 3. **Delegation dry run on production Hermes** (criteria 10, 13–17): an email-draft delegation
-   on the real `todo-manager` board after you have turned `kanban.review_dispatch` and
-   `kanban.auto_decompose` off (until then todo-manager creates no cards); nothing is sent.
+   on the real `todo-manager` board; nothing is sent. With `kanban.review_dispatch` on (the
+   current setting), Hermes' review worker may handle the delivery before you see it; decide
+   whether to keep it (`health` explains it).
+5. **Production switch to this version**: not done in this round (no change to the real Notion,
+   the production workspace, the existing cron jobs or Hermes' global configuration). Steps:
+   pause the jobs, export, pull, `todo-manager health` (schema v8 migration and rules
+   migration), `todo-manager prefs show`, `todo-manager install` (review the plan), resume
+   (see operations.md, "Upgrading an existing workspace").
 4. **First production Notion setup and migration** require your confirmation (see the rollout
    plan in the workspace notes). `todo-manager install` does the setup after you have created
    the new top-level home page and added the integration to it; migrating the old system stays
