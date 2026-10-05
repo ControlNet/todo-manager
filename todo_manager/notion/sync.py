@@ -339,17 +339,18 @@ class NotionSync:
         found: list[str] = []
         with tx(self.conn):
             if region is not None and row["managed_hash"]:
-                found += self._box_read(row, task, region, self.render_body(task), trust)
+                found += self._box_read(row, task, region, self.render_body(task), bool(doc.get("truncated")), trust)
             notes_fp = body.content_fingerprint(notes) if notes else ""
             revision = row["notes_revision"]
             if row["notes_hash"] is not None and notes_fp != row["notes_hash"]:
                 revision += 1
                 found += self._notes_read(row, task, notes, notes_fp, revision, bool(doc.get("truncated")), trust)
+            # Kept in full: the next read diffs against it (a cut baseline would invent changes).
             self.conn.execute("UPDATE notion_pages SET body_read_at=?, notes_hash=?, notes_text=?, notes_revision=?"
-                              " WHERE page_id=?", (clock.iso(), notes_fp, notes[:50000], revision, row["page_id"]))
+                              " WHERE page_id=?", (clock.iso(), notes_fp, notes, revision, row["page_id"]))
         return found
 
-    def _box_read(self, row: dict[str, Any], task: dict[str, Any], region: str, rendered: str,
+    def _box_read(self, row: dict[str, Any], task: dict[str, Any], region: str, rendered: str, truncated: bool,
                   trust: dict[str, Any]) -> list[str]:
         """One read of the managed box. A changed box is a new revision: an edit replaces the
         pending interpretation of the previous one; a box back to what we wrote withdraws it."""
@@ -369,7 +370,7 @@ class NotionSync:
                                  source_version=f"body:r{revision}:{fp}", text=region, scope_type="task",
                                  scope_id=task["id"], kind="body_edit", **trust,
                                  payload={"page_id": row["page_id"], "region": region, "would_render": rendered,
-                                          "revision": revision})
+                                          "revision": revision, "truncated": truncated, "complete": True})
         feedback.supersede_older(self.conn, "notion_page", row["page_id"], fid, kind="body_edit",
                                  reason="replaced by a later edit of the box")
         return ["body_edit"]
@@ -399,14 +400,15 @@ class NotionSync:
             feedback.supersede(self.conn, stale_ids, "withdrawn: the note was removed or reverted")
             return []
         added, removed = "\n".join(net_added), "\n".join(net_removed)
-        payload = {"page_id": row["page_id"], "added": added[:3000], "removed": removed[:1500],
-                   "notes": notes[:3000], "truncated": truncated, "revision": revision}
+        # Stored in full (``complete``); only the display is budgeted (feedback_flow.render_context).
+        payload = {"page_id": row["page_id"], "added": added, "removed": removed, "notes": notes,
+                   "truncated": truncated, "revision": revision, "complete": True}
         if stale_ids:
             payload["replaces"] = stale_ids
         if not self.user_ids():
             payload["identity_unverified"] = True
         fid, _ = feedback.record(self.conn, origin="notion_page", source_id=row["page_id"],
-                                 source_version=f"notes:r{revision}:{notes_fp}", text=added[:3000] or removed[:1500],
+                                 source_version=f"notes:r{revision}:{notes_fp}", text=added or removed,
                                  scope_type="task", scope_id=task["id"], kind="page_notes", payload=payload, **trust)
         feedback.supersede(self.conn, stale_ids, "replaced by a later edit of the notes", fid)
         return ["page_notes"]
@@ -491,8 +493,10 @@ class NotionSync:
                 return "unchanged"
             title = values.get("title") or self.t("sync.untitled_task")
             project_id = self._local_project(values.get("project_id"))
+            truncated = False
             try:
-                page_text = (self.client.page_markdown(page["id"]).get("markdown") or "").strip()
+                doc = self.client.page_markdown(page["id"])
+                page_text, truncated = (doc.get("markdown") or "").strip(), bool(doc.get("truncated"))
             except NotionError as exc:
                 self.problems.append(f"body of new page {page['id']}: {exc}")
                 page_text = None
@@ -508,11 +512,12 @@ class NotionSync:
                     self.conn.execute("UPDATE notion_pages SET body_read_at=?, notes_hash=?, notes_text=?"
                                       " WHERE page_id=?",
                                       (clock.iso(), body.content_fingerprint(page_text) if page_text else "",
-                                       page_text[:50000], page["id"]))
+                                       page_text, page["id"]))
                 feedback.record(self.conn, origin="notion_page", source_id=page["id"], source_version="created",
                                 text=title, scope_type="task", scope_id=tid, kind="new_task", author=creator,
                                 author_is_user=by_user, payload={"page_id": page["id"], "values": current,
-                                                                 "body": (page_text or "")[:4000]})
+                                                                 "body": page_text or "", "truncated": truncated,
+                                                                 "complete": True})
                 effects.task_push(self.conn, tid)
             return "created"
         if tm_id and store.get_project(self.conn, tm_id):
@@ -1099,10 +1104,11 @@ def _unique(lines: list[str]) -> list[str]:
 
 
 def _note_holds(payload: dict[str, Any], notes: str, present: set[str]) -> bool:
-    """A pending notes item still describes the page: its added lines are there (a clipped last
-    line matches as a substring) and its removed lines are still gone."""
+    """A pending notes item still describes the page: its added lines are there and its removed
+    lines are still gone. (Items stored by older versions kept only 3000 characters: their cut
+    last line matches as a substring.)"""
     added = _lines(payload.get("added"))
-    clipped = len(payload.get("added") or "") >= 3000
+    clipped = not payload.get("complete") and len(payload.get("added") or "") >= 3000
     return all(line in present or (clipped and n == len(added) - 1 and line in notes) for n, line in enumerate(added)) \
         and all(line not in present for line in _lines(payload.get("removed")))
 

@@ -173,6 +173,12 @@ def cmd_feedback(args: argparse.Namespace) -> int:
     if args.action == "request-id":
         _print({"request_id": feedback_flow.new_request_id()})
         return 0
+    if args.action == "item":
+        fb = feedback.get(conn, args.id)
+        if fb is None:
+            return _fail("NOT_FOUND", args.id)
+        _print({**fb, "incomplete": feedback_flow.incomplete_reason(fb)})
+        return 0
     if args.action == "record":
         scope_type, _, scope_id = (args.scope or "global").partition(":")
         try:
@@ -603,6 +609,8 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--scope")
     x.add_argument("--source-id", help="as for apply-direct (required)")
     fs.add_parser("request-id", help="mint the identity of one direct request (reuse it on retry)")
+    x = fs.add_parser("item", help="print one stored feedback item in full (text and payload)")
+    x.add_argument("id")
     x = fs.add_parser("list")
     x.add_argument("--status", default="pending", choices=("pending", *feedback.FINAL))
     x.add_argument("--limit", type=int, default=30)

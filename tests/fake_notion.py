@@ -37,6 +37,7 @@ class FakeNotion:
         self.calls: list[tuple[str, str]] = []
         self.fail_next: dict[tuple[str, str], Exception] = {}
         self.precise_times = False   # True: page edit times keep their seconds (default: rounded to the minute)
+        self.truncate_markdown_at: int | None = None   # imitate the API cutting a large body (``truncated``)
         self.lose_response: set[tuple[str, str]] = set()
         self._ids = itertools.count(1)
 
@@ -347,5 +348,6 @@ class FakeNotion:
                 current = body["replace_content"]["new_str"]
             self.markdown[pid] = current
             self._touch(page, BOT_ID)
-        return {"object": "page_markdown", "id": pid, "markdown": self.markdown[pid], "truncated": False,
-                "unknown_block_ids": []}
+        text, cut = self.markdown[pid], self.truncate_markdown_at
+        return {"object": "page_markdown", "id": pid, "markdown": text if cut is None else text[:cut],
+                "truncated": cut is not None and len(text) > cut, "unknown_block_ids": []}
