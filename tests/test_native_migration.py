@@ -69,7 +69,10 @@ class ReviewMigrationTests(unittest.TestCase):
             db.migrate(old, target=9)
             cfg = config.load(Path(temp))
             task = store.create_task(old, 'Preserved task', actor='human', origin='cli')
-            did = delegation.create(old, cfg, task_id=task, title='Old', goal='Preserved')
+            # Create the actual schema-9 persisted shape, without calling schema-10 business code.
+            did = 'dlg-schema9'
+            old.execute("INSERT INTO delegations(id,task_id,title,goal,status,board,idem_key,base_task_version,created_at,updated_at) "
+                        "VALUES (?,?, 'Old','Preserved','pending_submit','test','schema9',1,'2026-01-01','2026-01-01')", (did,task))
             old.execute("UPDATE delegations SET status='ended',card_id='old-card',event_cursor=42 WHERE id=?", (did,))
             old.execute("INSERT INTO delegation_children VALUES (?, 'old-child', 41, 'blocked')", (did,))
             old.close()

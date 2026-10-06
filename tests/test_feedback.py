@@ -299,7 +299,7 @@ class DirectAndReplyTests(GateCase):
         self.assertEqual(fb["kind"], "page_trashed")
         self.decide(run_id, [{"feedback": fb["id"], "outcome": "clarify", "reply": "要取消这个任务吗？"}])
         self.gate()
-        [reply] = [c for c in self.bot_comments() if c["rich_text"][0]["plain_text"] == "要取消这个任务吗？"]
+        [reply] = [c for c in self.bot_comments() if c["rich_text"][0]["plain_text"].startswith("要取消这个任务吗？\n\nTM effect ")]
         self.assertEqual(reply["parent"]["page_id"], self.sync.state.home_page_id)
 
     def test_a_reply_to_a_page_edit_is_a_new_comment_on_the_task_page(self):
@@ -312,7 +312,7 @@ class DirectAndReplyTests(GateCase):
         self.assertNotEqual(fb["origin"], "notion_comment")
         self.decide(run_id, [{"feedback": fb["id"], "outcome": "clarify", "reply": "附上哪份数据？"}])
         self.gate()
-        [reply] = [c for c in self.bot_comments() if c["rich_text"][0]["plain_text"] == "附上哪份数据？"]
+        [reply] = [c for c in self.bot_comments() if c["rich_text"][0]["plain_text"].startswith("附上哪份数据？\n\nTM effect ")]
         self.assertEqual(reply["parent"]["page_id"], self.page)
         self.assertFalse([c for c in self.fake.comments if c is not reply and c["discussion_id"] == reply["discussion_id"]],
                          "a new discussion")

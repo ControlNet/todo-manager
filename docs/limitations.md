@@ -1,7 +1,7 @@
 # Known limitations
 
-Concrete, current limitations of this version. See [acceptance.md](acceptance.md) for what is
-verified and how.
+Concrete, current limitations of this version. See [acceptance.md](acceptance.md) and the
+[R01–R16 reliability report](reliability-audit-2026-10-06.md) for verification and recovery boundaries.
 
 ## Hermes-native round (2026-10-06)
 
@@ -26,8 +26,10 @@ verified and how.
 - **Model judgement is not evaluated yet.** One real-model intake run (10 real conversations, in
   the read-only sandbox) was decided and applied; that shows the format works with the real
   model, not that its choices are right. Accuracy of intake (created *and* ignored items) and of
-  feedback classification has not been measured. The code enforces structure (full coverage of
-  new items, categories and reasons for ignores, versioned writes), not accuracy.
+  feedback classification has not been measured. The current small-command interface enforces input validity, identity and versioned
+  writes. Items without an outcome remain pending; there is no full-run coverage contract,
+  fixed ignore taxonomy or semantic classifier in Python. Relevance and priorities depend
+  on the prompts and native user preferences.
 - **Source adapters are verified for fetching, not for judgement.** Gmail, Slack and GitHub are
   covered by recorded-shape tests (`tests/test_sources.py`, fake HTTP) and have been run read-only
   against real accounts (fetch, batching, name resolution, DM discovery and polling cadence,
@@ -78,9 +80,10 @@ verified and how.
   not handed to the model, not applied, listed by `health` and announced once. It stays held
   until you reopen the discussion (then it is handled) or delete the comment (then it is
   withdrawn). Feedback already applied is never undone by a later delete.
-- A Notion text longer than the run's context budget waits (deferred and reported); nothing the
-  user wrote is cut. Background (task fields, deliveries, earlier feedback) may be shortened in
-  the context with a `…[+N chars]` mark; `todo-manager feedback item <id>` prints a stored item
+- A Notion text longer than a run's display budget is explicitly clipped with a full-text
+  retrieval pointer; the stored content is retained. This display clipping is distinct from
+  an incomplete API read, which blocks business mutation. Background (task fields, deliveries,
+  earlier feedback) may also be shortened with a `…[+N chars]` mark; `todo-manager feedback item <id>` prints a stored item
   in full.
 - The Notion structure language is fixed at setup. Changing `language` later changes replies,
   reminders and new text, but property and option names stay as created (sync keeps working
@@ -165,13 +168,16 @@ verified and how.
 - Approvals are per delivered version and go out together with one reopen; one that arrives
   after that version was sent back (or while others for it are in flight) is refused, so
   approve again for the next version.
-- One active delegation per Task; a second one needs `parallel` (`delegate create --parallel`,
-  or `"parallel": true` in a delegate op).
+- One unfinished delegation per Task includes known active descendants and pending discovery
+  after root completion. An intentionally separate concurrent delegation requires
+  `delegate create --parallel`. Cancelling a Task stops proven owned descendants through
+  native archive calls and keeps unconfirmed termination visible.
 - One user, one machine, one SQLite database. There is no multi-user or multi-host mode.
-- The Hermes Kanban switches `review_dispatch` and `auto_decompose` are global in Hermes; a
-  human-review board needs both off for all boards. todo-manager only reads them: while either is
-  on, new delegations wait and health reports it; turning them off is your decision because it
-  affects every board on that Hermes install.
+- Hermes `review_dispatch` and `auto_decompose` remain native orchestration settings.
+  Todo Manager neither disables them nor blocks all submission while they are on. Native
+  review is not user acceptance, and native decomposition does not guarantee complete
+  inheritance of the root protocol. Proven child ownership and supported question transfer
+  are handled by the existing feedback sync; there is no custom task-graph executor.
 - The migration importer knows one legacy schema (`migration.LEGACY`); other legacy databases
   need that mapping adapted.
 - Not supported by design: Zoom transcripts, Notion webhooks, paid Notion features, a model
@@ -215,3 +221,27 @@ release through notification repair. Child discovery retries survive root comple
 and channel registration failure does not hide business results. These protections do not stop
 already running native workers. Ended delegations retain child visibility without accepting new
 authority or reopening the entry. Passive notification repair still cannot replay missed events.
+
+## Reliability recovery boundaries
+
+- Answers bind to a card and its currently open question/failure event. A supplement does not
+  close that event, but it invalidates old external authorization. Child external approvals
+  remain unsupported. An ended root's residual questions are explicitly identified as such;
+  cancel residual owned work before creating a follow-up, rather than reopening it by reply.
+- A terminal subscription failure remains eligible for registration repair (up to 12 consecutive
+  failures, then explicit manual intervention). Registration recovery and native delivery are
+  separate; `health` retains a `history_gap` timestamp when history could not be replayed.
+- Notion comments carry a readable effect identifier. Recovery requires identity and target
+  agreement. Uncertain legacy/unlisted sends remain uncertain and are not automatically
+  replayed; the unresolved-only listing API cannot prove that an absent send never happened.
+- Repeated dirty scans preserve attempts, permanent failures and retry deadlines for the same
+  projection. A changed projection still waits behind an older uncertain write and its delay.
+- Unresolved project relations are preserved pending resolution, never converted into a user
+  clear. Duplicate project pages are reported without rebinding the original page.
+- Only one Todo workspace can own a given set of profile cron/skill/launcher resources. A
+  conflicting second installation is refused; an owning user's changed workdir is preserved.
+- Gmail history query filtering is evaluated by Gmail through a paginated search, then matched
+  thread context is hydrated. It adds API reads; existing spam/trash/draft/chat exclusions
+  still define the supported source scope.
+- Daily commit reads may span ticks. Skipped, failed or paginated reads do not consume the
+  day's completion marker or model attempt, and completed repos do not need rereading that day.

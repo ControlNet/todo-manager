@@ -1,7 +1,9 @@
 # Hermes-native architecture
 
 Verified on 2026-10-06 against installed Hermes source `105568c1558e1cb494e6edf1a2998d524ebe809e`.
-Todo Manager baseline was `a820251`; both the starting checkout and remote main matched it.
+The original native architecture round started at `a820251`. The concentrated reliability
+round started at `6b02612b5b19c11384664586ceb500f1e49983e8`; fetched `origin/main` matched it.
+See [R01–R16 reliability changes](reliability-audit-2026-10-06.md) for the current recovery contracts.
 See [native verification](hermes-native-verification.md) for executable evidence and limitations.
 
 ## Running pipeline

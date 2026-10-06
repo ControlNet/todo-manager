@@ -40,6 +40,7 @@ class GmailBodyTests(WorkspaceCase):
                           "historyId": "200"}),
             (f"/threads/{msg['threadId']}", {"messages": [msg]}),
             ("/attachments/", attachment),
+            ("/messages", {"messages": [{"id": msg["id"], "threadId": msg["threadId"]}]}),
         ])
 
     def test_a_request_at_the_tail_of_a_long_mail_is_kept(self):

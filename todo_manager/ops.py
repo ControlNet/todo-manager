@@ -59,6 +59,7 @@ class Ctx:
     # Why a new command may not act in this context (the feedback item was resolved meanwhile...).
     # Checked after the op_log lookup, so a retried command still returns its first result.
     refusal: OpError | None = None
+    cfg: Config | None = None
 
     @property
     def run_id(self) -> str | None:
@@ -83,11 +84,30 @@ def _fb_origin(fb: dict[str, Any]) -> str:
 def incomplete_reason(fb: dict[str, Any]) -> str | None:
     """Why the stored text of an item may not be all the user wrote (None: complete)."""
     p = fb.get("payload") or {}
+    if p.get("complete") is False:
+        return "the page body has not been read completely"
     if p.get("truncated"):
         return "the Notion API returned the page body cut short"
     if fb["kind"] == "new_task" and not p.get("complete") and any(
             len(p.get(key) or "") >= limit for key, limit in LEGACY_CUTS.items()):
         return "stored by an older version that kept only the first characters of long text"
+    return None
+
+
+def feedback_input_reason(conn: sqlite3.Connection, fb: dict[str, Any]) -> str | None:
+    reason = incomplete_reason(fb)
+    if reason:
+        return reason
+    task_id = fb.get('scope_id') if fb.get('scope_type') == 'task' else None
+    if fb.get('scope_type') == 'delegation':
+        owner = delegation.get(conn, fb.get('scope_id'))
+        task_id = owner['task_id'] if owner else None
+    if task_id:
+        for row in conn.execute("SELECT * FROM feedback WHERE scope_type='task' AND scope_id=? "
+                                "AND kind='new_task' AND status='pending'", (task_id,)):
+            reason = incomplete_reason({**dict(row), 'payload': loads(row['payload'], {})})
+            if reason:
+                return 'task creation context is incomplete: ' + reason
     return None
 
 
@@ -148,7 +168,7 @@ def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, fe
             refusal = OpError("NOT_READY", f"{feedback_id}: {not_ready(conn, cfg, fb)}; it is offered again when"
                                            " ready")
         return Ctx("feedback", feedback_id, actor="human", origin=_fb_origin(fb), fb=fb, key=key,
-                   refusal=refusal)
+                   refusal=refusal, cfg=cfg)
     if request:
         if not (said or "").strip():
             raise OpError("INVALID", "--request needs --said with the user's words")
@@ -191,6 +211,15 @@ def perform(conn: sqlite3.Connection, ctx: Ctx, command: str, args: dict[str, An
                 return {**loads(row["result"], {}), "duplicate": True}
         if ctx.refusal is not None:
             raise ctx.refusal
+        if ctx.kind == 'feedback':
+            current = feedback.get(conn, ctx.fb['id'])
+            if current['status'] != 'pending':
+                raise OpError('SUPERSEDED' if current['status'] == 'superseded' else 'ALREADY_RESOLVED', current['id'])
+            if ctx.cfg and not_ready(conn, ctx.cfg, current):
+                raise OpError('NOT_READY', not_ready(conn, ctx.cfg, current))
+            reason = feedback_input_reason(conn, current)
+            if reason:
+                raise OpError('INCOMPLETE', reason)
         result = fn()
         if ctx.notes:
             result["notes"] = ctx.notes
@@ -641,7 +670,7 @@ def feedback_resolve(conn: sqlite3.Connection, cfg: Config, feedback_id: str, *,
     why = not_ready(conn, cfg, fb)
     if why:
         raise OpError("NOT_READY", f"{feedback_id}: {why}; it is offered again when ready")
-    incomplete = incomplete_reason(fb)
+    incomplete = feedback_input_reason(conn, fb)
     if incomplete and outcome != "clarify":
         raise OpError("INCOMPLETE", f"{feedback_id}: {incomplete}; only --outcome clarify (ask the user to restate it)")
     if outcome == "clarify" and not reply:
@@ -803,12 +832,14 @@ def delegate_answer(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, delegation_
     if not (body or "").strip():
         raise OpError("INVALID", "--body is required")
     payload = (ctx.fb or {}).get('payload') or {}
+    if question is None and payload.get('answer_binding_error'):
+        raise OpError('INVALID', payload['answer_binding_error'])
     question = question or payload.get('delivery_id')
     if question is None:
         row = conn.execute("SELECT * FROM deliveries WHERE delegation_id=? AND card_id=? AND kind IN ('question','failure') "
                            "AND source_event_id=?", (delegation_id, d['card_id'], d['block_event_id'])).fetchone()
     else:
-        row = conn.execute("SELECT * FROM deliveries WHERE id=? AND delegation_id=? AND kind='question'",
+        row = conn.execute("SELECT * FROM deliveries WHERE id=? AND delegation_id=? AND kind IN ('question','failure')",
                            (question, delegation_id)).fetchone()
     if row is None:
         raise OpError('INVALID', 'no matching question in this delegation')

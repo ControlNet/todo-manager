@@ -56,7 +56,7 @@ def fetch_all(conn: sqlite3.Connection, adapters: list[Any], budget: float = FET
     After a rate-limit error the remaining scopes of that source wait for the next run."""
     started = time.monotonic()
     report: dict[str, Any] = {}
-    queue = list(adapters)
+    queue = sorted(adapters, key=lambda a: _last_read(conn, a))
     throttled: set[str] = set()
     while queue:
         adapter = queue.pop(0)
@@ -106,7 +106,7 @@ def fetch_all(conn: sqlite3.Connection, adapters: list[Any], budget: float = FET
 
 def _last_read(conn: sqlite3.Connection, adapter: Any) -> str:
     row = get_cursor(conn, adapter.name, adapter.scope)
-    return (row or {}).get("last_success_at") or ""
+    return (row or {}).get("last_attempt_at") or (row or {}).get("last_success_at") or ""
 
 
 def _digest_time(cfg: Config) -> tuple[int, int]:
@@ -147,17 +147,18 @@ def commit_digest_check(conn: sqlite3.Connection, cfg: Config, adapters: list[An
                              (clock.iso(), day))
             info["digest"] = "exhausted"
             return None, info
-    info["fetch"] = fetch_all(conn, adapters, budget=120)
+    pending = [a for a in adapters if ((get_cursor(conn, a.name, a.scope) or {}).get('meta') or {}).get('digest_read_day') != day]
+    info["fetch"] = fetch_all(conn, pending, budget=120)
     # Commits are read only here, once a day: the scope is due again at tomorrow's digest time
     # (health reports it stale only after that, or at once when a due read fails).
     due_at = next_digest_at(cfg)
     with tx(conn):
-        for adapter in adapters:
+        for adapter in pending:
             read = info["fetch"].get(f"{adapter.name}:{adapter.scope}") or {"skipped": "not read"}
-            if "error" not in read and "skipped" not in read:
-                conn.execute("UPDATE cursors SET meta=json_set(COALESCE(meta, '{}'), '$.next_due_at', ?)"
-                             " WHERE source=? AND scope=?", (due_at, adapter.name, adapter.scope))
-    if any("error" in v for v in info["fetch"].values()):
+            if "error" not in read and "skipped" not in read and not read.get("more_pending"):
+                conn.execute("UPDATE cursors SET meta=json_set(COALESCE(meta, '{}'), '$.next_due_at', ?, '$.digest_read_day', ?)"
+                             " WHERE source=? AND scope=?", (due_at, day, adapter.name, adapter.scope))
+    if any("error" in v or "skipped" in v or v.get("more_pending") for v in info["fetch"].values()):
         return None, info  # retry fetching next tick; no model call on partial data
     item_ids = [r["id"] for r in conn.execute(
         "SELECT id FROM source_items WHERE source='commit' AND state='pending' ORDER BY occurred_at")]

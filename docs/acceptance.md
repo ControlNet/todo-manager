@@ -12,18 +12,23 @@ Legend for the evidence column:
 - **not yet verified** – depends on model judgement or real accounts; needs the real-sample
   evaluation described at the end.
 
-Run everything: `python3 -m unittest discover -s tests -t .`
+Run everything: `python3 -B -m unittest discover -s tests -t .`.
+
+The current [R01–R16 reliability acceptance report](reliability-audit-2026-10-06.md) records
+red-baseline evidence, cross-chains A–H, native contracts and exact split test commands.
+Commit-stamped audit tables later in this document describe historical implementations;
+removed classifier/coverage rules in those tables are not current guarantees.
 
 ## Intake quality
 
 | # | Criterion | Implementation | Evidence |
 |---|---|---|---|
-| 1 | Ads, random CFPs, unaccepted review invitations stay out; explicit acceptance is recognised | Model decides with full context; every new item must be linked as evidence or ignored with a category (`advertising`, `cfp`, `review_invitation_unaccepted`, …) and a reason | unit: `test_every_new_item_must_be_covered`, `test_ignore_needs_category_and_reason`; judgement **not yet verified** |
-| 2 | No task from a title / IMPORTANT label alone; full context is judged | No keyword or label rules exist; the model receives full message text (quotes trimmed) plus earlier thread messages | structural; judgement **not yet verified** |
+| 1 | Relevance reflects user intent and preferences | Hermes model uses native preferences and intake prompt; Todo Manager stores evidence and explicit per-item outcomes. Unhandled items return later; no hard-coded CFP/review classifier or full-run coverage gate | unit: small-command/outcome tests; semantic judgement **not yet verified** |
+| 2 | Relevant context is available | Script stdout includes material; long display text is marked and points to full stored content. Reading and interpreting that context remains agent behaviour | unit: context-budget tests; judgement **not yet verified** |
 | 3 | Reminders, re-fetches and the same matter across email/Slack/GitHub do not duplicate tasks | Source items are unique per (source, account, external id); thread keys link later messages to existing tasks shown to the model; open tasks are in every intake context | unit: `test_create_and_followup_update_same_matter`, `test_reminder_cannot_reopen_human_cancelled_task`; cross-channel judgement **not yet verified** |
 | 4 | Read / expired / silence is not completion; receipts, sent replies, PRs update per done criteria | No code path closes a task on read state or time; closing requires an op with evidence; done criteria are stored per task. Your own PR merged/closed reaches the model only when that PR is evidence of an open task (to update it); otherwise it is context | structural + unit: `test_create_and_followup_update_same_matter`, `test_if_open_task_items_wake_only_for_an_open_linked_task`, `test_tracked_repo_merge_of_my_pr_is_news_only_for_an_open_task`; judgement **not yet verified** |
-| 5 | Your cancel/done/rule corrections win; genuinely new responsibility is handled | Field-level provenance and `based_on_version`; closed-by-you tasks are never reopened (follow-up tasks instead); rules are versioned and decisions on stale rules are rejected | unit: `test_agent_cannot_overwrite_newer_human_correction`, `test_seen_human_value_needs_explicit_override`, `test_human_closed_task_is_not_reopened_by_agent`, `test_stale_rules_rejected`, `test_stale_human_edit_wins_over_feedback_based_on_older_version` |
-| 6 | Ignored samples are checked for misses; no "ignore everything" or "review everything" | Every ignore carries category + rationale and is stored with the run; there is no "needs review" inbox: low-value or unclear noise is ignored with a rationale; an ambiguity that could cost you if missed (direct request, deadline, money, reviews, hiring, an assigned role) becomes one question (`ask`, a `decision` task for you), at most `wake.max_questions_per_run` (3) per run, enforced on apply (`AmbiguityTests`). Whether the model draws this line well is part of the real-sample evaluation | **not yet verified** (needs the real-sample evaluation) |
+| 5 | Human business corrections remain protected | Field provenance and task/project versions protect changes, including repository relations. Preferences use native USER/memory, without a Todo rule hash gate | unit: store, feedback-authority and R13 tests |
+| 6 | Ignored samples can be audited for misses | Per-item outcomes are stored; prompts guide judgement. No fixed semantic taxonomy, question budget or classifier validator is enforced by Python | unit: small-command outcome tests; judgement **not yet verified** |
 
 ## Wake discipline
 
@@ -42,7 +47,7 @@ Run everything: `python3 -m unittest discover -s tests -t .`
 | 12 | The same feedback / delegation via several entry points never duplicates cards, resumes or deliveries | Feedback unique by (origin, source id, version); delegation messages stored once; one active delegation per task unless explicitly parallel | unit: `test_matrix_direct_feedback_is_recorded_and_applied_once`, `test_double_apply_is_refused`, `test_second_delegation_and_guest_approval_are_refused` |
 | 13 | A card blocked on you stays blocked across rounds and restarts, even for a day | Only an answer message unblocks; no timer-based resume | unit: `test_block_answer_resume_and_stale_answer`; hermes: `test_full_draft_cycle_against_real_kanban` |
 | 14 | The card keeps question and progress; an old reply cannot clear a newer block | Answers target a block sequence number | unit: `test_late_reply_to_an_earlier_question_cannot_answer_the_new_one`, `test_answer_in_question_thread_unblocks_card` |
-| 15 | Human review waiting is effective; notifications do not wake the creator to re-plan | Requires `kanban.review_dispatch: false` and `kanban.auto_decompose: false` (global in Hermes). todo-manager reads both (never writes them); while either is on, no new card is created and `health` names the setting. Cards are created without a chat session (no auto-subscribe) | unit: `HermesSettingsTests`; hermes: `test_settings_are_read_as_the_installed_dispatcher_reads_them`; **both are `true` on this machine today: changing them is your decision** |
+| 15 | Review, acceptance and notification have distinct meanings | Native review/decomposition remain enabled according to user settings. Explicit passive routes register native subscriptions; Notion records persistent results. Todo Manager does not disable global orchestration | hermes: native contract probes; real channel delivery **not run** |
 | 16 | A finished delivery does not complete the Notion task | Accepting ends the delegation only; task completion is decided separately | unit: `test_review_revision_accept_cycle`, `test_marking_done_accepts_a_delivered_review`, `test_closing_task_through_feedback_accepts_the_delivery` |
 | 17 | External actions follow authorisation; approval is bound to the delivery version | Approvals only from you, bound to one action + delivery version, voided by a newer delivery, sent and consumed once; a run that held an approval and failed is parked (`max_retries = 1`), marked unknown and asked about, never respawned automatically. Allowed actions are card instructions the worker model follows: **no tool-call interception** (see limitations) | unit: `test_approval_binds_to_latest_delivery`, `test_second_delegation_and_guest_approval_are_refused`, `ApprovalTests`; hermes: `test_a_failed_run_parks_the_card_instead_of_a_respawn` |
 
@@ -288,8 +293,9 @@ the installed Hermes code in a temporary `HERMES_HOME`.
    whether to keep it (`health` explains it).
 5. **Production switch to this version**: not done in this round (no change to the real Notion,
    the production workspace, the existing cron jobs or Hermes' global configuration). Steps:
-   pause the jobs, export, pull, `todo-manager health` (schema v8 migration and rules
-   migration), `todo-manager prefs show`, `todo-manager install` (review the plan), resume
+   pause the owned jobs, back up/export, update the checkout, run `todo-manager health`,
+   then `todo-manager install` (review the plan) and resume only when ready. Schema remains v10;
+   native memory is not migrated by this reliability patch
    (see operations.md, "Upgrading an existing workspace").
 4. **First production Notion setup and migration** require your confirmation (see the rollout
    plan in the workspace notes). `todo-manager install` does the setup after you have created

@@ -22,5 +22,5 @@ class ReviewContract(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr[-5000:] + proc.stdout[-2000:])
             line = next(line for line in proc.stdout.splitlines() if line.startswith('@@PROBE@@'))
             results = json.loads(line[9:])
-            self.assertEqual(len(results), 4)
+            self.assertEqual(len(results), 7)
             self.assertTrue(all(results.values()), results)

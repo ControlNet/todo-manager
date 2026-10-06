@@ -207,6 +207,13 @@ def _insert_item(conn: sqlite3.Connection, item: Item, now: str) -> str | None:
         (item_id, item.source, item.account, item.external_id, item.version, item.kind, item.thread_key,
          item.conversation_key, item.occurred_at, item.author, 1 if item.author_is_me else 0, item.title,
          item.url, ids.content_hash(item.title, item.body), item.excerpt(), dumps(meta), now, state))
+    # Slack can promote a previously processed channel message to a thread root,
+    # including when that promotion is first observed in a new edited version.
+    # Preserve item identity, evidence, versions and batch processing state.
+    if item.source == 'slack' and item.conversation_key.count(':') >= 2:
+        conn.execute("UPDATE source_items SET conversation_key=?,thread_key=? "
+                     "WHERE source=? AND account=? AND external_id=?",
+                     (item.conversation_key, item.thread_key, item.source, item.account, item.external_id))
     if cur.rowcount != 1:
         return None
     conn.execute("INSERT INTO source_bodies(item_id, body) VALUES (?,?)", (item_id, item.body))

@@ -336,3 +336,21 @@ configuration, with an audit comment. Existing cards are not reassigned.
 `delegate show` includes child attention and pending discovery. Notification failures appear
 separately in health while Notion result synchronization proceeds. Review the existing install
 plan to upgrade the owned Notion focus view; customized views remain unchanged.
+
+## R01–R16 reliability recovery
+
+See [the concentrated audit report](reliability-audit-2026-10-06.md) for exact commands,
+compatibility, source contracts and scenario evidence. There is no schema/config/CLI migration.
+Back up before upgrading; the normal installer retains user cron settings and refuses another
+workspace's profile resources. No production upgrade was run for this patch.
+
+An ordinary answer can target a still-open question after a supplement. Approval cannot reuse
+that question's obsolete requirements. `delegate answer --question` also accepts a current
+failure delivery; old question/failure identities do not become answers to a newer event.
+Ended-delegation residual children require explicit cancellation before follow-up work.
+
+Do not reset failed outbox work to bypass a retry deadline. Dirty scans now reuse the target
+projection, including agent-work display changes. Old uncertain writes reconcile before new
+pushes. A readable `TM effect` marker identifies new Notion comments; legacy or invisible
+uncertain comments need manual inspection, not blind resend. Notification registration health
+is separate from delivery: a `history_gap` observation never means historical events were sent.

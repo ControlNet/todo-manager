@@ -13,6 +13,7 @@ from .kanban import Kanban, KanbanError, transition_verdict
 def sync(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any], quiet: bool = False) -> None:
     from . import delegation as dg
     failures = []
+    closed_note = '\n' + i18n.t('dlg.child_closed') if d['status'] == 'ended' else ''
     for card in kb.owned(d['card_id']):
         row = conn.execute('SELECT * FROM delegation_children WHERE delegation_id=? AND card_id=?',
                            (d['id'], card)).fetchone()
@@ -21,8 +22,7 @@ def sync(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any], q
         except KanbanError as exc:
             failures.append(f'{card}: {exc}')
             continue
-        if not quiet:
-            dg.repair_notification(conn, cfg, kb, d, card)
+        dg.repair_notification(conn, cfg, kb, d, card)
         cursor = row['event_cursor'] if row else 0
         with tx(conn):
             for ev in snap['events']:
@@ -45,10 +45,15 @@ def sync(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any], q
                                               run_id=str(ev.get('run_id') or ''), after_cancel=quiet)
                     if dlv and not quiet:
                         effects.task_comment(conn, d['task_id'], f'dlv:{dlv}',
-                                             i18n.t("dlg.child_failure" if failed else "dlg.child_question", card=card, reason=reason, delivery=dlv))
-                elif ev['kind'] == 'gave_up' and not quiet:
-                    effects.task_comment(conn, d['task_id'], f"child:{card}:{ev['id']}",
-                                         i18n.t('dlg.child_failure', card=card, reason=payload.get('error') or 'gave_up'))
+                                             i18n.t("dlg.child_failure" if failed else "dlg.child_question", card=card, reason=reason, delivery=dlv) + closed_note)
+                elif ev['kind'] == 'gave_up':
+                    reason = payload.get('error') or 'gave_up'
+                    dlv = dg._record_delivery(conn, {**d, 'card_id': card}, kind='failure', summary=reason,
+                                              body=reason, seq=ev['id'], event_id=ev['id'],
+                                              run_id=str(ev.get('run_id') or ''), after_cancel=quiet)
+                    if dlv and not quiet:
+                        effects.task_comment(conn, d['task_id'], f'dlv:{dlv}',
+                                             i18n.t('dlg.child_failure', card=card, reason=reason, delivery=dlv) + closed_note)
                 elif ev['kind'] in ('completed', 'review_requested') and not quiet:
                     effects.task_comment(conn, d['task_id'], f"child:{card}:{ev['id']}",
                                          i18n.t("dlg.child_result", card=card, summary=payload.get("summary") or ""))
@@ -102,17 +107,18 @@ def refresh_attention(conn: sqlite3.Connection, d: dict[str, Any], quiet: bool =
 def queue_answer(conn: sqlite3.Connection, d: dict[str, Any], question: dict[str, Any], body: str,
                  key: str | None, feedback_id: str | None) -> dict[str, Any]:
     from . import delegation as dg
+    d = dg.get(conn, d['id'])
     if d['status'] in ('cancelled', 'ended') or dg.cancel_pending(conn, d):
-        raise dg.DelegationError('delegation is closed or cancelling')
+        raise dg.DelegationError('delegation is closed or cancelling; cancel remaining owned work before creating a follow-up')
     existing = conn.execute('SELECT id FROM delegation_messages WHERE op_key=?', (key,)).fetchone()
     if existing:
         return {'message': existing['id'], 'question': question['id']}
     row = conn.execute("SELECT * FROM delegation_children WHERE delegation_id=? AND card_id=?",
                        (d['id'], question['card_id'])).fetchone()
     latest = conn.execute("SELECT MAX(event_id) FROM delegation_child_events WHERE delegation_id=? AND card_id=? "
-                          "AND kind IN ('blocked','block_loop_detected')", (d['id'], question['card_id'])).fetchone()[0]
-    if (not row or row['status'] not in ('blocked', 'triage') or row['attention'] != 'question'
-            or latest != question['source_event_id'] or question['requirement_version'] != d['requirement_version']):
+                          "AND kind IN ('blocked','block_loop_detected','gave_up')", (d['id'], question['card_id'])).fetchone()[0]
+    if (not row or row['status'] not in ('blocked', 'triage') or row['attention'] not in ('question', 'failure')
+            or latest != question['source_event_id']):
         raise dg.DelegationError('question is stale or no longer open; no answer queued')
     mid = ids.new_id('event')
     conn.execute("INSERT INTO delegation_messages (id,delegation_id,kind,body,feedback_id,requirement_version,"
@@ -130,9 +136,6 @@ def deliver_answer(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[st
         return 'superseded'
     if d['pause_requested']:
         return 'waiting'
-    if msg['requirement_version'] != d['requirement_version']:
-        dg._finish(conn, msg['id'], 'superseded', 'requirements changed after this answer was queued')
-        return 'superseded'
     if card not in kb.owned(d['card_id']):
         raise KanbanError('child ownership cannot be verified; no message sent')
     snap = kb.snapshot(card)

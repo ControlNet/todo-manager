@@ -87,7 +87,8 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
                        "minutes_since_success": round(clock.minutes_since(r["last_success_at"]) or -1),
                        "failures": r["consecutive_failures"], "error": (r["last_error"] or "")[:200],
                        "channel": bool(loads(r["meta"], {}).get("channel")),
-                       "next_due_at": loads(r["meta"], {}).get("next_due_at")}
+                       "next_due_at": loads(r["meta"], {}).get("next_due_at"),
+                       "history_gap": loads(r["meta"], {}).get("history_gap")}
                       for r in conn.execute("SELECT * FROM cursors ORDER BY source, scope")]
     stale = {(r["source"], r["scope"]) for rows in stale_sources(conn).values() for r in rows}
     out["stale_sources"] = {}

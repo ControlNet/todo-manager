@@ -99,10 +99,19 @@ def get(conn: sqlite3.Connection, delegation_id: str) -> dict[str, Any] | None:
     return row
 
 
+def unfinished_sql(alias: str = 'delegations') -> str:
+    """Business ownership remains live until descendant discovery and stopping finish."""
+    return (f"({alias}.status IN ({','.join(repr(s) for s in ACTIVE)}) OR "
+            f"({alias}.status IN ('ended','cancelled') AND ({alias}.children_sync_pending=1 OR EXISTS "
+            f"(SELECT 1 FROM delegation_children c WHERE c.delegation_id={alias}.id "
+            "AND c.status NOT IN ('done','archived')))) OR "
+            f"{alias}.cancel_state='unconfirmed')")
+
+
 def for_task(conn: sqlite3.Connection, task_id: str, active_only: bool = False) -> list[dict[str, Any]]:
     sql = "SELECT * FROM delegations WHERE task_id=?"
     if active_only:
-        sql += f" AND status IN ({','.join(repr(s) for s in ACTIVE)})"
+        sql += " AND " + unfinished_sql()
     rows = conn.execute(sql + " ORDER BY created_at", (task_id,)).fetchall()
     return [{**dict(r), "allowed_actions": loads(r["allowed_actions"], [])} for r in rows]
 
@@ -251,6 +260,9 @@ def _closing_message(conn: sqlite3.Connection, d: dict[str, Any], task_status: s
     closing = {r["kind"] for r in conn.execute(
         "SELECT kind FROM delegation_messages WHERE delegation_id=? AND kind IN ('accept','cancel')"
         " AND status IN ('pending','sending','sent','waiting_capacity')", (d["id"],))}
+    if "cancel" in closing and d.get('cancel_state') == 'unconfirmed':
+        conn.execute("UPDATE delegation_messages SET status='pending' WHERE delegation_id=? AND kind='cancel' AND status='sent'", (d['id'],))
+        return 'cancel'
     if "cancel" in closing or ("accept" in closing and task_status != "cancelled"):
         return None
     add_message(conn, d["id"], "cancel", reason, feedback_id=feedback_id, cause="task_closed")
@@ -262,7 +274,7 @@ def enforce_task_lifecycle(conn: sqlite3.Connection) -> dict[str, int]:
     stats = {"closing": 0, "withdrawn": 0}
     rows = conn.execute(
         f"SELECT d.id, t.status AS task_status FROM delegations d JOIN tasks t ON t.id=d.task_id"
-        f" WHERE d.status IN ({','.join(repr(x) for x in ACTIVE)})").fetchall()
+        f" WHERE {unfinished_sql('d')}").fetchall()
     for r in rows:
         d = get(conn, r["id"])
         if r["task_status"] in store.CLOSED_STATUSES:
@@ -384,10 +396,16 @@ def repair_notification(conn: sqlite3.Connection, cfg: Config, kb: Kanban,
             return None
         result = kb.notify(card, route, release=release and may_release_staging(conn, d))
     except KanbanError as exc:
-        health.record_channel(conn, 'kanban', scope, f'notification registration failed: {exc}')
+        prior = conn.execute("SELECT consecutive_failures FROM cursors WHERE source='kanban' AND scope=?", (scope,)).fetchone()
+        exhausted = prior and prior['consecutive_failures'] >= 11
+        prefix = 'notification registration exhausted; manual repair required' if exhausted else 'notification registration failed'
+        health.record_channel(conn, 'kanban', scope, f'{prefix}: {exc}')
         return None
-    health.record_channel(conn, 'kanban', scope,
-                          'subscription restored without historical replay' if result['history_gap'] else None)
+    health.record_channel(conn, 'kanban', scope, None)
+    if result['history_gap']:
+        with tx(conn):
+            conn.execute("UPDATE cursors SET meta=json_set(COALESCE(meta,'{}'), '$.history_gap', ?) "
+                         "WHERE source='kanban' AND scope=?", (clock.iso(), scope))
     return result
 
 
@@ -547,9 +565,14 @@ def _status_from_card(card_status: str, d: dict[str, Any], paused_block: bool | 
 def sync_cards(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, Any]:
     stats: dict[str, Any] = {"checked": 0, "deliveries": 0, "questions": 0, "failures": 0, "errors": 0}
     rows = conn.execute("SELECT id FROM delegations WHERE card_id IS NOT NULL AND status NOT IN"
-                        " ('cancelled','quarantined') AND (status!='ended' OR children_sync_pending=1 OR EXISTS "
+                        " ('quarantined') AND (status NOT IN ('ended','cancelled') OR children_sync_pending=1 OR EXISTS "
                         "(SELECT 1 FROM delegation_children c WHERE c.delegation_id=delegations.id "
-                        "AND c.status NOT IN ('done','archived')))").fetchall()
+                        "AND c.status NOT IN ('done','archived')) OR EXISTS "
+                        "(SELECT 1 FROM cursors n WHERE n.source='kanban' AND n.consecutive_failures>0 "
+                        "AND n.last_error LIKE 'notification registration failed:%' AND "
+                        "(n.scope='notifications:' || delegations.card_id OR n.scope IN "
+                        "(SELECT 'notifications:' || c.card_id FROM delegation_children c "
+                        "WHERE c.delegation_id=delegations.id))))").fetchall()
     for row in rows:
         d = get(conn, row["id"])
         try:
@@ -562,7 +585,7 @@ def sync_cards(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, A
             continue
         stats["checked"] += 1
         # While a cancel is on its way, whatever the card still does is history only.
-        quiet = conn.execute("SELECT 1 FROM delegation_messages WHERE delegation_id=? AND kind='cancel'"
+        quiet = d['status'] == 'cancelled' or conn.execute("SELECT 1 FROM delegation_messages WHERE delegation_id=? AND kind='cancel'"
                              " AND status IN ('pending','sending','waiting_capacity')", (d["id"],)).fetchone() is not None
         with tx(conn):
             # Commit retry responsibility with root progress, before any child I/O.
@@ -978,7 +1001,7 @@ def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: s
     d = get(conn, delegation_id)
     if d is None:
         raise DelegationError(f"delegation {delegation_id} not found")
-    if d["status"] in ("ended", "cancelled") and kind not in ("supplement",):
+    if d["status"] in ("ended", "cancelled") and kind not in ("supplement", "cancel"):
         raise DelegationError(f"delegation is {d['status']}; create a new linked delegation for new work")
     if kind in CONFLICTS_WITH_CANCEL and cancel_pending(conn, d):
         raise DelegationError("the delegation is being cancelled; nothing more is sent to it")
@@ -1012,9 +1035,10 @@ def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: s
             question_row = conn.execute("SELECT * FROM deliveries WHERE delegation_id=? AND card_id=? AND kind IN ('question','failure') "
                                         "AND id=COALESCE(?,id) AND source_event_id=?",
                                         (delegation_id, d['card_id'], delivery_id, d['block_event_id'])).fetchone()
-            if (d['status'] != 'blocked' or question_row is None
-                    or question_row['requirement_version'] != d['requirement_version']):
+            if d['status'] != 'blocked' or question_row is None:
                 raise DelegationError('earlier question is stale or no longer open; no answer queued')
+            if approve and question_row['requirement_version'] != d['requirement_version']:
+                raise DelegationError('requirements changed; answer without approval and request fresh authorization')
         mid = ids.new_id("event")
         changes_requirement = kind in ("supplement", "revision", "answer")
         requirement_version = d["requirement_version"] + (1 if changes_requirement else 0)

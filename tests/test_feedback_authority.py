@@ -5,7 +5,7 @@ R11 (an unconfirmed program write is not a human edit). FakeNotion and FakeKanba
 test doubles; what the agent records is written by the test.
 """
 
-from todo_manager import delegation, feedback, health, ops, store
+from todo_manager import clock, delegation, feedback, health, ops, store
 from todo_manager.ops import OpError
 from tests.fake_notion import USER_ID
 from tests.flow import apply_direct, apply_feedback_ops
@@ -151,6 +151,8 @@ class UnconfirmedWriteTests(GateCase):
         task = store.get_task(self.conn, self.task)
         self.assertEqual(task["next_step"], "B：直接回复 Bob")
         self.assertFalse(self.conn.execute("SELECT 1 FROM feedback WHERE origin='notion_property'").fetchone())
+        # A new projection preserves the older uncertain write's retry deadline.
+        clock.advance(minutes=2)
         self.drain()
         self.assertEqual(self.fake.prop(self.page, "下一步"), "B：直接回复 Bob")
 

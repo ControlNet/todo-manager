@@ -276,6 +276,8 @@ class Installer:
         return Action(kind, target, summary, run=keep_records, record=record)
 
     def skill_action(self, jobs: dict[str, dict[str, Any]]) -> Action:
+        if self.ownership_conflict():
+            return Action('conflict', SKILL_NAME, 'profile resources belong to another Todo workspace')
         up, path = skill_upgrade(self.paths, jobs)
         target = path or self.paths.install_skill_path
         return self.user_file_action(up, str(target), lambda text: self._write(target, text), asset(SKILL_FILE),
@@ -305,6 +307,8 @@ class Installer:
 
     def job_action(self, entry: str, jobs: dict[str, dict[str, Any]], manifest: dict[str, Any]) -> list[Action]:
         spec = JOBS[entry]
+        if self.ownership_conflict():
+            return [Action('conflict', spec['name'], 'profile resources belong to another Todo workspace')]
         existing = jobs.get(spec["name"])
         want = self.wanted_fields()[entry]
         up = prompt_upgrade(self.paths, entry, existing)
@@ -374,7 +378,27 @@ class Installer:
 
     # ---------------------------------------------------------------- plan / apply
 
+    def ownership_conflict(self) -> bool:
+        for path, mark in [(self.paths.launcher, LAUNCHER_MARK)] + [
+                (self.paths.script(e), SCRIPT_MARK) for e in JOBS]:
+            text = _read(path)
+            if text and mark in text and repr(str(self.paths.todo_home)) not in text:
+                return True
+        manifest = load_manifest(self.paths)
+        for entry, spec in JOBS.items():
+            job = load_jobs(self.paths).get(spec['name'])
+            if not job:
+                continue
+            recorded = (manifest.get('jobs') or {}).get(entry) or {}
+            trusted = (manifest.get('todo_home') == str(self.paths.todo_home)
+                       and recorded.get('id') == job['id'])
+            if not trusted and job.get('workdir') and job['workdir'] != str(self.paths.todo_home):
+                return True
+        return False
+
     def plan(self) -> list[Action]:
+        if self.ownership_conflict():
+            return [Action('conflict', str(self.paths.todo_home), 'profile resources belong to another Todo workspace')]
         jobs = load_jobs(self.paths)
         manifest = load_manifest(self.paths)
         actions = [self.file_action(self.paths.launcher, launcher_text(self.paths), LAUNCHER_MARK, 0o755)]
@@ -389,6 +413,8 @@ class Installer:
     def apply(self, actions: list[Action]) -> list[str]:
         """Carry out the plan (the caller confirmed the actions that ``changes``) and record what
         todo-manager installed."""
+        if self.ownership_conflict():
+            return ['conflict: profile resources belong to another Todo workspace; nothing adopted']
         done = []
         previous = load_manifest(self.paths)
         if any(a.changes for a in actions):
@@ -433,6 +459,8 @@ class Installer:
 
     def uninstall_plan(self) -> list[Action]:
         """What ``uninstall`` removes: only what todo-manager installed and the user did not take over."""
+        if self.ownership_conflict():
+            return [Action('keep', str(self.paths.todo_home), 'another workspace owns profile resources; kept')]
         jobs = load_jobs(self.paths)
         actions = []
         manifest = load_manifest(self.paths)

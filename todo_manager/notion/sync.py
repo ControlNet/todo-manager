@@ -200,6 +200,9 @@ class NotionSync:
                                            "follow_up_date", "snooze_until", "change_note")}
         values["focus"] = bool(task.get("focus"))
         values["project_id"] = self.project_page_id(task.get("project_id"))
+        pending = loads(get_meta(self.conn, 'notion.project_pending:' + task['id']), {})
+        if pending:
+            values['project_id'] = pending['page_id']
         values["delegation"] = self.delegation_label(task["id"])
         values["source"] = self.source_label(task)
         values["tm_id"] = task["id"]
@@ -259,6 +262,7 @@ class NotionSync:
         except Exception as exc:
             _cursor_error(self.conn, scope, _describe(exc))
             raise
+        self.resolve_projects()
         if kind == "task":
             stats["bodies"] = self.check_bodies(int(self.cfg.get("notion.body_reads_per_run", 10)))
         stats["problems"] = len(self.problems)
@@ -293,7 +297,10 @@ class NotionSync:
 
     def body_unread(self, row: dict[str, Any]) -> bool:
         """The page's last edit (not ours) may not be reflected in our last body read."""
-        return body.edit_unread(row["last_edited_time"], row["last_edited_by"], row["body_read_at"],
+        incomplete = self.conn.execute("SELECT 1 FROM feedback WHERE source_id=? AND kind='new_task' "
+                                       "AND status='pending' AND (json_extract(payload,'$.complete')=0 "
+                                       "OR json_extract(payload,'$.truncated')=1)", (row['page_id'],)).fetchone()
+        return bool(incomplete) or body.edit_unread(row["last_edited_time"], row["last_edited_by"], row["body_read_at"],
                                 self.state.bot_user_id)
 
     def check_bodies(self, limit: int) -> int:
@@ -305,7 +312,9 @@ class NotionSync:
         try:
             rows = [self.page_row(r["page_id"]) for r in self.conn.execute(
                 "SELECT page_id FROM notion_pages WHERE entity_type='task' AND trashed=0 AND last_edited_time IS NOT NULL"
-                " AND last_edited_by IS NOT ?", (self.state.bot_user_id,))]
+                " AND (last_edited_by IS NOT ? OR EXISTS (SELECT 1 FROM feedback f WHERE f.source_id=notion_pages.page_id "
+                "AND f.kind='new_task' AND f.status='pending' AND (json_extract(f.payload,'$.complete')=0 "
+                "OR json_extract(f.payload,'$.truncated')=1)))", (self.state.bot_user_id,))]
             due = sorted((r for r in rows if self.body_unread(r)), key=lambda r: r["body_read_at"] or "")
             for row in due[:max(0, limit)]:
                 task = store.get_task(self.conn, row["entity_id"])
@@ -327,11 +336,21 @@ class NotionSync:
         doc = self.client.page_markdown(row["page_id"])
         markdown = doc.get("markdown") or ""
         region = body.extract(markdown)
+        if region is not None and not doc.get('truncated'):
+            self.reconcile_body(row['page_id'], region)
+            row = self.page_row(row['page_id'])
         notes = body.outside(markdown).strip()
         editor = row["last_edited_by"]
         trust = {"author": editor, "author_is_user": self.is_user(editor)}
         found: list[str] = []
         with tx(self.conn):
+            for pending in self.conn.execute("SELECT id,payload FROM feedback WHERE kind='new_task' "
+                                             "AND source_id=? AND status='pending'", (row['page_id'],)):
+                payload = loads(pending['payload'], {})
+                if payload.get('complete') is False or payload.get('truncated'):
+                    payload.update(body=notes if row['managed_hash'] else markdown.strip(), complete=not bool(doc.get('truncated')),
+                                   truncated=bool(doc.get('truncated')))
+                    self.conn.execute('UPDATE feedback SET payload=? WHERE id=?', (dumps(payload), pending['id']))
             if region is not None and row["managed_hash"]:
                 found += self._box_read(row, task, region, self.render_body(task), bool(doc.get("truncated")), trust)
             # The user's own notes are context (shown with the Task to the agent and in the card),
@@ -463,6 +482,8 @@ class NotionSync:
                                         next_actor=values.get("next_actor") or "me",
                                         focus=bool(values.get("focus")), notion_page_id=None, **fields)
                 self._link("task", tid, page, {**current, "tm_id": None})
+                if values.get('project_id') and project_id is None:
+                    set_meta(self.conn, 'notion.project_pending:' + tid, dumps({'page_id': values['project_id'], 'actor': actor}))
                 if page_text is not None:   # the body is in this feedback; later edits are diffed against it
                     self.conn.execute("UPDATE notion_pages SET body_read_at=?, notes_hash=?, notes_text=?"
                                       " WHERE page_id=?",
@@ -472,10 +493,14 @@ class NotionSync:
                                 text=title, scope_type="task", scope_id=tid, kind="new_task", author=creator,
                                 author_is_user=by_user, payload={"page_id": page["id"], "values": current,
                                                                  "body": page_text or "", "truncated": truncated,
-                                                                 "complete": True})
+                                                                 "complete": page_text is not None and not truncated})
                 effects.task_push(self.conn, tid)
             return "created"
         if tm_id and store.get_project(self.conn, tm_id):
+            existing = self.entity_row('project', tm_id)
+            if existing and existing['page_id'] != page['id']:
+                self.problems.append(f"duplicate Notion page {page['id']} for project {tm_id} (linked page {existing['page_id']})")
+                return 'ignored'
             self._link("project", tm_id, page, current)
             return "unchanged"
         title = values.get("title") or self.t("sync.untitled_project")
@@ -504,10 +529,23 @@ class NotionSync:
                          seen: dict[str, Any], current: dict[str, Any]) -> None:
         task_id = row["entity_id"]
         local = dict(changed)
-        if "project_id" in local:
-            local["project_id"] = self._local_project(local["project_id"])
+        relation_changed = 'project_id' in local
+        pending_relation = None
+        if relation_changed:
+            remote = local['project_id']
+            resolved = self._local_project(remote)
+            if remote and resolved is None:
+                pending_relation = remote
+                del local['project_id']
+            else:
+                local['project_id'] = resolved
         author = (page.get("last_edited_by") or {}).get("id")
         with tx(self.conn):
+            if relation_changed:
+                if pending_relation:
+                    set_meta(self.conn, 'notion.project_pending:' + task_id, dumps({'page_id': pending_relation}))
+                else:
+                    self.conn.execute('DELETE FROM meta WHERE key=?', ('notion.project_pending:' + task_id,))
             before = store.get_task(self.conn, task_id)
             fid, created = feedback.record(
                 self.conn, origin="notion_property", source_id=page["id"],
@@ -746,20 +784,32 @@ class NotionSync:
             return "held: user edit inside the managed region awaits interpretation"
         doc = self.client.page_markdown(page_id)
         region = body.extract(doc.get("markdown") or "")
+        if doc.get('truncated'):
+            if region is not None and row['managed_hash']:
+                editor = (self.client.retrieve_page(page_id).get('last_edited_by') or {}).get('id')
+                with tx(self.conn):
+                    self._box_read(row, task, region, rendered, True,
+                                   {'author': editor, 'author_is_user': self.is_user(editor)})
+            return 'held: API body is truncated'
         if region is not None:
+            self.reconcile_body(page_id, region)
+            row = self.page_row(page_id)
             fp = body.content_fingerprint(region)
             if fp == body.content_fingerprint(rendered):
                 self._store_region(page_id, rendered, region)
                 return "already current"
             if row["managed_hash"] and fp != row["managed_hash"]:
+                editor = (self.client.retrieve_page(page_id).get('last_edited_by') or {}).get('id')
                 with tx(self.conn):
-                    self._box_read(row, task, region, rendered, {"author": row["last_edited_by"],
-                                                                 "author_is_user": self.is_user(row["last_edited_by"])})
+                    self._box_read(row, task, region, rendered, bool(doc.get("truncated")),
+                                   {"author": editor, "author_is_user": self.is_user(editor)})
                 return "held: user edited the managed region"
             command = {"type": "update_content",
                        "update_content": {"content_updates": [{"old_str": region, "new_str": rendered}]}}
         else:
             command = {"type": "insert_content", "insert_content": {"content": rendered, "position": {"type": "start"}}}
+        with tx(self.conn):
+            set_meta(self.conn, 'notion.body_pending:' + page_id, rendered)
         try:
             result = self.client.update_markdown(page_id, command)
         except NotionUncertain as exc:
@@ -768,9 +818,15 @@ class NotionSync:
         self._store_region(page_id, rendered, new_region)
         return "updated" if region is not None else "inserted"
 
+    def reconcile_body(self, page_id: str, region: str) -> None:
+        expected = get_meta(self.conn, 'notion.body_pending:' + page_id)
+        if expected and body.content_fingerprint(expected) == body.content_fingerprint(region):
+            self._store_region(page_id, expected, region)
+
     def _store_region(self, page_id: str, rendered: str, region: str) -> None:
         fp = body.content_fingerprint(region)
         with tx(self.conn):
+            self.conn.execute('DELETE FROM meta WHERE key=?', ('notion.body_pending:' + page_id,))
             self.conn.execute("UPDATE notion_pages SET rendered_hash=?, managed_hash=?, box_seen_hash=? WHERE page_id=?",
                               (_h(rendered), fp, fp, page_id))
 
@@ -792,22 +848,39 @@ class NotionSync:
             page_id = row["page_id"]
         else:
             raise outbox.Permanent("comment without target")
-        text = p["text"]
+        marker = 'TM effect ' + _h(p.get('key') or item['id'])[:24]
+        text = p['text'] + '\n\n' + marker
         if reconcile:
+            if not p.get('comment_protocol'):
+                raise outbox.Uncertain('legacy comment has no readable effect identity; manual reconciliation required')
             for c in self.client.list_comments(page_id):
                 if (c.get("created_by") or {}).get("id") == self.state.bot_user_id and \
-                        plain_text(c.get("rich_text")).strip() == text.strip():
+                        marker in plain_text(c.get("rich_text")) and (
+                            not p.get('discussion_id') or p.get('fallback_page') or
+                            c.get('discussion_id') == p['discussion_id']):
                     self._record_bot_comment(c, page_id, p.get("key"))
                     return {"comment_id": c["id"], "reconciled": True}
+            raise outbox.Uncertain('comment identity is not visible; delivery remains unknown, no automatic replay')
+        # Older queued-but-unsent effects acquire the protocol before the first request.
+        if not p.get('comment_protocol'):
+            p['comment_protocol'] = 1
+            with tx(self.conn):
+                self.conn.execute('UPDATE outbox SET payload=? WHERE id=?', (dumps(p), item['id']))
         try:
-            c = self.client.create_comment(markdown=body.escape_inline(text), discussion_id=p.get("discussion_id"),
-                                           page_id=None if p.get("discussion_id") else page_id)
+            c = self.client.create_comment(markdown=body.escape_inline(text), discussion_id=None if p.get("fallback_page") else p.get("discussion_id"),
+                                           page_id=page_id if p.get("fallback_page") or not p.get("discussion_id") else None)
         except NotionUncertain as exc:
             raise outbox.Uncertain(str(exc)) from None
         except NotionError as exc:
             if exc.not_found and p.get("discussion_id"):
-                # The thread was resolved/deleted: post on the page instead.
-                c = self.client.create_comment(markdown=body.escape_inline(text), page_id=page_id)
+                # Persist the effective target before the fallback can lose its response.
+                p['fallback_page'] = True
+                with tx(self.conn):
+                    self.conn.execute('UPDATE outbox SET payload=? WHERE id=?', (dumps(p), item['id']))
+                try:
+                    c = self.client.create_comment(markdown=body.escape_inline(text), page_id=page_id)
+                except NotionUncertain as uncertain:
+                    raise outbox.Uncertain(str(uncertain)) from None
             else:
                 raise
         self._record_bot_comment(c, page_id, p.get("key"))
@@ -817,7 +890,8 @@ class NotionSync:
         with tx(self.conn):
             self.conn.execute(
                 "INSERT OR IGNORE INTO notion_comments(comment_id, page_id, discussion_id, author_id, is_bot, ref,"
-                " last_edited_time, content_hash, seen_at) VALUES (?,?,?,?,1,?,?,?,?)",
+                " last_edited_time, content_hash, seen_at) VALUES (?,?,?,?,1,?,?,?,?) "
+                "ON CONFLICT(comment_id) DO UPDATE SET ref=COALESCE(excluded.ref,notion_comments.ref)",
                 (c["id"], page_id, c.get("discussion_id"), (c.get("created_by") or {}).get("id"), key,
                  c.get("last_edited_time"), _h(plain_text(c.get("rich_text"))), clock.iso()))
 
@@ -998,15 +1072,25 @@ class NotionSync:
         if prev is not None and prev["content_hash"] == digest:
             return "seen"
         scope_type = {"task": "task", "project": "project"}.get(target["entity_type"], "global")
-        bot = self.conn.execute("SELECT ref FROM notion_comments WHERE discussion_id=? AND is_bot=1 AND ref IS NOT NULL"
-                                " ORDER BY seen_at DESC LIMIT 1", (c.get("discussion_id"),)).fetchone()
+        bot = self.conn.execute("SELECT ref FROM notion_comments WHERE discussion_id=? AND page_id=? AND is_bot=1 AND ref IS NOT NULL"
+                                " ORDER BY (ref LIKE 'dlv:%') DESC, seen_at ASC LIMIT 1", (c.get("discussion_id"), target["page_id"])).fetchone()
         payload: dict[str, Any] = {"page_id": target["page_id"], "comment_id": c["id"],
                                    "discussion_id": c.get("discussion_id"), "attachments": attachments}
+        anchor_count = self.conn.execute("SELECT COUNT(DISTINCT ref) FROM notion_comments WHERE page_id=? "
+                                         "AND discussion_id=? AND is_bot=1 AND ref LIKE 'dlv:%'",
+                                         (target['page_id'], c.get('discussion_id'))).fetchone()[0]
+        if anchor_count > 1:
+            bot = None
+            payload['answer_binding_error'] = 'discussion names multiple deliveries; specify the exact question'
+        if bot and bot['ref'] and not bot['ref'].startswith('dlv:'):
+            payload['answer_binding_error'] = 'discussion has no verified delivery anchor; specify a question explicitly'
         if bot and bot["ref"]:
             payload["in_reply_to"] = bot["ref"]
             if bot["ref"].startswith("dlv:"):
                 dlv = self.conn.execute("SELECT id, delegation_id, kind, seq FROM deliveries WHERE id=?",
                                         (bot["ref"][4:],)).fetchone()
+                if dlv is None:
+                    payload['answer_binding_error'] = 'discussion delivery is unavailable'
                 if dlv:
                     payload.update(delegation_id=dlv["delegation_id"], delivery_id=dlv["id"],
                                    delivery_kind=dlv["kind"], delivery_seq=dlv["seq"])
@@ -1067,8 +1151,21 @@ class NotionSync:
 
     # ================================================================== dirty scan
 
+    def resolve_projects(self) -> None:
+        for pending in self.conn.execute("SELECT key,value FROM meta WHERE key LIKE 'notion.project_pending:%'").fetchall():
+            request = loads(pending['value'], {})
+            remote = request['page_id']
+            project = self._local_project(remote)
+            if project:
+                with tx(self.conn):
+                    task_id = pending['key'].split(':', 1)[1]
+                    store.update_task(self.conn, task_id, {'project_id': project}, actor=request.get('actor', 'human'),
+                                      origin='notion', cause_ref=remote)
+                    self.conn.execute('DELETE FROM meta WHERE key=?', (pending['key'],))
+
     def enqueue_dirty(self, closed_days: int = 30) -> int:
         """Queue pushes for entities whose Notion values differ from what was last written."""
+        self.resolve_projects()
         count = 0
         since = clock.iso(clock.now() - timedelta(days=closed_days))
         open_ = ",".join(repr(s) for s in store.OPEN_STATUSES)

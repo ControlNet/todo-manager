@@ -98,7 +98,8 @@ def create_project(conn: sqlite3.Connection, title: str, *, origin: str, actor: 
                    notion_page_id: str | None = None, status: str = "active") -> str:
     pid = project_id or ids.new_id("project")
     now = _now()
-    meta = {f: {"by": actor, "v": 1} for f in ("title", "domain", "goal", "next_step", "status")}
+    repos = sorted(set(repos))
+    meta = {f: {"by": actor, "v": 1} for f in ("title", "domain", "goal", "next_step", "status", "repos")}
     with tx(conn):
         conn.execute(
             "INSERT INTO projects(id, title, domain, status, goal, next_step, origin, notion_page_id,"
@@ -108,7 +109,7 @@ def create_project(conn: sqlite3.Connection, title: str, *, origin: str, actor: 
         for repo in repos:
             conn.execute("INSERT OR IGNORE INTO project_repos(project_id, repo) VALUES (?,?)", (pid, repo))
         add_history(conn, "project", pid, 1, actor, origin, cause_ref,
-                    {"created": [None, {"title": title, "domain": domain, "goal": goal}]})
+                    {"created": [None, {"title": title, "domain": domain, "goal": goal, "repos": repos}]})
     return pid
 
 
@@ -145,15 +146,16 @@ def update_project(conn: sqlite3.Connection, project_id: str, changes: dict[str,
         row = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
         if row is None:
             raise StoreError(f"project {project_id} not found")
-        result = _apply_field_changes(conn, "projects", "project", dict(row), changes, actor=actor,
+        current = dict(row)
+        current['repos'] = sorted(r['repo'] for r in conn.execute(
+            'SELECT repo FROM project_repos WHERE project_id=?', (project_id,)))
+        changes = dict(changes)
+        desired = sorted((set(current['repos']) | set(repos_add)) - set(repos_remove))
+        if desired != current['repos']:
+            changes['repos'] = desired
+        result = _apply_field_changes(conn, "projects", "project", current, changes, actor=actor,
                                       origin=origin, cause_ref=cause_ref,
-                                      based_on_version=based_on_version,
-                                      override_human=override_human)
-        for repo in repos_add:
-            conn.execute("INSERT OR IGNORE INTO project_repos(project_id, repo) VALUES (?,?)",
-                         (project_id, repo))
-        for repo in repos_remove:
-            conn.execute("DELETE FROM project_repos WHERE project_id=? AND repo=?", (project_id, repo))
+                                      based_on_version=based_on_version, override_human=override_human)
     return result
 
 
@@ -262,6 +264,8 @@ def update_task(conn: sqlite3.Connection, task_id: str, changes: dict[str, Any],
                                        override_human=override_human)
         result2.rejected.update(result.rejected)
         applied = result2.applied
+        if 'project_id' in applied and origin != 'notion':
+            conn.execute('DELETE FROM meta WHERE key=?', ('notion.project_pending:' + task_id,))
         if "status" in applied:
             new_status = applied["status"]
             if new_status in CLOSED_STATUSES and current["status"] not in CLOSED_STATUSES:
@@ -331,12 +335,17 @@ def _apply_field_changes(conn: sqlite3.Connection, table: str, entity: str, curr
         meta[name] = {"by": actor, "v": new_version, "at": now}
         if actor != "human" and override_human and changes.get(name) is not None:
             meta[name]["overrode_human"] = True
-    assignments = ", ".join(f"{name}=?" for name in to_apply)
+    columns = {k: v for k, v in to_apply.items() if not (entity == 'project' and k == 'repos')}
+    assignments = ''.join(f"{name}=?, " for name in columns)
     conn.execute(
-        f"UPDATE {table} SET {assignments}, field_meta=?, version=?, updated_at=? WHERE id=? AND version=?",
-        (*to_apply.values(), dumps(meta), new_version, now, current["id"], current["version"]))
+        f"UPDATE {table} SET {assignments}field_meta=?, version=?, updated_at=? WHERE id=? AND version=?",
+        (*columns.values(), dumps(meta), new_version, now, current["id"], current["version"]))
     if conn.execute("SELECT changes()").fetchone()[0] != 1:
         raise StoreError(f"concurrent update of {entity} {current['id']}")
+    if entity == 'project' and 'repos' in to_apply:
+        conn.execute('DELETE FROM project_repos WHERE project_id=?', (current['id'],))
+        conn.executemany('INSERT INTO project_repos(project_id,repo) VALUES (?,?)',
+                         [(current['id'], repo) for repo in to_apply['repos']])
     add_history(conn, entity, current["id"], new_version, actor, origin, cause_ref,
                 {name: [current.get(name), value] for name, value in to_apply.items()})
     result.applied = to_apply

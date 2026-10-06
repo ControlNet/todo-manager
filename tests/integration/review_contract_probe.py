@@ -150,6 +150,60 @@ try:
     assert fixed['assignee'] == 'default' and fixed['card_id']
     assert len(kb.find(fixed['idem_key'], f'todo-manager-delegation: {other}')) == 1
     report['native_profile_validation_and_pending_recovery'] = True
+    # A still-open event remains answerable after a supplement; grants stay version-bound.
+    qtask = store.create_task(case.conn, 'Open question', origin='cli', actor='human')
+    qdid = dg.create(case.conn, case.cfg, task_id=qtask, title='Question', goal='Draft only')
+    dg.submit_pending(case.conn, case.cfg, kb, only=qdid)
+    qroot = dg.get(case.conn, qdid)['card_id']
+    with connect_closing(board=board) as conn:
+        claim = native.claim_task(conn, qroot, claimer='synthetic')
+        native.block_task(conn, qroot, reason='Choose format', kind='needs_input', expected_run_id=claim.current_run_id)
+    dg.sync_cards(case.conn, case.cfg, kb)
+    question = dg.deliveries(case.conn, qdid)[0]
+    dg.add_message(case.conn, qdid, 'supplement', 'Use the updated style guide')
+    dg.send_messages(case.conn, case.cfg, kb)
+    qctx = ops.context(case.conn, case.cfg, request='native-supplement-answer', said='Markdown')
+    ops.delegate_answer(case.conn, case.cfg, qctx, qdid, question=question['id'], body='Markdown')
+    dg.send_messages(case.conn, case.cfg, kb)
+    assert kb.snapshot(qroot)['task']['status'] == 'ready'
+    report['open_question_survives_supplement_on_native_card'] = True
+
+    # Terminal notification repair continues after restart without cursor rewriting/replay.
+    with connect_closing(board=board) as conn:
+        owned = native.create_task(conn, title='Owned active child', body='Synthetic', assignee='default',
+                                   creator_task_id=qroot, board=board)
+        unrelated = native.create_task(conn, title='Unrelated dependency', body='Synthetic', assignee='default', parents=[qroot], board=board)
+        native.complete_task(conn, qroot, summary='Root finished')
+    # Remove only synthetic subscriptions through the native API to exercise late registration.
+    from hermes_cli.kanban_db_notify import remove_notify_sub
+    with connect_closing(board=board) as conn:
+        remove_notify_sub(conn, task_id=qroot, platform='matrix', chat_id='synthetic-no-client')
+    original_notify = kb.notify
+    def fail_terminal_notify(card, *args, **kwargs):
+        if card == qroot:
+            raise KanbanError('Synthetic terminal registration failure')
+        return original_notify(card, *args, **kwargs)
+    with patch.object(kb, 'notify', fail_terminal_notify):
+        dg.sync_cards(case.conn, case.cfg, kb)
+    restart()
+    dg.sync_cards(case.conn, case.cfg, kb)
+    with connect_closing(board=board) as conn:
+        subs = list_notify_subs(conn, qroot)
+        assert len(subs) == 1
+        assert subs[0]['last_event_id'] == max(e.id for e in native.list_events(conn, qroot))
+    report['terminal_native_registration_recovers_without_historical_replay'] = True
+
+    store.update_task(case.conn, qtask, {'status': 'cancelled'}, actor='human', origin='cli')
+    with patch.object(kb, 'owned', side_effect=KanbanError('Synthetic cancellation discovery outage')):
+        dg.send_messages(case.conn, case.cfg, kb)
+    restart()
+    dg.send_messages(case.conn, case.cfg, kb)
+    assert kb.snapshot(qroot)['task']['status'] == 'archived'
+    assert kb.snapshot(owned)['task']['status'] == 'archived'
+    assert kb.snapshot(unrelated)['task']['status'] != 'archived'
+    assert dg.get(case.conn, qdid)['cancel_state'] == 'confirmed'
+    report['native_cancel_after_root_done_stops_only_owned_child_after_restart'] = True
+
 finally:
     case.tearDown()
 print('@@PROBE@@' + json.dumps(report))

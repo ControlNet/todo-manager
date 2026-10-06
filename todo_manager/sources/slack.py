@@ -290,8 +290,7 @@ class SlackSource(SlackApi):
             if reply.get("subtype") in SKIP_SUBTYPES:
                 continue
             if reply.get("ts") == thread_ts:
-                if context_before is not None:
-                    earlier.insert(0, reply)
+                earlier.insert(0, reply)
                 continue
             if context_before is not None and float(reply["ts"]) < context_before:
                 earlier.append(reply)

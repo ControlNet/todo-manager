@@ -46,6 +46,13 @@ def enqueue(conn: sqlite3.Connection, *, target: str, op: str, dedupe_key: str, 
     """
     now = clock.iso()
     with tx(conn):
+        next_attempt = now
+        if supersede_prefix:
+            delayed = conn.execute("SELECT MAX(next_attempt_at) FROM outbox WHERE target=? AND op=? "
+                                   "AND entity_id=? AND status IN ('failed','uncertain','in_flight')",
+                                   (target, op, entity_id)).fetchone()[0]
+            if delayed and delayed > next_attempt:
+                next_attempt = delayed
         if supersede_prefix:
             conn.execute(
                 "UPDATE outbox SET status='superseded', updated_at=? WHERE status IN ('pending','failed')"
@@ -55,7 +62,7 @@ def enqueue(conn: sqlite3.Connection, *, target: str, op: str, dedupe_key: str, 
         cur = conn.execute(
             "INSERT OR IGNORE INTO outbox(id, target, op, entity_type, entity_id, dedupe_key, payload, status,"
             " attempts, next_attempt_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,'pending',0,?,?,?)",
-            (oid, target, op, entity_type, entity_id, dedupe_key, dumps(payload), now, now, now))
+            (oid, target, op, entity_type, entity_id, dedupe_key, dumps(payload), next_attempt, now, now))
         return oid if cur.rowcount == 1 else None
 
 
@@ -67,7 +74,10 @@ def due(conn: sqlite3.Connection, target: str | None = None, limit: int = 50) ->
     if target:
         sql += " AND target=?"
         params.append(target)
-    sql += " ORDER BY created_at LIMIT ?"
+    sql += (" AND NOT EXISTS (SELECT 1 FROM outbox older WHERE older.target=outbox.target "
+            "AND older.op=outbox.op AND older.entity_id=outbox.entity_id AND older.rowid<outbox.rowid "
+            "AND outbox.op IN ('push_task','push_project') "
+            "AND older.status IN ('uncertain','in_flight')) ORDER BY created_at LIMIT ?")
     params.append(limit)
     rows = conn.execute(sql, params).fetchall()
     return [{**dict(r), "payload": loads(r["payload"], {})} for r in rows]

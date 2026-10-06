@@ -217,11 +217,11 @@ class GmailSource:
             if not page:
                 return threads, str(latest)
 
-    def _list_window(self, after: datetime) -> list[str]:
+    def _list_window(self, after: datetime | None) -> list[str]:
         threads: list[str] = []
         seen: set[str] = set()
         page = None
-        q = f"after:{int(after.timestamp())} {self.query}".strip()
+        q = f"after:{int(after.timestamp())} {self.query}".strip() if after else self.query
         while True:
             data = self._get("messages", {"q": q, "maxResults": self.page_size, "pageToken": page,
                                           "includeSpamTrash": "false"})
@@ -247,6 +247,11 @@ class GmailSource:
             if history_id:
                 try:
                     queue, target = self._list_history(history_id)
+                    # Gmail history has no query parameter. Let Gmail evaluate the query,
+                    # intersect changed threads, then hydrate their complete context.
+                    if queue and self.query:
+                        selected = set(self._list_window(None))
+                        queue = [tid for tid in queue if tid in selected]
                     meta["mode"] = "history"
                 except SourceError as exc:
                     if not exc.cursor_invalid:
