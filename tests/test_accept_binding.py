@@ -31,7 +31,7 @@ class AcceptNeedsADeliveryTests(BindingBase):
         did, card = self.running()
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = cli.main(["--home", str(self.cfg.home), "delegate", "message", did, "--kind", "accept",
+            code = cli.main(["--home", str(self.cfg.home), "delegate", "message", did, "--kind", "accept", "--human",
                              "--body", "可以"])
         self.assertNotEqual(code, 0)
         self.assertIn("INVALID", out.getvalue())

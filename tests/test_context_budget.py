@@ -72,7 +72,7 @@ class FeedbackBudgetTests(WorkspaceCase):
         out, woke, run_id = self.gate()
         self.assertTrue(woke, "never deferred")
         [fb] = feedback.claimed_by(self.conn, run_id)
-        self.assertIn(f"todo-manager feedback item {fb['id']}", out, "a pointer to the full text")
+        self.assertIn(f"todo-manager feedback show {fb['id']}", out, "a pointer to the full text")
         self.assertNotIn("x" * 5000, out)
         problems = health.report(self.conn, self.cfg)["problems"]
         self.assertTrue(any("over budget" in p and "feedback.max_context_chars" in p for p in problems), problems)

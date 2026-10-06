@@ -1,7 +1,7 @@
 ---
 name: todo-manager
 description: "The user's todos, tasks, projects, follow-ups and delegated agent work (Notion Todo Manager + Hermes Kanban), kept by the `todo-manager` command. Use it in the Todo Manager cron runs and whenever the user talks about their todos, reminders, delegated work, or how this automation should behave."
-version: 2.0.0
+version: 3.0.0
 author: todo-manager
 license: AGPL-3.0-only
 metadata:
@@ -22,22 +22,39 @@ Hermes loads this command reference through cron skills. Project AGENTS.md is ma
 
 ## Command reference
 
-- Read: `todo-manager paths`, `task list --search "..."`, `task show <task>`, `project list`, `delegate list`, `delegate show <id>`.
-- Mutate: `task create --title "..." --evidence <item>:origin`, `task update <id> --based-on <version> --set <field>=<value>`, `task link <id> --evidence <item>`.
-- Intake: `item dismiss <item> --outcome informational --reason "..."`, `item defer <item> --reason "..."`, `followup checked <task>`, `digest done`; append `--run <id>`.
-- Feedback: `feedback resolve <id> --outcome applied|clarify|ignored --reply "..."`; `feedback item <id>` reads full text.
-- Delegate: `delegate create --task <id> --title "..." --goal "..." --deliverable "..." --allow read,analyze,draft`; append `--feedback <id>` or direct request context. The default authorization permits no external action.
+- Read: `todo-manager status --details`, `task list --search "..."`, `task show <task>`, `project list`, `delegate list`, `delegate show <id>`.
+- Mutate: `task create --title "..." --evidence <item>:origin`, `task update <id> --based-on <version> --set <field>=<value>`, `task update <id> --evidence <item>`.
+- Intake: `source dismiss <item> --outcome informational --reason "..."`, `source defer <item> --reason "..."`, append `--run <id>`. Settle unchanged follow-ups/digest together with `run done <id> --checked <task> --digest-reviewed`.
+- Feedback: `feedback resolve <id> --outcome applied|clarify|ignored --reply "..."`; `feedback show <id>` reads full text.
+- Delegate: `delegate create --task <id> --brief "goal, background, constraints and delivery requirements" --allow read,analyze,draft`; append `--feedback <id>` or direct request context. The required --allow field must reflect explicit authority; read,analyze,draft permits no external action.
 - Message: `delegate message <id> --kind supplement|revision|pause|resume|cancel|accept --body "..."`.
 - Answer: `delegate answer <id> --body "..." [--question <delivery-id>]`; explicit one-use approval uses `--approve <action>[:<scope>]`. Version approval uses `delegate approve <id> --delivery <delivery> --action <action>`.
-- Full material: `source show <item>`, `feedback item <id>`. Keep evidence links and task versions; human edits win.
-- Finish: `run done <run>`. Diagnostics: `status`, `health`, `history <id>`, `run show <run>`.
+- Full material: `source show <item>`, `feedback show <id>`. Keep evidence links and task versions; human edits win.
+- Finish: `run done <run>`. Diagnostics: `status --details`, `task show <id> --history`, `project show <id> --history`, `run show <run>`.
 
 ## Chat requests
 
 - Look things up: `todo-manager task list [--search "..."]`, `todo-manager task show <task>`,
   `todo-manager project list`, `todo-manager delegate list`, `todo-manager status`.
-- Every change takes `--request <id> --said "<the user's words>"`. The id is the Matrix event id
+- The first change takes `--request <id> --said "<the user's words>"`; later changes for the same request reuse --request without --said. The id is the Matrix event id
   of the user's message, or one id you choose for this request (`req-` plus the date and a few
   letters). Retrying a command with the same id and arguments applies it once.
 - To hand something to the next feedback run instead:
   `todo-manager feedback record --request <id> --said "..." [--scope task:<task>]`.
+
+## Output, settlement and recovery
+
+Business operations return JSON, including list/show. Check applied/rejected fields; queued is
+not remotely delivered. Administrative commands support --json. Business writes require exactly
+one explicit provenance: --run, --feedback, --request, or --human for actual manual use.
+Do not use --human for an agent judgment. Read-only inspection does not initialize or upgrade.
+
+Settle a run once with all --checked task IDs and --digest-reviewed, when applicable.
+Unhandled material stays recoverable; completion does not assert total coverage.
+A later body clarification answer uses feedback resolve ANSWER_ID --outcome applied
+--settles BODY_EDIT_ID; wrong task/revision links are refused.
+
+Operations: install, status --details, config, pause, resume, sync, export, restore, uninstall.
+Pause/resume affect cron jobs only. Ordinary resume never releases recovery holds.
+Explicit resume --release-recovery-hold --yes requires the user to have checked the native
+board/uncertain effects; it releases that hold only, not cron or unrelated human blocks.

@@ -626,6 +626,26 @@ def connect(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+def open_existing(path: str | Path, *, readonly: bool = False) -> sqlite3.Connection:
+    """Never create or migrate a workspace at an inspection/business boundary."""
+    path = Path(path).resolve()
+    if not path.is_file():
+        raise RuntimeError("workspace is absent; run todo-manager install")
+    conn = sqlite3.connect(path.as_uri() + ("?mode=ro" if readonly else "?mode=rw"), uri=True,
+                           timeout=30, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        version = int(row[0]) if row else 0
+        if version != SCHEMA_VERSION:
+            raise RuntimeError(f"workspace schema {version}; run todo-manager install to upgrade (expected {SCHEMA_VERSION})")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+    except BaseException:
+        conn.close()
+        raise
+
+
 def schema_version(conn: sqlite3.Connection) -> int:
     conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()

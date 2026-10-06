@@ -92,8 +92,6 @@ def apply_op(conn: sqlite3.Connection, cfg: Config, ctx: ops.Ctx, op: dict[str, 
     if kind == "approve":
         return ops.delegate_approve(conn, cfg, ctx, op["delegation"], delivery=op["delivery"], action=op["action"],
                                     detail=op.get("detail"))
-    if kind == "regenerate_body":
-        return ops.task_rewrite_box(conn, cfg, ctx, op["task"])
     raise ValueError(f"no command for op {kind!r}")
 
 

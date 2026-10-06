@@ -7,7 +7,7 @@ cut on display says so and how to read the rest.
 * The context shows each item's own text up to ``wake.max_item_chars``; longer text, and
   background (task fields, page notes, deliveries, earlier feedback), is cut with a
   "[... N more characters: `<command>`]" mark naming the command that prints it in full
-  (``todo-manager feedback item <id>`` / ``todo-manager task show <id>``). Nothing is cut silently.
+  (``todo-manager feedback show <id>`` / ``todo-manager task show <id>``). Nothing is cut silently.
 * An item whose text may be incomplete (the Notion API cut the page body, or an older version
   stored it cut) is marked as such and can only be answered with ``clarify``.
 * An item larger than the context budget is clipped and handled; it never waits for room.
@@ -48,12 +48,12 @@ class Base(GateCase):
 
     def assert_clipped_with_pointer(self, context, fb, start):
         self.assertIn(start, context)
-        self.assertIn(f"more characters: `todo-manager feedback item {fb['id']}`", context)
+        self.assertIn(f"more characters: `todo-manager feedback show {fb['id']}`", context)
 
     def shown_in_full(self, fid):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(cli.main(["--home", str(self.cfg.home), "feedback", "item", fid]), 0)
+            self.assertEqual(cli.main(["--home", str(self.cfg.home), "feedback", "show", fid]), 0)
         return json.loads(out.getvalue())
 
 
@@ -121,13 +121,13 @@ class DisplayCutTests(Base):
         context = self.context(run_id, [fb])
         self.assertIn("more characters: `todo-manager task show", context, "the long summary is cut, with a pointer")
         self.assertIn(first["id"], context, "the earlier item is named, so it can be read in full")
-        self.assertIn(f"todo-manager feedback item {first['id']}", context)
+        self.assertIn(f"todo-manager feedback show {first['id']}", context)
         self.assertEqual(self.shown_in_full(first["id"])["text"], LONG)
 
     def test_an_unknown_item_is_not_found(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertNotEqual(cli.main(["--home", str(self.cfg.home), "feedback", "item", "fbk_nope"]), 0)
+            self.assertNotEqual(cli.main(["--home", str(self.cfg.home), "feedback", "show", "fbk_nope"]), 0)
 
 
 class IncompleteTextTests(Base):

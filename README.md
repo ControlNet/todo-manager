@@ -33,7 +33,7 @@ sync, the durable link between a task and its agent cards, and install/upgrade/e
 
 ```
  Gmail / Slack / GitHub ──▶ intake gate ──(mature conversations, in the context)──▶ Hermes ──┐
-                                                                                             │ todo-manager task/item/… commands
+                                                                                             │ todo-manager task/source/… commands
  Notion (home, Tasks, Projects) ◀──── push / import ────▶  SQLite (source of truth)  ◀───────┘
         comments, edits ──▶ feedback gate ──(needs judgement)──▶ Hermes ──▶ commands
                                      │
@@ -54,11 +54,10 @@ python3 -m unittest discover -s tests -t .      # expect OK
 ```
 
 `install` infers the rest from Hermes (language, time zone, mailboxes, Slack, GitHub, Notion
-and Kanban settings), asks only real choices (the home page, which mailboxes when there are
-several) and shows every change outside the workspace before making it. It is safe to re-run;
+and Kanban settings), asks real choices (the home page, source scopes, execution profile and whether new jobs start) and shows every change outside the workspace before making it. It is safe to re-run;
 see [docs/operations.md](docs/operations.md#install).
 
-Upgrade with `git pull` and `./bin/todo-manager install` (managed skill, prompts and AGENTS are
+For this breaking CLI release, drain old callers and install from a separate checkout using `./bin/todo-manager install` ([transition procedure](docs/cli.md#switching-from-the-old-cli)) (managed skill, prompts and AGENTS are
 backed up before replacement; all existing cron runtime settings are preserved); remove with `todo-manager uninstall`
 (all data stays). See [docs/operations.md](docs/operations.md#upgrade).
 
@@ -69,6 +68,7 @@ never commit `.env` / `.env.local` files.
 
 ## Documentation
 
+- [docs/cli.md](docs/cli.md) – command contracts, explicit provenance, settlement and release transition
 - [docs/hermes-native-verification.md](docs/hermes-native-verification.md) – source evidence, native tests, migration and boundaries
 - [docs/architecture.md](docs/architecture.md) – what Hermes does and what Todo Manager does,
   the two jobs, authority, ownership of files and settings

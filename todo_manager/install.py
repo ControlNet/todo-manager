@@ -1,27 +1,9 @@
-"""``todo-manager install``: the whole installation in one command, safe to re-run.
+"""Deterministic installation steps used by the single install flow.
 
-Steps, in order; each one detects what is already done and skips it:
-
-1. ``workspace`` - directories, database, config.toml: language and time zone from Hermes, else
-                   the system time zone; on a machine running on UTC you are asked.
-2. ``email``     - the Gmail accounts Hermes reads (himalaya accounts with a token command) and
-                   their addresses (Gmail profile). With several, you choose which are read.
-3. ``slack``     - Hermes' Slack user token (``credentials/slack_user_token``, or
-                   ``SLACK_USER_TOKEN`` in Hermes' .env); ``auth.test`` gives your user id.
-4. ``github``    - the ``gh`` login (``GET /user``).
-5. ``notion``    - Hermes' Notion token. The home page is always your choice, never guessed; the
-                   writes are shown first and need a yes. Your Notion user id: the only person in
-                   the workspace, else you choose.
-6. ``kanban``    - the global Hermes switches the board needs, and the board: shown, need a yes.
-7. ``hermes``    - skill, gate scripts, launcher and the two cron jobs (created paused): shown, yes.
-8. ``schedule``  - starting the cron jobs: yes.
-
-What is inferred or chosen is written into config.toml key by key (``config_file``). A key you
-set yourself is kept: a source whose ``enabled`` is in config.toml is left as configured, and
-identities are only added to. Reads of other systems are read-only; nothing is sent. Questions
-and confirmations go through a prompter: the terminal, or, non-interactively (e.g. from a Hermes
-chat), ``--answer key=value`` / ``--yes <step>`` / ``--no <step>``, where a missing one stops the
-run with what is needed (``NeedsAnswer`` / ``NeedsConfirmation``).
+``install_flow`` collects discovery choices in temporary local state and presents one
+combined confirmation. The steps here retain Notion setup recovery, source discovery,
+managed-file deployment and native cron preservation; they are not separate CLI stages.
+No global Hermes switches or native memory files are modified.
 """
 
 from __future__ import annotations
@@ -218,7 +200,11 @@ def init_workspace(home: str | os.PathLike[str] | None, language: str, timezone:
     # The conventions file is the user's: created from the template when missing, otherwise left
     # to the Hermes step (backup and managed replacement).
     prefs.ensure(cfg.home, language)
-    db.connect(cfg.db_path).close()
+    conn = db.connect(cfg.db_path)
+    try:
+        prefs.ensure_migrated(conn, cfg.home, language)
+    finally:
+        conn.close()
     return {"home": str(cfg.home), "config": str(target), "config_created": created, "db": str(cfg.db_path),
             "language": language}
 
@@ -532,6 +518,9 @@ class Install:
         read and explained, never changed (``delegation.SWITCH_NOTES``)."""
         from .kanban import KanbanError
         cfg = self.cfg()
+        if self.explicit("kanban").get("enabled") is False:
+            self.note("kanban", "disabled by user")
+            return
         board = cfg.get("kanban.board", "todo-manager")
         try:
             kb = self.env.kanban_client(cfg)

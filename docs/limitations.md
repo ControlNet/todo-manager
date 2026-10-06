@@ -89,7 +89,7 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
 - A Notion text longer than a run's display budget is explicitly clipped with a full-text
   retrieval pointer; the stored content is retained. This display clipping is distinct from
   an incomplete API read, which blocks business mutation. Background (task fields, deliveries,
-  earlier feedback) may also be shortened with a `…[+N chars]` mark; `todo-manager feedback item <id>` prints a stored item
+  earlier feedback) may also be shortened with a `…[+N chars]` mark; `todo-manager feedback show <id>` prints a stored item
   in full.
 - The Notion structure language is fixed at setup. Changing `language` later changes replies,
   reminders and new text, but property and option names stay as created (sync keeps working
@@ -114,14 +114,14 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
   reported by `health`. Nothing waits because it is long, and nothing is cut without a pointer.
 - Feedback context budget: a run claims the oldest feedback items whose rendered context fits
   `feedback.max_context_chars` (default 60000); the rest waits for the next run. An item that
-  cannot fit alone is clipped with a pointer (`todo-manager feedback item <id>`) and handled.
-- Items the model leaves for later (`todo-manager item defer`) come back at the date it gives,
+  cannot fit alone is clipped with a pointer (`todo-manager feedback show <id>`) and handled.
+- Items the model leaves for later (`todo-manager source defer`) come back at the date it gives,
   at the latest after 7 days, or earlier with the next activity of their conversation. A
   fetched item counts as processed only when a run recorded an outcome for it.
 - Health alerts are sent at most once per problem and day. A problem is identified by what is
   wrong (a source scope or channel, a kind of problem), so a changing error text does not
   re-alert, and a list-type problem (e.g. cancelled delegations not confirmed stopped) that gains
-  an entry the same day is not alerted again until the next day (`todo-manager health` shows it
+  an entry the same day is not alerted again until the next day (`todo-manager status --details` shows it
   at once). One failed pass of a channel is enough to alert; there is no grace count.
 - A managed box deleted from a page as a whole is not read as an instruction: it is put back at
   the top on the next push of that task; an earlier edit of the box still pending stays pending
@@ -263,3 +263,19 @@ read timeout/token helper is not a hard process deadline. Pagination, text-part 
 failed-request checkpoints retain the old history watermark until complete. Live Gmail search
 behaviour is not newly validated by this round; see the linked cost tests and official API
 references in the F01–F05 report.
+
+## CLI 0.2 transition and recovery boundaries
+
+- No permanent compatibility aliases. Old scheduled/chat sessions must finish against their
+  previous checkout before switching. The installer detects unsettled woken run records;
+  arbitrary Hermes main-chat sessions require operator coordination.
+- `--human` is explicit provenance, not an authentication or tool-isolation boundary.
+- The installer previews from a temporary workspace and applies after one confirmation.
+  Notion/Hermes writes are individually recoverable, not one atomic distributed transaction.
+- Restore excludes supported CLI/pre-run writers with a workspace lock. Old releases and
+  external direct Python/SQL writers do not follow that lock and must be stopped.
+- SQLite safety backups have narrower file coverage than exports. Neither includes native
+  USER/MEMORY/SOUL, full Kanban history or native notification/session state; inspect the manifest.
+  Framework snapshots are recovery evidence, never silently deployed by restore.
+- Follow-up/digest review and the meaning of a natural-language brief remain model judgments.
+  Code enforces claim ownership, settlement identity, explicit action scope and body revisions.

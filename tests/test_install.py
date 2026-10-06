@@ -498,7 +498,7 @@ class CliTests(InstallCase):
         with mock.patch.object(install, "Env", return_value=self.world.env()), \
                 mock.patch("sys.stdin.isatty", return_value=False), \
                 mock.patch("builtins.print", side_effect=lambda *a, **k: out.append(" ".join(map(str, a)))):
-            code = cli.main(["--home", str(self.home), "install", *argv])
+            code = cli.main(["--home", str(self.home), "install", "--json", *argv])
         return code, "\n".join(out)
 
     def test_without_a_terminal_a_question_stops_with_exit_3_and_json(self):
@@ -506,25 +506,30 @@ class CliTests(InstallCase):
         code, out = self.run_cli()
         self.assertEqual(code, cli.EXIT_NEEDS_INPUT)
         data = json.loads(out)
-        self.assertEqual((data["status"], data["key"]), ("needs_answer", "notion.home_page"))
-        self.assertIn(f"--home {self.home}", data["answer_with"])
-        self.assertTrue(any(d.startswith("slack:") for d in data["done"]))
-        code, out = self.run_cli("--answer", "notion.home_page=1")
+        self.assertEqual((data["status"], data["key"]), ("needs_answer", "email.scope"))
+        self.assertFalse(self.home.exists(), 'discovery must not populate the real target')
+        answers = ['--answer', 'email.scope=work', '--answer', 'slack.scope=direct_messages',
+                   '--answer', 'github.enabled=yes', '--answer', 'notion.home_page=1',
+                   '--answer', 'kanban.assignee=default', '--answer', 'automation.start=yes']
+        code, out = self.run_cli(*answers)
         data = json.loads(out)
-        self.assertEqual((code, data["status"], data["step"]), (3, "needs_confirmation", "notion"))
-        self.assertIn("--answer notion.home_page=1 --yes notion", data["confirm_with"])
-        code, out = self.run_cli("--answer", "notion.home_page=1", "--yes", "all")
-        self.assertEqual((code, json.loads(out)["status"]), (0, "complete"))
+        self.assertEqual((code, data['status'], data['step']), (3, 'needs_confirmation', 'install'))
+        self.assertEqual(self.world.notion_writes(), [])
+        self.assertFalse(self.home.exists())
+        self.assertTrue(data['changes'])
+        code, out = self.run_cli(*answers, '--yes')
+        self.assertEqual((code, json.loads(out)['status']), (0, 'complete'))
+        self.assertEqual(self.config()['slack']['channels'], False)
 
     def test_unknown_steps_are_refused(self):
-        code, out = self.run_cli("--yes", "everything")
-        self.assertEqual(code, cli.EXIT_INVALID)
-        self.assertIn("unknown step", out)
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli('--yes', 'everything')
+        self.assertEqual(caught.exception.code, cli.EXIT_INVALID)
         self.assertFalse(self.home.exists())
 
     def test_init_still_creates_only_the_workspace(self):
         with mock.patch("builtins.print"):
-            self.assertEqual(cli.main(["--home", str(self.home), "init", "--language", "zh-CN"]), 0)
+            install.init_workspace(self.home, "zh-CN")
         self.assertEqual(self.config()["language"], "zh-CN")
         self.assertEqual(self.world.calls, [], "init asks Hermes nothing")
 

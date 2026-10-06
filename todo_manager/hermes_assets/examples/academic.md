@@ -1,7 +1,7 @@
 # Example conventions: academic work
 
 An optional example, not installed. Ask Hermes explicitly to adapt selected bullets into
-this profile's native USER.md via its memory tool, within capacity and approval settings; `todo-manager prefs example academic` prints this file.
+this profile's native USER.md via its memory tool, within capacity and approval settings. This file is documentation, not a personal preference loader.
 
 ## What becomes a task
 

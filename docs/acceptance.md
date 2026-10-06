@@ -149,7 +149,7 @@ round.
 |---|---|---|---|---|
 | C01 revision after the worker submitted | a revision was routed by our last sync ("running" → steer only), and a delivery's requirement version counted every message *sent before the sync* | the revision checks the card: a version already in review is reopened; a delivery counts only messages whose own comment event precedes its result event (card body = position 0); comment posts record the event before and the comment's own event (bridge `comment` returns `{comment_id, event_id}`) | `RevisionOnTheCardTests`, `SupplementPlacementTests`; *hermes* `test_c01_a_revision_sent_after_the_worker_submitted_reopens_that_version`, `test_c01_a_revision_steered_into_the_running_worker_counts_for_its_result` | c55555d |
 | C02 same-minute body edit applied an old interpretation | apply compared edit time and last read by minute; body re-read used a separate one-minute slack | one predicate `notion.body.edit_unread` for re-read, claim and apply; no precision assumed (whole-minute stamp covered only by a read after that minute; a stamp with seconds is precise to the second); body_edit/page_notes items stay unclaimed while the body is unread | `CoarseTimestampTests`, `PreciseTimestampTests`, `PredicateTests` | f434c50 |
-| C03 long Notion text cut silently | notes cut to 3000/1500 chars, a new page's body to 4000, the notes baseline to 50000; the model saw a cut text as whole and a cut baseline invented "added" lines | stored in full (`payload.complete`); context shows each item's own text in full, background cut with `…[+N chars]`, earlier items named by id for `todo-manager feedback item <id>`; text the API cut (or an older version stored cut) is marked INCOMPLETE and only takes `clarify`; an item over budget is deferred, not cut | `StoredInFullTests`, `DisplayCutTests`, `IncompleteTextTests` | a609421 |
+| C03 long Notion text cut silently | notes cut to 3000/1500 chars, a new page's body to 4000, the notes baseline to 50000; the model saw a cut text as whole and a cut baseline invented "added" lines | stored in full (`payload.complete`); context shows each item's own text in full, background cut with `…[+N chars]`, earlier items named by id for `todo-manager feedback show <id>`; text the API cut (or an older version stored cut) is marked INCOMPLETE and only takes `clarify`; an oversized item is clipped with a full-text pointer; API-incomplete input remains protected | `StoredInFullTests`, `DisplayCutTests`, `IncompleteTextTests` | a609421 |
 | C04 accept without a delivered version | `add_message` accepted it; legacy rows (`target_seq` NULL) resolved "latest" at send time | an accept needs a delivered version in review (CLI, Matrix and scheduled feedback share the check); legacy accepts bind to the latest version received strictly before they were queued; a tie or `target_seq` 0 is unused (`nothing_to_accept`) | `AcceptNeedsADeliveryTests` | c55555d |
 | C05 two active delegations for one Task | the rule was only checked in decision validation against the database, so ops in one batch, the CLI and concurrent writers each created one | checked in `delegation.create` inside the insert transaction (after the `op_key` lookup) unless `parallel`; validation counts delegations planned earlier in the batch; CLI `delegate create --parallel` | `SharedCreatePathTests` (incl. an interleaved writer), `SameGateRunTests` | 95b55c5 |
 | C06 retried accept turned into "failed" | the retry checked the delegation status, which a sync in between had set to done | a retried accept checks its bound review event on the card first (`already` → sent) | `AcceptRetryTests` | c55555d |
@@ -295,7 +295,7 @@ the installed Hermes code in a temporary `HERMES_HOME`.
    whether to keep it (`health` explains it).
 5. **Production switch to this version**: not done in this round (no change to the real Notion,
    the production workspace, the existing cron jobs or Hermes' global configuration). Steps:
-   pause the owned jobs, back up/export, update the checkout, run `todo-manager health`,
+   pause the owned jobs, back up/export, update the checkout, run `todo-manager status --details`,
    then `todo-manager install` (review the plan) and resume only when ready. Schema remains v10;
    native memory is not migrated by this reliability patch
    (see operations.md, "Upgrading an existing workspace").
@@ -311,3 +311,24 @@ coverage, schema-10 migration and separate Fake/native test evidence are recorde
 [the reliability acceptance record](reliability-review-2026-10-06.md). Earlier acceptance records
 above remain historical; they do not override the current prompt ownership or native execution
 boundaries.
+
+## CLI redesign acceptance (0.2)
+
+See [the command contract](cli.md) and `tests/test_cli_redesign.py`. Synthetic tests exercise:
+
+- exactly 15 public commands; missing/old workspace reads preserve files/schema;
+- explicit write provenance, one request text record, stable retry and no later duplicate queue;
+- JSON business lists/history and delegation brief files with explicit authority/parallel work;
+- evidence-only updates without a fabricated content version;
+- atomic run confirmation ownership/date checks, explicit digest review, unchanged retry sets;
+- linked clarification, wrong/newer-body refusal and unrelated-answer protection;
+- complete discovery before confirmation, no remote writes on unanswered installation, preserved
+  user cron workdir/delivery/pause, and refusal to switch under unsettled old runs;
+- validated bundle replacement, SQLite safety backup, unconfirmed recovered run coverage,
+  writer exclusion, and independent cron/recovery-hold controls;
+- fixed pre-run idle stdout and nonzero failure.
+
+Existing reliability tests remain; deleted CLI names in fixtures were migrated to supported
+boundaries (internal install initialization/safety backup or the new CLI). The full-text tests
+now assert `feedback show` pointers, not removed aliases. Historical machine op-log command
+identities remain unchanged so upgrades do not turn old retries into fresh effects.

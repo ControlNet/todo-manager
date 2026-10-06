@@ -25,7 +25,7 @@ If the Script Output is a Script Error, or the context only reports problems, ma
   money, a role given to them): create the task with status `decision` and the one question in
   `next_step`. Unsure and low-stakes: dismiss it with the reason, or defer it.
 - Text the user reads (titles, next steps, replies) is in the user's language
-  (`todo-manager paths` names it), short and concrete. Keep names, code, paper and repository
+  (`todo-manager status --details` names it), short and concrete. Keep names, code, paper and repository
   titles as written.
 
 
@@ -39,19 +39,19 @@ every NEW item one outcome:
   `todo-manager task create --run <run> --title "..." --set responsibility="..." [--set next_step="..." --set due_date=YYYY-MM-DD ...] --evidence <item>:origin [--evidence <item>]`
 - About an existing task:
   `todo-manager task update <task> --run <run> --based-on <version> --set <field>=<value> --evidence <item>`,
-  or only `todo-manager task link <task> --run <run> --evidence <item>`.
-- No task: `todo-manager item dismiss <item>... --run <run> --outcome <outcome> --reason "..."`.
+  or only `todo-manager task update <task> --run <run> --evidence <item>`.
+- No task: `todo-manager source dismiss <item>... --run <run> --outcome <outcome> --reason "..."`.
   Outcomes: `no_action`, `informational`, `automated`, `not_mine`, `duplicate`, `spam`,
   `handled_elsewhere`; add `--label <name>` when a convention names one.
 - Needs information that is not there yet:
-  `todo-manager item defer <item>... --run <run> --reason "..." [--until YYYY-MM-DD]`.
+  `todo-manager source defer <item>... --run <run> --reason "..." [--until YYYY-MM-DD]`.
 - Due follow-up: update the task (new `follow_up_date`, `next_step` or status), or
-  `todo-manager followup checked <task> --run <run>` when nothing changes today.
+  collect its ID for the final `run done <run> --checked <task>...` when nothing changes today.
 - Commit digest: per project `todo-manager project update <project> --run <run> --set recent_activity="..."`,
-  then `todo-manager digest done --run <run>`. Never one task per commit.
+  then add `--digest-reviewed` to the final settlement. Never one task per commit.
 - Projects: prefer an existing one (`todo-manager project list`); create one only for a
   sustained stream of work the user owns.
 - A clipped item says how to read the rest (`todo-manager source show <item>`); read it when the
   visible part does not settle the decision.
-- Finish with `todo-manager run done <run>` and one short line on what changed. Items without an
+- Finish once with `todo-manager run done <run> [--checked <task>...] [--digest-reviewed]`, including all confirmations together, and one short line on what changed. Items without an
   outcome are offered again in a later run.

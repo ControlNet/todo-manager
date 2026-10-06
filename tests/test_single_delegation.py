@@ -62,7 +62,7 @@ class SharedCreatePathTests(Base):
 
     def test_cli_create_refuses_a_second_and_takes_parallel(self):
         args = ["--home", str(self.cfg.home), "delegate", "create", "--task", self.task, "--title", "起草",
-                "--goal", "Draft a reply"]
+                "--allow", "read,analyze,draft", "--human", "--brief", "Draft a reply"]
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(args), 0)
         out = io.StringIO()

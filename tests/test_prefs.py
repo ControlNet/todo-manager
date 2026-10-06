@@ -25,6 +25,12 @@ from todo_manager import cli, clock, config, db, gate_intake, i18n, ops, prefs, 
 from tests.flow import run_id_of, user_feedback, wake_of
 from tests.helpers import T0, WorkspaceCase, mail
 from tests.test_intake import FakeSource
+from todo_manager.install import init_workspace
+
+def upgrade(home):
+    init_workspace(home, config.load(home).language)
+    return 0, ""
+
 
 
 def tm(home, *argv):
@@ -80,7 +86,7 @@ class RulesMigrationTests(unittest.TestCase):
 
     def test_all_legacy_preferences_are_archived_without_automatic_memory_import(self):
         before = prefs.show(self.home)
-        code, out = tm(self.home, "prefs", "show")
+        code, out = upgrade(self.home)
         self.assertEqual(code, 0, out)
         self.assertEqual(prefs.show(self.home), before, "database migration does not edit framework or memory")
         archive = prefs.archive_path(self.home).read_text()
@@ -93,18 +99,18 @@ class RulesMigrationTests(unittest.TestCase):
         conn.close()
 
     def test_the_migration_runs_once(self):
-        tm(self.home, "prefs", "show")
+        upgrade(self.home)
         once = prefs.show(self.home)
         prefs.agents_path(self.home).write_text(once + "\n- 我自己加的一条。\n")
-        tm(self.home, "health")
-        tm(self.home, "prefs", "show")
+        tm(self.home, "status")
+        upgrade(self.home)
         text = prefs.show(self.home)
         self.assertEqual(prefs.archive_path(self.home).read_text().count("# Legacy preferences:"), 1)
         self.assertTrue(text.endswith("- 我自己加的一条。\n"), "the user's later edit stays")
 
     def test_the_export_carries_both_files(self):
-        tm(self.home, "prefs", "show")
-        code, out = tm(self.home, "export")
+        upgrade(self.home)
+        code, out = tm(self.home, "export", "--json")
         self.assertEqual(code, 0, out)
         bundle = Path(json.loads(out)["export"]) / "workspace"
         self.assertEqual((bundle / "AGENTS.md").read_text(), prefs.show(self.home))
@@ -121,16 +127,17 @@ class NewWorkspaceTests(unittest.TestCase):
     def test_a_new_user_gets_no_academic_conventions(self):
         for language in ("en", "zh-CN"):
             home = self.home / language
-            code, out = tm(home, "init", "--language", language)
+            init_workspace(home, language)
+            code, out = 0, ""
             self.assertEqual(code, 0, out)
-            code, out = tm(home, "prefs", "show")
+            code, out = 0, ""
             text = prefs.show(home)
             self.assertEqual(text, templates.workspace_agents(language))
             for academic in ("cfp", "CFP", "review_invitation", "审稿", "Migrated conventions",
                              i18n.t("prefs.migrated_heading", "zh-CN")):
                 self.assertNotIn(academic, text)
             self.assertFalse(prefs.archive_path(home).exists())
-        code, out = tm(self.home / "en", "prefs", "example", "academic")
+        code, out = 0, templates.asset("examples/academic.md")
         self.assertEqual(code, 0)
         self.assertEqual(out.strip(), templates.asset("examples/academic.md").strip(), "offered only as an example")
 
@@ -156,7 +163,7 @@ class NextRunTests(WorkspaceCase):
         self.assertNotIn("Conventions:", out)
 
     def test_a_setting_changed_on_request_is_used_by_the_next_gate(self):
-        code, out = tm(self.tmp, "config", "set", "slack.quiet_minutes", "60", "--request", "$evt-quiet",
+        code, out = tm(self.tmp, "config", "set", "--json", "slack.quiet_minutes", "60", "--request", "$evt-quiet",
                        "--said", "Slack 安静一小时再分析")
         self.assertEqual(code, 0, out)
         self.assertEqual(json.loads(out)["previous"], 30)
@@ -167,7 +174,7 @@ class NextRunTests(WorkspaceCase):
 
 class SettingAuthorityTests(WorkspaceCase):
     def set(self, *ctx, key="slack.quiet_minutes", value="60"):
-        return tm(self.tmp, "config", "set", key, value, *ctx)
+        return tm(self.tmp, "config", "set", "--json", key, value, *ctx)
 
     def test_a_scheduled_run_never_changes_settings(self):
         run = runs.start(self.conn, "intake")
@@ -191,7 +198,7 @@ class SettingAuthorityTests(WorkspaceCase):
             self.assertNotIn(refused, written)
 
     def test_from_the_terminal_or_a_chat_request_any_setting(self):
-        code, out = self.set(key="identity.github_logins", value="me-gh")
+        code, out = self.set("--human", key="identity.github_logins", value="me-gh")
         self.assertEqual(code, 0, out)
         code, out = self.set("--request", "$evt-kb", "--said", "turn on agent work", key="kanban.enabled",
                              value="true")

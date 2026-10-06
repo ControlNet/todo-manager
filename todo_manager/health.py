@@ -189,13 +189,13 @@ def problem_items(rep: dict[str, Any], cfg: Config) -> list[tuple[str, str]]:
         add("feedback_held", "feedback held, not handled until resolved: " + "; ".join(
             f"{h['id']} ({h['reason']})" for h in rep["feedback_held"][:5]))
     if rep["feedback"].get("failed"):
-        add("feedback_failed", f"{rep['feedback']['failed']} feedback items failed")
+        add("feedback_failed", f"{rep['feedback']['failed']} feedback shows failed")
     if rep["delegations"].get("quarantined"):
         add("delegations_quarantined", f"{rep['delegations']['quarantined']} delegations quarantined")
     if rep.get("delegations_held"):
         hold = rep["delegations_held"]
         add("delegations_held", f"delegations held since {hold.get('reason')} at {hold.get('at')}: check the Kanban"
-            " board, then `todo-manager delegate release-hold`")
+            " board, then `todo-manager resume --release-recovery-hold --yes`")
     attention = rep.get("delegation_attention") or {}
     if attention.get("cancel_unconfirmed"):
         add("cancel_unconfirmed", f"cancelled delegations whose worker was not confirmed stopped: "

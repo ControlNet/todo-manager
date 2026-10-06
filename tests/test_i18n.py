@@ -160,13 +160,14 @@ class InitLanguageTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="tm-init-"))
         self.addCleanup(lambda: i18n.set_language(i18n.DEFAULT))
         with mock.patch("sys.stdout"):
-            self.assertEqual(cli.main(["--home", str(tmp), "init", "--language", "zh_CN"]), 0)
+            from todo_manager.install import init_workspace
+            init_workspace(tmp, "zh-CN")
         self.assertIn('language = "zh-CN"', (tmp / "config.toml").read_text(encoding="utf-8"))
         self.assertEqual(config.load(tmp).language, "zh-CN")
         self.assertIn("todo-manager", (tmp / "AGENTS.md").read_text(encoding="utf-8"))
         (tmp / "AGENTS.md").write_text("local edits", encoding="utf-8")
         with mock.patch("sys.stdout"):
-            cli.main(["--home", str(tmp), "init"])
+            init_workspace(tmp, "en")
         self.assertEqual((tmp / "AGENTS.md").read_text(encoding="utf-8"), "local edits", "never overwritten")
 
 

@@ -1,0 +1,154 @@
+# CLI contract (0.2)
+
+Notion is the primary task interface; Hermes chat interprets requests. The CLI exposes business
+operations and installation/recovery without introducing another runtime or scheduler.
+
+## Surface and output
+
+```text
+install
+status [--details] [--days N]
+config show|get|set
+pause
+resume [--release-recovery-hold --yes]
+sync
+export [--verify]
+restore FILE_OR_BUNDLE [--yes]
+uninstall [--dry-run] [--yes]
+task list|show|create|update
+project list|show|create|update
+source show|dismiss|defer
+feedback list|show|record|resolve
+delegate list|show|create|message|answer|approve
+run show|done
+```
+
+Business responses are JSON, including list/show. `run show --context` deliberately returns the
+original context text. Administration defaults to concise summaries and accepts `--json`.
+Use `config show --json`, `config get KEY --json`, or `config set KEY VALUE --json` for automation.
+A queued Notion push, reply or card request is not a remote confirmation or channel receipt.
+Inspect `applied` and `rejected` for partial updates; do not infer success from exit 0 alone.
+
+Exit codes: 0 for a completed command; 1 for a synchronization/health/integrity problem; 2 for
+invalid syntax, refused operations, unavailable/incompatible workspace or unconfirmed recovery;
+3 when installation needs an answer or confirmation. Domain errors use JSON `error` and
+`details`. Argparse syntax errors use stderr and exit 2. Installation questions always use
+structured JSON outside a terminal. Inspection never initializes or migrates a workspace;
+`WORKSPACE` names `install` as the supported preparation/upgrade boundary.
+
+## Explicit provenance and direct chat
+
+Business writes require exactly one of `--run`, `--feedback`, `--request`, `--human`.
+The manual marker is an audit assertion, not an operating-system security boundary.
+`feedback resolve` and `run done` already name the feedback/run being settled.
+
+```bash
+todo-manager task create --title 'Draft expense report' --request chat-2026-10-06-a --said 'Draft the expense report, do not submit it.'
+todo-manager task list --search expense
+```
+
+Use the returned Task ID for later operations. The first use of a request ID records its words;
+subsequent operations reuse `--request` without repeating `--said`. A new ID requires words,
+and different words under an existing ID produce `REQUEST_ID_REUSED`. Identical wording in
+separate genuine requests uses separate IDs. A successfully committed identical retry returns
+`duplicate: true`; context invalidation cannot undo that already committed result.
+
+`feedback record` deliberately defers interpretation to a later feedback run. A recorded request
+handled directly is superseded, and recording an already handled direct request does not enqueue
+it again. Agents must not use `--human` to evade the applicable run/feedback provenance.
+
+Manual operations explicitly say so:
+
+```bash
+todo-manager config set slack.quiet_minutes 60 --human
+todo-manager task create --title 'Review draft' --human
+```
+
+Native cron settings remain in Hermes. Bootstrap `hermes.model`, `hermes.provider` and `hermes.reasoning_effort` values in
+configuration do not retune existing jobs; attempts to use those settings after installation
+return `NATIVE_SETTING`. Use the real owned job ID with `hermes cron edit`.
+
+## Incremental judgments and final settlement
+
+Task/project updates remain per logical item. Evidence-only `task update --evidence` links and
+handles material, records the decision, and queues the projection without inventing a field
+edit or Task content version. Source dismissal and deferral retain their distinct outcomes.
+
+At the end of a run issue **one** settlement containing all applicable explicit confirmations:
+
+```text
+todo-manager run done RUN_ID --checked TASK_ID_1 TASK_ID_2 --digest-reviewed
+```
+
+These metavariables are returned business IDs, not files to create. Omit `--checked` when there
+are no unchanged follow-ups; a mutation that settled a follow-up needs no additional check.
+Omit `--digest-reviewed` unless that run's digest was actually reviewed. Confirmation ownership
+and current follow-up dates are validated transactionally. Any invalid confirmation rolls back
+all settlement changes. Retrying the same set is idempotent; a different set after completion
+returns `SETTLEMENT_CHANGED`. Unhandled items keep their existing retry/exhaustion behavior.
+A crash before settlement never rolls back previously committed business changes.
+
+## Body clarification and delegation
+
+Resolve a later answer with `feedback resolve ANSWER_ID --outcome applied --settles BODY_EDIT_ID`.
+The original must be a clarified body edit of the same Task, and its revision must still be
+current and fully read. A stale link returns `STALE_BODY`; an unrelated link returns
+`INVALID_LINK`. Resolving an unrelated comment never releases body protection. Ordinary body
+feedback still releases its own managed region when applied/ignored; incomplete feedback only
+allows clarification before any business mutation.
+
+Delegation creation uses a Task, `--brief TEXT` or `--brief-file PATH`, explicit `--allow`, and
+source context. The brief carries goal, background, constraints and delivery requirements.
+The title defaults to the Task title. Associations, action authorization, question/delivery
+versions and the machine protocol remain structured; workers do not inherit feedback chat.
+`--parallel` retains the explicit independent-work exception; `--no-submit` queues locally.
+Message/answer/approve remain separate operations. Existing root/child question binding,
+unknown-action recovery and cancellation ownership rules are unchanged.
+
+## Restore and controls
+
+`pause` and ordinary `resume` affect the two owned cron jobs only. They do not stop or resume
+workers, release human blocks, or release a post-restore hold. `sync` performs deterministic
+Notion/Kanban/outbox synchronization without claiming semantic feedback or waking a model.
+
+`export` is the user-facing save operation. `restore` accepts an export directory or an existing
+SQLite safety backup. A bundle is checked and rebuilt before replacing data. Existing targets
+need a preview and `--yes`; a safety backup precedes replacement. Supported CLI writers and
+fixed pre-run entry points share a workspace lock; restore holds it exclusively. Raw Python/SQL
+writers and old releases are outside that locking contract and must be stopped before recovery.
+
+The safety backup includes the database, config, AGENTS and legacy rule archive. Export also
+includes source text, run/delivery artifacts, actual cron configuration and framework archives.
+An existing-target bundle restore overlays included artifacts and replaces the database; unrelated
+files are retained. SQLite recovery has narrower file coverage. No restore applies cron configs,
+imports an installation's ownership into another machine, or overwrites native profile memory.
+Framework snapshots in an export are inspection/manual recovery evidence, not automatically deployed.
+
+After comparing native cards and uncertain effects, `resume --release-recovery-hold --yes`
+releases only the Todo recovery hold; cron state remains unchanged. Use ordinary `resume`
+separately if needed. Unknown external actions remain non-replayable. File restoration and SQL
+replacement are not one filesystem-wide transaction: on interruption use the reported safety
+backup and inspect the result before releasing holds.
+
+## Switching from the old CLI
+
+There are no permanent aliases for removed commands. Keep the previous release checkout and
+its installed launcher available while draining old cron/chat sessions. Do not update the code
+under an active old launcher in place. Build/test this release in a separate checkout, pause the
+owned cron jobs with the old CLI, finish or settle old runs there, and finish old chat requests.
+The new installer refuses a workspace with woken, unsettled runs; it cannot detect arbitrary
+chat sessions, so those must be drained explicitly. Then invoke the new checkout's `install`,
+review the combined preview, apply it, and start fresh Hermes sessions for the new skill/prompt.
+The installer updates owned scripts/skill/prompts together, preserves cron runtime settings and
+paused/running state, and records framework backups. Installation is re-runnable, not a remote
+transaction: an interrupted apply may require the same command again.
+
+Old-system Notion migration remains available as a one-off module:
+
+```bash
+python3 -B -m todo_manager.migrate_legacy --help
+```
+
+It retains fetch/propose/apply and the reviewed proposal workflow. It is not hidden under another
+core CLI namespace. Old rule archival and schema upgrades remain installation responsibilities;
+personal preferences still use native Hermes memory.

@@ -92,7 +92,7 @@ class CancellationTests(Base):
         did, card = self.running()
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(cli.main(["--home", str(self.tmp), "task", "update", self.task,
+            self.assertEqual(cli.main(["--home", str(self.tmp), "task", "update", self.task, "--human",
                                        "--set", "status=cancelled"]), 0)
         self.tick()
         self.assertEqual(self.kb.cards[card]["status"], "archived")

@@ -61,8 +61,8 @@ class InstallCase(unittest.TestCase):
         self.home = self.tmp / "workspace"
         self.hermes_home = self.tmp / "hermes"
         clock.set_now(T0)
-        code, _ = run("--home", str(self.home), "init", "--language", "zh-CN")
-        self.assertEqual(code, 0)
+        from todo_manager.install import init_workspace
+        init_workspace(self.home, "zh-CN")
         (self.home / "config.toml").write_text(
             f'language = "zh-CN"\ntimezone = "Pacific/Auckland"\n[hermes]\nhome = "{self.hermes_home}"\n'
             f'launcher = "{self.tmp / "bin" / "todo-manager"}"\n')
@@ -114,7 +114,7 @@ class FreshInstallTests(InstallCase):
             job = self.job(entry)
             self.assertEqual((job["state"], job["workdir"]), ("paused", str(self.home)))
             self.assertEqual(job["prompt"], templates.cron_prompt(entry))
-            self.assertIn(f'main(["gate", {entry!r}])', self.paths.script(entry).read_text())
+            self.assertIn(f'from todo_manager.prerun import {entry}', self.paths.script(entry).read_text())
         self.assertTrue(self.paths.launcher.stat().st_mode & 0o100)
         self.assertEqual(self.skill(), hermes_install.asset("skill/SKILL.md"))
         manifest = json.loads(self.paths.manifest.read_text())
@@ -315,7 +315,7 @@ class UninstallTests(InstallCase):
         self.assertTrue(self.cfg.db_path.exists())
         for name in ("config.toml", "AGENTS.md"):
             self.assertTrue((self.home / name).exists())
-        code, out = run("--home", str(self.home), "export")
+        code, out = run("--home", str(self.home), "export", "--json")
         self.assertEqual(code, 0, out)
         bundle = Path(json.loads(out)["export"])
         self.assertTrue((bundle / "tasks" / f"{self.task}.md").exists())

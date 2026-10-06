@@ -17,7 +17,7 @@ def notion_sync(conn: sqlite3.Connection, cfg: Config) -> Any | None:
         raise RuntimeError(f"Notion token env {cfg.get('notion.token_env')} is not set")
     state = load_state(conn, cfg)
     if not state.ready:
-        raise RuntimeError("Notion is enabled but not set up (run `todo-manager notion setup`)")
+        raise RuntimeError("Notion is enabled but not set up (run `todo-manager install`)")
     return NotionSync(conn, cfg, NotionClient.from_config(cfg), state)
 
 

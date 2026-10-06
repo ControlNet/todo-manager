@@ -2,13 +2,13 @@
 
 The gates print the context of a Hermes cron run (or ``{"wakeAgent": false}``) and nothing
 else; a gate that fails exits 1 so that Hermes reports a failed script. Every other command
-prints JSON (or plain lines for lists); a rejected call exits with status 2 and a JSON body
+prints structured business JSON or administrative summaries (--json for automation); a rejected call exits with status 2 and a JSON body
 ``{"error": CODE, "details": [...]}`` the agent can act on. Runtime data lives in TODO_HOME
 (default ``~/.hermes/workspace/todo-manager``), never in the source tree.
 
 Commands that change Todo data take the context they act in (see ``ops``): ``--run`` (a cron
 run), ``--feedback`` (the user's Notion feedback item), ``--request ID --said TEXT`` (the user's
-chat request) or none (the user at the terminal).
+chat request) or --human (explicit manual invocation).
 """
 
 from __future__ import annotations
@@ -16,11 +16,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import sqlite3
 from pathlib import Path
 from typing import Any
 
 from . import clock, config, db, delegation, feedback, health, i18n, ops, prefs, store
 from .db import dumps, loads
+from .locks import LockBusy
 
 EXIT_INVALID = 2
 EXIT_NEEDS_INPUT = 3   # `install` stopped at a question or a confirmation (see its JSON)
@@ -38,11 +40,40 @@ def _fail(code: str, details: list[str] | str) -> int:
     return EXIT_INVALID
 
 
+def _inspection(args: argparse.Namespace) -> bool:
+    return (getattr(args, 'command', '') == 'status' or
+            getattr(args, 'action', '') in ('list', 'show', 'get'))
+
+
+def _admin_print(args: argparse.Namespace, data: dict[str, Any]) -> None:
+    if getattr(args, 'json', False):
+        _print(data)
+    else:
+        for key, value in data.items():
+            print(f"{key}: {json.dumps(value, ensure_ascii=False, default=str)}")
+
+
+def cmd_control(args: argparse.Namespace) -> int:
+    from . import hermes_install
+    cfg = config.load(args.home)
+    if getattr(args, 'release_recovery_hold', False):
+        if not args.yes:
+            return _fail('CONFIRM', 'inspect the board and uncertain actions, then use resume --release-recovery-hold --yes')
+        cfg, conn = _open(args)
+        _admin_print(args, {'released': delegation.release_hold(conn), 'cron': 'unchanged'})
+        return 0
+    inst = hermes_install.Installer(cfg, hermes_install.Paths.from_config(cfg))
+    _admin_print(args, {'cron': inst.set_jobs_state(args.command), 'workers': 'unchanged', 'recovery_hold': 'unchanged'})
+    return 0
+
+
 def _open(args: argparse.Namespace) -> tuple[config.Config, Any]:
     cfg = config.load(args.home)
-    conn = db.connect(cfg.db_path)
+    try:
+        conn = db.open_existing(cfg.db_path, readonly=_inspection(args))
+    except RuntimeError as exc:
+        raise ops.OpError("WORKSPACE", str(exc)) from exc
     _CONNECTIONS.append(conn)
-    prefs.ensure_migrated(conn, cfg.home, cfg.language)
     return cfg, conn
 
 
@@ -68,18 +99,19 @@ def _task_line(t: dict[str, Any]) -> str:
 
 
 def _add_ctx(parser: argparse.ArgumentParser) -> None:
-    g = parser.add_argument_group("context (who asks for this change)")
+    g = parser.add_mutually_exclusive_group()
+    g.add_argument("--human", action="store_true", help="explicit manual human invocation (provenance, not access control)")
     g.add_argument("--run", help="the cron run this is part of")
     g.add_argument("--feedback", dest="feedback_id", help="the user's feedback item this carries out")
     g.add_argument("--request", help="id of the user's chat request (Matrix event id, or one id per request)")
-    g.add_argument("--said", help="with --request: the user's words")
-    g.add_argument("--scope", help="with --request: task:<id> | project:<id> | global")
-    g.add_argument("--key", help="explicit identity of this command (a retry with the same key applies once)")
+    parser.add_argument("--said", help="with --request: the user's words")
+    parser.add_argument("--scope", help="with --request: task:<id> | project:<id> | global")
+    parser.add_argument("--key", help="explicit identity of this command (a retry with the same key applies once)")
 
 
 def _ctx(conn: Any, cfg: config.Config, args: argparse.Namespace) -> ops.Ctx:
     return ops.context(conn, cfg, run=args.run, feedback_id=args.feedback_id, request=args.request, said=args.said,
-                       scope=args.scope, key=args.key)
+                       scope=args.scope, key=args.key, human=args.human)
 
 
 def _run(fn: Any) -> int:
@@ -95,32 +127,6 @@ def _run(fn: Any) -> int:
 
 
 # --------------------------------------------------------------------------- gates
-
-def cmd_gate(args: argparse.Namespace) -> int:
-    """Prints only the gate output (Hermes reads its last line). A failure exits 1 with one line
-    on stderr: Hermes then shows the run a Script Error, which the prompt reports as a failure."""
-    from .locks import LockBusy, file_lock, lock_path
-    try:
-        cfg, conn = _open(args)
-        with file_lock(lock_path(cfg.home, args.entry)):
-            out = _run_gate(args.entry, conn, cfg)
-    except LockBusy:
-        out = '{"wakeAgent": false}'   # the previous run of this gate is still going
-    except Exception as exc:  # noqa: BLE001 - reported to Hermes, never a fake idle
-        print(f"todo-manager gate {args.entry} failed: {type(exc).__name__}: {str(exc)[:500]}", file=sys.stderr)
-        return 1
-    print(out)
-    return 0
-
-
-def _run_gate(entry: str, conn: Any, cfg: config.Config) -> str:
-    from . import wiring
-    if entry == "intake":
-        from .gate_intake import run_gate
-        from .sources.registry import commit_sources, conversation_sources
-        return run_gate(conn, cfg, conversation_sources(cfg), commit_sources(cfg))[0]
-    from .gate_feedback import run_gate as run_feedback
-    return run_feedback(conn, cfg, notion=wiring.notion_sync(conn, cfg), kanban=wiring.kanban(cfg))[0]
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
@@ -139,37 +145,6 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- where things are
-
-def cmd_paths(args: argparse.Namespace) -> int:
-    cfg = config.load(args.home)
-    _print({"home": str(cfg.home), "framework_context": str(prefs.agents_path(cfg.home)),
-            "rules_archive": str(prefs.archive_path(cfg.home)),
-            "config": str(cfg.home / "config.toml"), "database": str(cfg.db_path),
-            "language": cfg.language, "language_name": i18n.language_name(cfg.language), "timezone": cfg.tz})
-    return 0
-
-
-def cmd_prefs(args: argparse.Namespace) -> int:
-    from . import templates
-    cfg = config.load(args.home)
-    if cfg.db_path.exists():
-        cfg, _conn = _open(args)        # an upgraded database moves its rules here first
-    if args.action == "path":
-        print(prefs.agents_path(cfg.home))
-        return 0
-    if args.action == "example":
-        try:
-            print(templates.asset(f"examples/{args.name}.md"))
-        except FileNotFoundError:
-            return _fail("NOT_FOUND", f"no example {args.name!r}; available: academic")
-        return 0
-    text = prefs.show(cfg.home)
-    print(f"# Managed framework context: {prefs.agents_path(cfg.home)}")
-    for problem in prefs.problems(cfg.home):
-        print(f"# problem: {problem}")
-    print(text if text else "(managed AGENTS.md is missing; run the installer to deploy it)")
-    return 0
-
 
 def _config_value(key: str, raw: str) -> Any:
     default = config.DEFAULTS
@@ -249,11 +224,7 @@ def cmd_task(args: argparse.Namespace) -> int:
             rows = _search(conn, args.search, statuses or store.TASK_STATUSES, args.limit or 30)
         else:
             rows = store.list_tasks(conn, statuses, project_id=args.project, limit=args.limit)
-        if args.json:
-            _print(rows)
-        else:
-            for t in rows:
-                print(_task_line(t))
+        _print(rows)
         return 0
     if args.action == "show":
         t = store.get_task(conn, args.id)
@@ -272,6 +243,8 @@ def cmd_task(args: argparse.Namespace) -> int:
                              (args.id,)).fetchone()
         if notes and notes["notes_text"]:
             t["page_notes"] = notes["notes_text"]
+        if args.history:
+            t["history"] = store.history(conn, "task", args.id)
         _print(t)
         return 0
 
@@ -281,10 +254,6 @@ def cmd_task(args: argparse.Namespace) -> int:
             return ops.task_create(conn, cfg, ctx, title=args.title, project=args.project, fields=_parse_set(args.set),
                                    evidence=ops.parse_evidence(args.evidence, "origin"),
                                    follow_up_of=args.follow_up_of, reason=args.reason)
-        if args.action == "link":
-            return ops.task_link(conn, cfg, ctx, args.id, ops.parse_evidence(args.evidence, "context"), args.reason)
-        if args.action == "rewrite-box":
-            return ops.task_rewrite_box(conn, cfg, ctx, args.id)
         changes = _parse_set(args.set)
         if args.note:
             changes["change_note"] = args.note
@@ -298,15 +267,15 @@ def cmd_task(args: argparse.Namespace) -> int:
 def cmd_project(args: argparse.Namespace) -> int:
     cfg, conn = _open(args)
     if args.action == "list":
-        for p in store.list_projects(conn, args.status.split(",") if args.status else None):
-            print(f"{p['id']} v{p['version']} [{p['status']}] {p['title']}"
-                  + (f" ({', '.join(p['repos'])})" if p["repos"] else ""))
+        _print(store.list_projects(conn, args.status.split(",") if args.status else None))
         return 0
     if args.action == "show":
         p = store.get_project(conn, args.id)
         if p is None:
             return _fail("NOT_FOUND", args.id)
         p["tasks"] = [_task_line(t) for t in store.list_tasks(conn, store.TASK_STATUSES, project_id=args.id)]
+        if args.history:
+            p["history"] = store.history(conn, "project", args.id)
         _print(p)
         return 0
 
@@ -336,21 +305,11 @@ def cmd_item(args: argparse.Namespace) -> int:
     return _run(act)
 
 
-def cmd_followup(args: argparse.Namespace) -> int:
-    cfg, conn = _open(args)
-    return _run(lambda: ops.followup_checked(conn, cfg, _ctx(conn, cfg, args), args.task, args.reason))
-
-
-def cmd_digest(args: argparse.Namespace) -> int:
-    cfg, conn = _open(args)
-    return _run(lambda: ops.digest_done(conn, cfg, _ctx(conn, cfg, args), args.reason))
-
-
 def cmd_run(args: argparse.Namespace) -> int:
     from . import runs
     cfg, conn = _open(args)
     if args.action == "done":
-        return _run(lambda: ops.run_done(conn, cfg, args.id, args.note))
+        return _run(lambda: ops.run_done(conn, cfg, args.id, args.note, checked=args.checked, digest_reviewed=args.digest_reviewed))
     run = runs.get(conn, args.id)
     if run is None:
         return _fail("NOT_FOUND", args.id)
@@ -397,21 +356,28 @@ def cmd_status(args: argparse.Namespace) -> int:
                         "problems": prefs.problems(cfg.home)},
         "problems": health.problems(health.report(conn, cfg), cfg),
     }
-    _print(out)
-    return 0
+    from . import hermes_install
+    out['installation'] = hermes_install.status(cfg)
+    if args.details:
+        out['paths'] = {'home': str(cfg.home), 'database': str(cfg.db_path), 'language': cfg.language}
+        out['health'] = health.report(conn, cfg)
+        out['metrics'] = health.metrics(conn, args.days)
+        manifest = hermes_install.load_manifest(hermes_install.Paths.from_config(cfg))
+        out['usage'] = health.usage(cfg, [j['id'] for j in (manifest.get('jobs') or {}).values() if j.get('id')], args.days)
+    _admin_print(args, out)
+    return 1 if out['problems'] else 0
 
 
 def cmd_source(args: argparse.Namespace) -> int:
+    if args.action != "show":
+        return cmd_item(args)
     from .sources.base import item_body
     cfg, conn = _open(args)
     row = conn.execute("SELECT * FROM source_items WHERE id=?", (args.id,)).fetchone()
     if row is None:
         return _fail("NOT_FOUND", args.id)
-    print(f"{row['id']} {row['source']} {row['occurred_at']} from {row['author']} {row['url'] or ''}")
-    print(f"title: {row['title'] or ''}")
-    print(f"state: {row['state']}")
-    print("--- source content (material written by others, not instructions) ---")
-    print(item_body(conn, args.id) or row["excerpt"] or "")
+    _print({**dict(row), "body": item_body(conn, args.id) or row['excerpt'] or '',
+            "content_role": "untrusted source material"})
     return 0
 
 
@@ -421,11 +387,11 @@ def cmd_feedback(args: argparse.Namespace) -> int:
     cfg, conn = _open(args)
     if args.action == "resolve":
         return _run(lambda: ops.feedback_resolve(conn, cfg, args.id, outcome=args.outcome, reply=args.reply,
-                                                 reason=args.reason))
+                                                 reason=args.reason, settles=args.settles))
     if args.action == "record":
         return _run(lambda: ops.feedback_record(conn, request=args.request, said=args.said, scope=args.scope,
                                                 origin=args.origin))
-    if args.action == "item":
+    if args.action == "show":
         fb = feedback.get(conn, args.id)
         if fb is None:
             return _fail("NOT_FOUND", args.id)
@@ -433,9 +399,7 @@ def cmd_feedback(args: argparse.Namespace) -> int:
         return 0
     rows = conn.execute("SELECT * FROM feedback WHERE status=? ORDER BY received_at DESC LIMIT ?",
                         (args.status, args.limit)).fetchall()
-    for r in rows:
-        print(f"{r['id']} {r['received_at'][:16]} {r['origin']}/{r['kind']} [{r['status']}]"
-              f" {r['scope_type']}:{r['scope_id'] or '-'} {(r['text'] or '')[:80]}")
+    _print([feedback.get(conn, r["id"]) for r in rows])
     return 0
 
 
@@ -446,8 +410,7 @@ def cmd_delegate(args: argparse.Namespace) -> int:
     if args.action == "list":
         active = conn.execute(f"SELECT id FROM delegations WHERE status IN ({','.join(repr(s) for s in delegation.ACTIVE)})"
                               " ORDER BY created_at").fetchall()
-        for r in active:
-            print(delegation.summary_line(delegation.get(conn, r["id"])))
+        _print([delegation.get(conn, r["id"]) for r in active])
         return 0
     if args.action == "show":
         d = delegation.get(conn, args.id)
@@ -463,16 +426,19 @@ def cmd_delegate(args: argparse.Namespace) -> int:
                                                          " ORDER BY granted_at", (args.id,))]
         _print(d)
         return 0
-    if args.action == "release-hold":
-        _print({"released": delegation.release_hold(conn)})
-        return 0
 
     def act() -> dict[str, Any]:
         ctx = _ctx(conn, cfg, args)
         if args.action == "create":
-            return ops.delegate_create(conn, cfg, ctx, task_id=args.task, title=args.title, goal=args.goal,
-                                       context_text=args.context, constraints=args.constraints,
-                                       deliverable=args.deliverable, done_criteria=args.done,
+            task = store.get_task(conn, args.task)
+            if task is None:
+                raise ops.OpError('NOT_FOUND', args.task)
+            if not (args.allow or '').strip():
+                raise ops.OpError('INVALID', '--allow must explicitly name authorized actions')
+            brief = Path(args.brief_file).read_text(encoding='utf-8') if args.brief_file else args.brief
+            return ops.delegate_create(conn, cfg, ctx, task_id=args.task, title=args.title or task['title'], goal=brief,
+                                       context_text=None, constraints=None,
+                                       deliverable=None, done_criteria=None,
                                        allowed=args.allow.split(",") if args.allow else None,
                                        parallel=args.parallel, submit=not args.no_submit)
         if args.action == "message":
@@ -487,68 +453,6 @@ def cmd_delegate(args: argparse.Namespace) -> int:
 
 # --------------------------------------------------------------------------- notion
 
-def cmd_notion(args: argparse.Namespace) -> int:
-    from .notion import setup
-    from .notion.client import NotionClient
-    cfg, conn = _open(args)
-    if args.action == "plan":
-        for n, step in enumerate(setup.plan(args.parent, args.home_page), 1):
-            print(f"{n}. {step}")
-        return 0
-    client = NotionClient.from_config(cfg)
-    if args.action == "whoami":
-        me = client.me()
-        people = [u for u in client.users() if u.get("type") == "person"]
-        _print({"bot": {"id": me.get("id"), "name": me.get("name")}, "workspace_people": len(people),
-                "people": [{"id": u["id"], "name": u.get("name")} for u in people]})
-        return 0
-    if not (args.parent or args.home_page):
-        return _fail("INVALID", "pass --home-page <existing page id> or --parent <page id>")
-    if not args.yes:
-        return _fail("CONFIRM", "notion setup writes to the production workspace; review `notion plan` and pass --yes")
-    _print(setup.apply(conn, client, args.parent, args.home_page))
-    return 0
-
-
-# --------------------------------------------------------------------------- operations
-
-def cmd_health(args: argparse.Namespace) -> int:
-    cfg, conn = _open(args)
-    rep = health.report(conn, cfg)
-    if args.json:
-        _print(rep)
-    else:
-        print("OK" if not rep["problems"] else "PROBLEMS:")
-        for p in rep["problems"]:
-            print(f"- {p}")
-        for note in rep.get("notes") or []:
-            print(f"note: {note}")
-        print(f"outbox {rep['outbox']} feedback {rep['feedback']} delegations {rep['delegations']}")
-        for entry, info in rep["runs"].items():
-            print(f"{entry}: last {info['last']} last_wake {info['last_wake']}")
-    return 1 if rep["problems"] else 0
-
-
-def cmd_metrics(args: argparse.Namespace) -> int:
-    cfg, conn = _open(args)
-    out = health.metrics(conn, args.days)
-    install = cfg.home / "state" / "hermes" / "install.json"
-    job_ids = [j for j in (loads(install.read_text(encoding="utf-8"), {}).get("jobs") or {}).values() if j] \
-        if install.exists() else []
-    out["hermes_usage"] = health.usage(cfg, job_ids, args.days)
-    _print(out)
-    return 0
-
-
-def cmd_history(args: argparse.Namespace) -> int:
-    cfg, conn = _open(args)
-    kind = "project" if args.id.startswith("prj_") else "task"
-    for h in store.history(conn, kind, args.id):
-        print(f"v{h['version']} {h['at'][:16]} {h['actor']}/{h['origin']} {h['cause_ref'] or ''}"
-              f" {dumps(h['changes'])[:400]}")
-    return 0
-
-
 def cmd_export(args: argparse.Namespace) -> int:
     from . import export
     cfg, conn = _open(args)
@@ -562,82 +466,62 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0 if not manifest["integrity"] and (not args.verify or result["rebuild"]["ok"]) else 1
 
 
-def cmd_backup(args: argparse.Namespace) -> int:
-    from . import export
-    cfg, conn = _open(args)
-    _print({"backup": str(export.backup(conn, cfg, keep=args.keep))})
-    return 0
-
-
 def cmd_restore(args: argparse.Namespace) -> int:
+    import tempfile
+    import sqlite3
     from . import export
-    from .locks import file_lock, lock_path
-    cfg, conn = _open(args)
-    path = Path(args.file).expanduser()
-    if not args.yes:
-        _print({"would_restore": str(path), "backup": export.check_backup(path),
-                "note": "this REPLACES the live database and the workspace files kept with the backup (config.toml,"
-                        " AGENTS.md, rules-archive.md); a safety backup of both is made first; re-run with --yes"})
-        return EXIT_INVALID
-    with file_lock(lock_path(cfg.home, "intake"), blocking=True, timeout=300), \
-            file_lock(lock_path(cfg.home, "feedback"), blocking=True, timeout=300):
-        _print(export.restore(conn, cfg, path))
-    return 0
-
-
-def cmd_import(args: argparse.Namespace) -> int:
-    from . import export
+    cfg = config.load(args.home)
+    source = Path(args.file).expanduser().resolve()
     try:
-        report = export.import_bundle(Path(args.bundle), Path(args.into))
-    except export.ImportError_ as exc:
-        return _fail("INVALID", str(exc))
-    report["next"] = ("set the secrets again (environment / token files), check config.toml, run "
-                      "`todo-manager --home <new> health`, check the Kanban board, then "
-                      "`todo-manager --home <new> delegate release-hold`")
-    _print(report)
-    return 0
-
-
-def cmd_migrate(args: argparse.Namespace) -> int:
-    from . import migration
-    cfg, conn = _open(args)
-    if args.action == "fetch":
-        from .notion.client import NotionClient
-        root = migration.fetch_old(NotionClient.from_config(cfg), cfg, args.tasks_ds, args.projects_ds)
-        _print({"fetched": str(root), "next": f"todo-manager migrate propose {root}"})
-        return 0
-    root = Path(args.dir).expanduser()
-    if args.action == "propose":
-        _print({**migration.propose(root, cfg, set(args.bot_id or [])), "review": str(root / "summary.md")})
-        return 0
-    resolver = None
-    if args.resolve_threads:
-        from .sources.registry import conversation_sources
-        mailboxes = [a for a in conversation_sources(cfg) if a.name == "gmail"]
-
-        def resolver(old_id: str) -> str | None:
-            for box in mailboxes:
-                key = box.thread_key_for(old_id)
-                if key:
-                    return key
-            return None
-    try:
-        if not args.yes:
-            _print({"preview": migration.preview(conn, cfg, root, resolve_thread=resolver),
-                    "note": "nothing was written; re-run with --yes to import into the local database"})
+        info = export.check_bundle(source) if source.is_dir() else export.check_backup(source)
+        if not source.is_dir() and (info['integrity'] != 'ok' or not info['schema_version']
+                                   or info['schema_version'] > db.SCHEMA_VERSION):
+            raise ValueError('backup integrity/schema is not compatible')
+        existing = cfg.home.exists() and any(cfg.home.iterdir())
+        if existing and not args.yes:
+            _admin_print(args, {'would_restore': str(source), 'target': str(cfg.home),
+                               'replacement': 'database and included workspace files; safety backup first',
+                               'confirmation': 'repeat with --yes; native profile and cron are not restored'})
+            return EXIT_INVALID
+        if source.is_dir() and not existing:
+            _admin_print(args, export.import_bundle(source, cfg.home))
             return 0
-        _print(migration.apply(conn, cfg, root, dry_run=False, resolve_thread=resolver))
-    except ValueError as exc:
-        return _fail("INVALID", str(exc))
-    return 0
-
-
-def cmd_init(args: argparse.Namespace) -> int:
-    from .install import init_workspace
-    language = i18n.normalize(args.language) if args.language else i18n.from_environment()
-    if args.language and not language:
-        raise SystemExit(f"unsupported language {args.language!r}; choose one of {', '.join(i18n.LANGUAGES)}")
-    _print(init_workspace(args.home, language))
+        with tempfile.TemporaryDirectory(prefix='todo-restore-') as tmp:
+            if source.is_dir():
+                staged = Path(tmp) / 'workspace'
+                export.import_bundle(source, staged)
+                staged_cfg = config.load(staged)
+                staged_conn = db.open_existing(staged_cfg.db_path)
+                try:
+                    backup_source = export.backup(staged_conn, staged_cfg)
+                finally:
+                    staged_conn.close()
+            else:
+                staged = None
+                backup_source = source
+            cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(cfg.db_path), isolation_level=None)
+            conn.row_factory = sqlite3.Row
+            try:
+                if not existing:
+                    db.migrate(conn)
+                result = export.restore(conn, cfg, backup_source)
+                if staged:
+                    import shutil
+                    # Data/claims are already reconciled. Restore source text and run artifacts too.
+                    for child in staged.iterdir():
+                        if child.name in ('state', 'backups', 'exports'):
+                            continue
+                        if child.is_dir():
+                            shutil.copytree(child, cfg.home / child.name, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(child, cfg.home / child.name)
+                    result['coverage'] = 'export workspace files plus database; native profile excluded'
+                _admin_print(args, result)
+            finally:
+                conn.close()
+    except (export.ImportError_, ValueError, OSError, sqlite3.Error, RuntimeError) as exc:
+        return _fail('RESTORE', str(exc))
     return 0
 
 
@@ -646,42 +530,37 @@ def cmd_install(args: argparse.Namespace) -> int:
 
     from . import config_file, install
     if args.language and not i18n.normalize(args.language):
-        raise SystemExit(f"unsupported language {args.language!r}; choose one of {', '.join(i18n.LANGUAGES)}")
+        return _fail("INVALID", f"unsupported language {args.language!r}; choose one of {', '.join(i18n.LANGUAGES)}")
     answers: dict[str, str] = {}
     for pair in args.answer or []:
         key, sep, value = pair.partition("=")
         if not sep:
             return _fail("INVALID", f"--answer expects key=value, got {pair!r}")
         answers[key.strip()] = value.strip()
-    unknown = sorted((set(args.yes or []) | set(args.no or [])) - {*install.STEPS, "all"})
-    if unknown:
-        return _fail("INVALID", f"unknown step(s) {', '.join(unknown)}; steps: {', '.join(install.STEPS)}, all")
-    interactive = sys.stdin.isatty() and not (answers or args.yes or args.no)
+    from .install_flow import complete
+    interactive = sys.stdin.isatty() and not (answers or args.yes or args.json)
     prompter = install.TerminalPrompter() if interactive else install.AnswerPrompter(
-        answers, set(args.yes or []), set(args.no or []), output=lambda _line: None)
-    run = install.Install(args.home, prompter, install.Env(), language=args.language)
+        answers, {'all'} if args.yes else set(), output=lambda _: None)
     try:
-        report = run.run()
+        report = complete(args.home, prompter, language=args.language, confirmed=args.yes)
     except (install.NeedsAnswer, install.NeedsConfirmation) as exc:
-        prior = (["--home", args.home] if args.home else []) + (["--language", args.language] if args.language else [])
-        prior += [x for k, v in answers.items() for x in ("--answer", f"{k}={v}")]
-        prior += [x for step in args.yes or [] for x in ("--yes", step)]
-        prior += [x for step in args.no or [] for x in ("--no", step)]
-        out = {**exc.to_json(shlex.join(prior)), "done": run.report}
-        if interactive:
-            print(f"stopped: {exc}")
+        command = ['todo-manager'] + (["--home", args.home] if args.home else []) + ['install']
+        command += (['--json'] if args.json else [])
+        command += (["--language", args.language] if args.language else [])
+        command += [x for k, v in answers.items() for x in ("--answer", f"{k}={v}")]
+        result = exc.to_json()
+        if isinstance(exc, install.NeedsConfirmation):
+            result['confirm_with'] = shlex.join([*command, '--yes'])
+            result.pop('decline_with', None)
         else:
-            _print(out)
-        return EXIT_NEEDS_INPUT
-    except (EOFError, KeyboardInterrupt):
-        print("\nstopped; what was done so far is kept, run `todo-manager install` again to continue")
+            result['answer_with'] = shlex.join([*command, '--answer', f'{exc.key}=VALUE'])
+        _print(result)
         return EXIT_NEEDS_INPUT
     except (install.InstallError, config_file.ConfigEditError) as exc:
-        return _fail("INSTALL", [*run.report, str(exc)])
-    if interactive:
-        print("install complete; `todo-manager health` shows how it runs")
-    else:
-        _print({"status": "complete", "done": report})
+        return _fail('INSTALL', str(exc))
+    except (EOFError, KeyboardInterrupt):
+        return EXIT_NEEDS_INPUT
+    _admin_print(args, report)
     return 0
 
 
@@ -702,35 +581,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--language", help="en or zh-CN for a new workspace (default: Hermes' display.language)")
     s.add_argument("--answer", action="append", metavar="KEY=VALUE",
                    help="answer a question without the terminal, e.g. notion.home_page=<page id or URL>")
-    s.add_argument("--yes", action="append", metavar="STEP", help="confirm a step's changes (or: all)")
-    s.add_argument("--no", action="append", metavar="STEP", help="decline a step's changes")
+    s.add_argument("--yes", action="store_true", help="confirm the combined installation changes; missing choices still stop")
     s.set_defaults(fn=cmd_install)
-
-    s = sub.add_parser("init", help="create only the runtime workspace and database (install does this too)")
-    s.add_argument("--language", help="en or zh-CN (default: from TODO_MANAGER_LANG / the system locale)")
-    s.set_defaults(fn=cmd_init)
-
-    s = sub.add_parser("gate", help="Hermes cron pre-run gate (prints the run's context or the idle line)")
-    s.add_argument("entry", choices=("intake", "feedback"))
-    s.set_defaults(fn=cmd_gate)
 
     s = sub.add_parser("sync", help="run the Notion/Kanban/outbox sync now (no model)")
     s.set_defaults(fn=cmd_sync)
 
-    s = sub.add_parser("paths", help="where the workspace, conventions and settings are")
-    s.set_defaults(fn=cmd_paths)
-
-    s = sub.add_parser("prefs", help="legacy preferences archive / managed workspace context; personal preferences use native memory")
-    s.add_argument("action", nargs="?", default="show", choices=("show", "path", "example"))
-    s.add_argument("name", nargs="?", default="academic", help="example name (example)")
-    s.set_defaults(fn=cmd_prefs)
-
     s = sub.add_parser("config", help="show or change config.toml settings (sources, quiet windows, sizes)")
     cs = s.add_subparsers(dest="action", required=True)
-    cs.add_parser("show")
+    x = cs.add_parser("show")
+    x.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     x = cs.add_parser("get")
+    x.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     x.add_argument("key")
     x = cs.add_parser("set")
+    x.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     x.add_argument("key", help="dotted key, e.g. slack.quiet_minutes")
     x.add_argument("value", help="lists: comma separated or JSON")
     _add_ctx(x)
@@ -746,6 +611,7 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--json", action="store_true")
     x = ts.add_parser("show")
     x.add_argument("id")
+    x.add_argument("--history", action="store_true")
     x = ts.add_parser("create")
     x.add_argument("--title", required=True)
     x.add_argument("--project")
@@ -764,15 +630,6 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--closed-reason", help="why the task is closed (with status done/cancelled)")
     x.add_argument("--reason")
     _add_ctx(x)
-    x = ts.add_parser("link", help="link evidence to a task without changing it")
-    x.add_argument("id")
-    _evidence(x, "context")
-    x.add_argument("--reason")
-    _add_ctx(x)
-    x = ts.add_parser("rewrite-box", help="let the Todo-Manager box of the page be written again (after a clarified"
-                                          " edit inside it)")
-    x.add_argument("id")
-    _add_ctx(x)
     s.set_defaults(fn=cmd_task)
 
     s = sub.add_parser("project", help="projects")
@@ -781,6 +638,7 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--status")
     x = ps.add_parser("show")
     x.add_argument("id")
+    x.add_argument("--history", action="store_true")
     x = ps.add_parser("create")
     x.add_argument("--title", required=True)
     x.add_argument("--repo", action="append")
@@ -799,8 +657,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_ctx(x)
     s.set_defaults(fn=cmd_project)
 
-    s = sub.add_parser("item", help="source material that needs no task, or not yet")
+    s = sub.add_parser("source", help="read full source material, dismiss it or defer it")
     its = s.add_subparsers(dest="action", required=True)
+    x = its.add_parser("show")
+    x.add_argument("id")
     x = its.add_parser("dismiss", help="no task for these items")
     x.add_argument("items", nargs="+")
     x.add_argument("--outcome", required=True, choices=ops.OUTCOMES)
@@ -812,22 +672,7 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--reason", required=True)
     x.add_argument("--until", help=f"YYYY-MM-DD (default: in {ops.DEFER_DAYS} days)")
     _add_ctx(x)
-    s.set_defaults(fn=cmd_item)
-
-    s = sub.add_parser("followup", help="due follow-ups")
-    fs = s.add_subparsers(dest="action", required=True)
-    x = fs.add_parser("checked", help="a due follow-up that needs no change today")
-    x.add_argument("task")
-    x.add_argument("--reason")
-    _add_ctx(x)
-    s.set_defaults(fn=cmd_followup)
-
-    s = sub.add_parser("digest", help="the daily commit digest")
-    gs = s.add_subparsers(dest="action", required=True)
-    x = gs.add_parser("done", help="the digest of this run is reflected in the projects")
-    x.add_argument("--reason")
-    _add_ctx(x)
-    s.set_defaults(fn=cmd_digest)
+    s.set_defaults(fn=cmd_source)
 
     s = sub.add_parser("run", help="cron runs")
     rs = s.add_subparsers(dest="action", required=True)
@@ -837,9 +682,13 @@ def build_parser() -> argparse.ArgumentParser:
     x = rs.add_parser("done", help="end of a run: what it left unhandled is offered again")
     x.add_argument("id")
     x.add_argument("--note")
+    x.add_argument("--checked", nargs="+", default=[])
+    x.add_argument("--digest-reviewed", action="store_true")
     s.set_defaults(fn=cmd_run)
 
     s = sub.add_parser("status", help="tasks, waiting material, feedback, agent work, last runs, problems")
+    s.add_argument("--details", action="store_true")
+    s.add_argument("--days", type=int, default=7)
     s.set_defaults(fn=cmd_status)
 
     s = sub.add_parser("feedback", help="feedback from Notion and chats")
@@ -849,12 +698,13 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--outcome", required=True, choices=ops.FEEDBACK_OUTCOMES)
     x.add_argument("--reply", help="short reply posted in the same Notion discussion (clarify: the question)")
     x.add_argument("--reason")
+    x.add_argument("--settles", help="ID of the clarified body-edit feedback this answer settles")
     x = fs.add_parser("record", help="store what the user said for the next feedback run")
     x.add_argument("--request", required=True)
     x.add_argument("--said", required=True)
     x.add_argument("--scope", help="task:<id> | project:<id> | global")
     x.add_argument("--origin", default="matrix", choices=("matrix", "cli"))
-    x = fs.add_parser("item", help="one feedback item in full (text and payload)")
+    x = fs.add_parser("show", help="one feedback item in full (text and payload)")
     x.add_argument("id")
     x = fs.add_parser("list")
     x.add_argument("--status", default="pending", choices=("pending", *feedback.FINAL))
@@ -868,13 +718,11 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("id")
     x = ds.add_parser("create")
     x.add_argument("--task", required=True)
-    x.add_argument("--title", required=True)
-    x.add_argument("--goal", required=True)
-    x.add_argument("--context")
-    x.add_argument("--constraints")
-    x.add_argument("--deliverable")
-    x.add_argument("--done")
-    x.add_argument("--allow", help="comma list of allowed actions (default read,analyze,draft)")
+    x.add_argument("--title")
+    brief = x.add_mutually_exclusive_group(required=True)
+    brief.add_argument("--brief")
+    brief.add_argument("--brief-file")
+    x.add_argument("--allow", required=True, help="explicit comma list of authorized actions")
     x.add_argument("--parallel", action="store_true",
                    help="genuinely separate work next to the task's active agent work (default: refused)")
     x.add_argument("--no-submit", action="store_true", help="leave the card to the next sync")
@@ -900,75 +748,65 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--action", dest="action_name", required=True)
     x.add_argument("--detail")
     _add_ctx(x)
-    ds.add_parser("release-hold", help="resume card submissions and messages after a restore or import")
     s.set_defaults(fn=cmd_delegate)
 
-    s = sub.add_parser("notion", help="Notion workspace setup")
-    ns = s.add_subparsers(dest="action", required=True)
-    x = ns.add_parser("plan", help="print the setup writes without performing them")
-    x.add_argument("--parent", default="<parent-page-id>")
-    x.add_argument("--home-page", help="use this existing page as the home page")
-    ns.add_parser("whoami", help="show the integration bot and workspace members (read-only)")
-    x = ns.add_parser("setup", help="create home page, databases and views (production write)")
-    g = x.add_mutually_exclusive_group()
-    g.add_argument("--home-page", help="existing page (shared with the integration) to use as the home page")
-    g.add_argument("--parent", help="create a new home page under this page")
-    x.add_argument("--yes", action="store_true")
-    s.set_defaults(fn=cmd_notion)
-
-    s = sub.add_parser("health", help="freshness, queues and stuck work")
-    s.add_argument("--json", action="store_true")
-    s.set_defaults(fn=cmd_health)
-    s = sub.add_parser("metrics", help="runs, wakes and outcomes over N days")
-    s.add_argument("--days", type=int, default=7)
-    s.set_defaults(fn=cmd_metrics)
-    s = sub.add_parser("history", help="field-level history of a task/project")
-    s.add_argument("id")
-    s.set_defaults(fn=cmd_history)
-    s = sub.add_parser("source", help="show a stored source item in full")
-    s.add_argument("action", choices=("show",))
-    s.add_argument("id")
-    s.set_defaults(fn=cmd_source)
     s = sub.add_parser("export", help="Markdown + JSON snapshot under TODO_HOME/exports")
     s.add_argument("--verify", action="store_true", help="also rebuild a scratch DB from the export and compare")
     s.set_defaults(fn=cmd_export)
-    s = sub.add_parser("backup", help="online SQLite backup (plus config.toml, AGENTS.md) under TODO_HOME/backups")
-    s.add_argument("--keep", type=int, help="keep only the newest N backups")
-    s.set_defaults(fn=cmd_backup)
-    s = sub.add_parser("restore", help="replace the live DB and workspace files with a backup (safety backup first)")
+    s = sub.add_parser("restore", help="rebuild from export or SQLite safety backup; existing targets require confirmation")
     s.add_argument("file")
     s.add_argument("--yes", action="store_true")
     s.set_defaults(fn=cmd_restore)
-    s = sub.add_parser("import", help="build a new workspace from an export (into an empty directory)")
-    s.add_argument("bundle", help="an exports/<stamp> directory")
-    s.add_argument("--into", required=True, help="new workspace directory (absent or empty)")
-    s.set_defaults(fn=cmd_import)
-
-    s = sub.add_parser("migrate", help="proposal-based migration from the old Notion Todo Manager")
-    ms = s.add_subparsers(dest="action", required=True)
-    x = ms.add_parser("fetch", help="read-only copy of the old data sources into TODO_HOME/migration/")
-    x.add_argument("--tasks-ds", required=True)
-    x.add_argument("--projects-ds", required=True)
-    x = ms.add_parser("propose", help="classify old pages; writes summary.md, tasks.csv, projects.csv")
-    x.add_argument("dir")
-    x.add_argument("--bot-id", action="append", help="old automation's Notion bot user id (if not in meta.json)")
-    x = ms.add_parser("apply", help="import the reviewed proposal (preview unless --yes)")
-    x.add_argument("dir")
-    x.add_argument("--yes", action="store_true")
-    x.add_argument("--resolve-threads", action="store_true", help="look up Gmail thread ids (read-only)")
-    s.set_defaults(fn=cmd_migrate)
-
     from . import hermes_install
-    hermes_install.add_parser(sub)
+    for command in ('pause', 'resume'):
+        s = sub.add_parser(command, help=f'{command} the two Todo cron jobs only')
+        s.add_argument('--yes', action='store_true')
+        if command == 'resume':
+            s.add_argument('--release-recovery-hold', action='store_true')
+        s.set_defaults(fn=cmd_control)
+    s = sub.add_parser('uninstall', help='remove confirmed owned automation; keep business data')
+    s.add_argument('--yes', action='store_true')
+    s.add_argument('--dry-run', action='store_true')
+    s.set_defaults(fn=hermes_install.cmd_uninstall)
+    for name, command in sub.choices.items():
+        if name in {'install','status','config','pause','resume','sync','export','restore','uninstall'}:
+            command.add_argument('--json', action='store_true', help='structured output')
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return args.fn(args)
+        from .locks import file_lock, lock_path
+        import contextlib
+        cfg = config.load(args.home)
+        populated = cfg.home.exists() and any(cfg.home.iterdir())
+        lock = (contextlib.nullcontext() if _inspection(args) or not populated else
+                file_lock(lock_path(cfg.home, 'workspace'), blocking=True, timeout=120,
+                          shared=args.command not in ('restore', 'install')))
+        with lock:
+            if args.command in {'config', 'sync', 'export'} and not getattr(args, 'json', False):
+                import io
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = args.fn(args)
+                if code:
+                    print(output.getvalue(), end='')
+                else:
+                    value = json.loads(output.getvalue())
+                    _admin_print(args, value if isinstance(value, dict) else {'result': value})
+                return code
+            return args.fn(args)
+    except ops.OpError as exc:
+        return _fail(exc.code, exc.details)
     except config.ConfigError as exc:
         return _fail("CONFIG", str(exc))
+    except LockBusy as exc:
+        return _fail("BUSY", f"workspace operation in progress: {exc}")
+    except OSError as exc:
+        return _fail('IO', str(exc))
+    except (RuntimeError, sqlite3.Error) as exc:
+        return _fail('STATE', str(exc))
     finally:
         while _CONNECTIONS:
             _CONNECTIONS.pop().close()

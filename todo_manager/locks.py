@@ -3,6 +3,7 @@
 * ``intake`` / ``feedback`` - one gate run per entry point at a time (non-blocking).
 * ``kanban-submit``         - covers query -> create -> record link for Kanban cards,
                               used by every entry point (blocking, short timeout).
+* ``workspace``            - shared by supported writers/pre-run, exclusive for restore/install.
 * ``outbox``                - one outbox drain at a time (non-blocking).
 
 No lock is held while a delegated worker executes; long agent runs never block the
@@ -25,14 +26,14 @@ class LockBusy(Exception):
 
 
 @contextlib.contextmanager
-def file_lock(path: Path, *, blocking: bool = False, timeout: float = 30.0) -> Iterator[None]:
+def file_lock(path: Path, *, blocking: bool = False, timeout: float = 30.0, shared: bool = False) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         deadline = time.monotonic() + timeout
         while True:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
                 break
             except OSError as exc:
                 if exc.errno not in (errno.EAGAIN, errno.EACCES):

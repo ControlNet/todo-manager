@@ -17,8 +17,8 @@ from . import clock, config, prefs, templates, userfiles
 
 SKILL_NAME = "todo-manager"
 SKILL_CATEGORY = "productivity"
-LAUNCHER_MARK = "# todo-manager launcher (generated; overwritten by `todo-manager hermes install`)"
-SCRIPT_MARK = "# todo-manager pre-run gate (generated; overwritten by `todo-manager hermes install`)"
+LAUNCHER_MARK = "# todo-manager launcher (generated; overwritten by `todo-manager install`)"
+SCRIPT_MARK = "# todo-manager pre-run gate (generated; overwritten by `todo-manager install`)"
 JOBS = {
     "intake": {"name": "todo-manager-intake", "schedule": "*/5 * * * *"},
     "feedback": {"name": "todo-manager-feedback", "schedule": "2-59/5 * * * *"},
@@ -31,6 +31,12 @@ SKILL_FILE = "skill/SKILL.md"           # its name in the baseline store
 JOB_FIELDS = ("schedule", "deliver", "failure_deliver", "workdir", "skills", "model", "provider", "reasoning_effort")
 FLAGS = {"schedule": "--schedule", "deliver": "--deliver", "workdir": "--workdir", "model": "--model",
          "provider": "--provider", "reasoning_effort": "--reasoning-effort"}
+
+
+def generated_mark(text: str, mark: str) -> bool:
+    """Recognize the previous gate signature without retaining its removed CLI command."""
+    legacy = "# todo-manager pre-run gate (generated; overwritten by `todo-manager hermes install`)"
+    return mark in text or (mark == SCRIPT_MARK and legacy in text)
 
 
 def asset(name: str) -> str:
@@ -121,9 +127,9 @@ import sys
 sys.dont_write_bytecode = True
 os.environ["TODO_HOME"] = {str(p.todo_home)!r}
 sys.path.insert(0, {str(p.source_root)!r})
-from todo_manager.cli import main
+from todo_manager.prerun import {entry}
 
-sys.exit(main(["gate", {entry!r}]))
+sys.exit({entry}())
 """
 
 
@@ -243,9 +249,9 @@ class Installer:
         current = _read(path)
         if current == text:
             return Action("noop", str(path), "up to date", record={"file": str(path)})
-        if current is not None and mark in current and repr(str(self.paths.todo_home)) not in current:
+        if current is not None and generated_mark(current, mark) and repr(str(self.paths.todo_home)) not in current:
             return Action("conflict", str(path), "generated for another Todo workspace; left untouched")
-        if current is not None and mark not in current:
+        if current is not None and not generated_mark(current, mark):
             return Action("conflict", str(path), "exists and was not written by todo-manager; left untouched")
         verb = "update" if current is not None else "create"
         return Action(verb, str(path), f"{verb} generated file", _diff(current, text, path.name),
@@ -382,7 +388,7 @@ class Installer:
         for path, mark in [(self.paths.launcher, LAUNCHER_MARK)] + [
                 (self.paths.script(e), SCRIPT_MARK) for e in JOBS]:
             text = _read(path)
-            if text and mark in text and repr(str(self.paths.todo_home)) not in text:
+            if text and generated_mark(text, mark) and repr(str(self.paths.todo_home)) not in text:
                 return True
         manifest = load_manifest(self.paths)
         for entry, spec in JOBS.items():
@@ -424,7 +430,7 @@ class Installer:
         record: dict[str, Any] = {"version": 2, "installed_at": clock.iso(), "todo_home": str(self.paths.todo_home),
                                   "source_root": str(self.paths.source_root), "python": self.paths.python,
                                   "framework_files": [], "user_files": {}, "jobs": dict(previous.get("jobs") or {}),
-                                  "framework_ownership": "project", "framework_version": "hermes-native/3"}
+                                  "framework_ownership": "project", "framework_version": "hermes-native/4-cli"}
         for a in actions:
             if a.run is not None:
                 a.run()
@@ -475,7 +481,7 @@ class Installer:
             text = _read(path)
             if text is None:
                 continue
-            if mark in text and repr(str(self.paths.todo_home)) in text:
+            if generated_mark(text, mark) and repr(str(self.paths.todo_home)) in text:
                 actions.append(Action("remove", str(path), "remove generated file", run=path.unlink))
             else:
                 actions.append(Action("keep", str(path), "not written by todo-manager; left in place"))
@@ -512,7 +518,7 @@ def kept_after_uninstall(cfg: config.Config, active_delegations: int) -> list[st
            "to take the data elsewhere: `todo-manager export`; to delete it, remove the workspace directory yourself"]
     if active_delegations:
         out.append(f"{active_delegations} delegation(s) are still open on the board and Hermes keeps working on them:"
-                   " close them first (`todo-manager delegate cancel <id>`) or archive them in Hermes")
+                   " close them first (`todo-manager delegate message <id> --kind cancel --human`) or archive them in Hermes")
     return out
 
 
@@ -587,25 +593,6 @@ def status(cfg: config.Config) -> dict[str, Any]:
 
 # --------------------------------------------------------------------------- CLI
 
-def add_parser(sub: Any) -> None:
-    s = sub.add_parser("hermes", help="Hermes integration: status / install / resume / pause")
-    hs = s.add_subparsers(dest="action", required=True)
-    hs.add_parser("status")
-    x = hs.add_parser("install", help="show the plan, then install or upgrade (managed files are backed up and updated;"
-                                      " job settings are kept; new jobs are created paused)")
-    x.add_argument("--dry-run", action="store_true")
-    x.add_argument("--yes", action="store_true", help="apply without the interactive confirmation")
-    for name in ("resume", "pause"):
-        x = hs.add_parser(name, help=f"{name} both todo-manager cron jobs")
-        x.add_argument("--yes", action="store_true")
-    s.set_defaults(fn=cmd_hermes)
-    u = sub.add_parser("uninstall", help="remove the cron jobs, gate scripts, launcher and the unchanged skill;"
-                                         " all data stays")
-    u.add_argument("--dry-run", action="store_true")
-    u.add_argument("--yes", action="store_true", help="remove without the interactive confirmation")
-    u.set_defaults(fn=cmd_uninstall)
-
-
 def _confirm(question: str) -> bool:
     if not sys.stdin.isatty():
         return False
@@ -619,49 +606,32 @@ def _print_plan(actions: list[Action], dry_run: bool) -> None:
             print(a.diff.rstrip())
 
 
-def cmd_hermes(args: argparse.Namespace) -> int:
-    cfg = config.load(args.home)
-    if args.action == "status":
-        print(json.dumps(status(cfg), ensure_ascii=False, indent=1))
-        return 0
-    inst = Installer(cfg, Paths.from_config(cfg))
-    if args.action in ("resume", "pause"):
-        if not args.yes and not _confirm(f"{args.action} the todo-manager cron jobs now?"):
-            print("not confirmed; nothing changed (pass --yes to skip the prompt)")
-            return 2
-        print("\n".join(inst.set_jobs_state(args.action)))
-        return 0
-    actions = inst.plan()
-    _print_plan(actions, dry_run=args.dry_run)
-    if args.dry_run:
-        return 0
-    if not any(a.changes for a in actions):
-        inst.apply(actions)
-        print("nothing to change")
-        return 0
-    if not args.yes and not _confirm("Apply these changes?"):
-        print("not confirmed; nothing changed (pass --yes to skip the prompt)")
-        return 2
-    for line in inst.apply(actions):
-        print(f"done: {line}")
-    return 0
-
-
 def cmd_uninstall(args: argparse.Namespace) -> int:
     from . import db, delegation
     cfg = config.load(args.home)
     inst = Installer(cfg, Paths.from_config(cfg))
     actions = inst.uninstall_plan()
-    _print_plan(actions, dry_run=False)
+    if not getattr(args, "json", False):
+        _print_plan(actions, dry_run=False)
     active = 0
     if cfg.db_path.exists():
-        conn = db.connect(cfg.db_path)
+        conn = db.open_existing(cfg.db_path, readonly=True)
         try:
             active = conn.execute(f"SELECT COUNT(*) FROM delegations WHERE status IN"
                                   f" ({','.join('?' * len(delegation.ACTIVE))})", delegation.ACTIVE).fetchone()[0]
         finally:
             conn.close()
     notes = kept_after_uninstall(cfg, active)
+    if getattr(args, 'json', False):
+        result = {'plan': [{'kind': a.kind, 'target': a.target, 'summary': a.summary} for a in actions], 'kept': notes}
+        if args.dry_run:
+            print(json.dumps(result))
+            return 0
+        if not args.yes:
+            print(json.dumps({**result, 'confirmation': 'repeat with --yes'}))
+            return 2
+        print(json.dumps({**result, 'removed': inst.uninstall(actions)}))
+        return 0
     print("\n".join(notes))
     if args.dry_run:
         return 0

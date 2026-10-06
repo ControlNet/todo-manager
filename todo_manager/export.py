@@ -20,7 +20,7 @@
 * After an import or a restore, ``reconcile_after_restore`` releases claims of runs that no
   longer exist, holds Notion comments that may already have been sent
   (state pushes stay: they converge), and holds delegation submissions and messages until the
-  user checks the board and runs ``todo-manager delegate release-hold``.
+  user checks the board and runs ``todo-manager resume --release-recovery-hold --yes``.
 """
 
 from __future__ import annotations
@@ -252,7 +252,7 @@ def _write_export(conn: sqlite3.Connection, cfg: Config, root: Path) -> None:
         if source.is_dir():
             shutil.copytree(source, target, dirs_exist_ok=True,
                             ignore=shutil.ignore_patterns("*.sqlite", "*.sqlite-wal", "*.sqlite-shm"))
-    (framework / "version.json").write_text(json.dumps({"framework": "hermes-native/3", "schema": db.SCHEMA_VERSION}))
+    (framework / "version.json").write_text(json.dumps({"framework": "hermes-native/4-cli", "schema": db.SCHEMA_VERSION}))
     files = {str(p.relative_to(root)): {"sha256": sha256_file(p), "size": p.stat().st_size}
              for p in sorted(root.rglob("*")) if p.is_file() and p != root / "manifest.json"}
     manifest = {"format": EXPORT_FORMAT, "exported_at": clock.iso(), "schema_version": db.schema_version(conn),
@@ -415,6 +415,11 @@ def reconcile_after_restore(conn: sqlite3.Connection, reason: str) -> dict[str, 
     now = clock.iso()
     report: dict[str, Any] = {}
     with db.tx(conn):
+        report['released_runs'] = 0
+        for row in conn.execute("SELECT id, summary FROM runs WHERE wake=1 AND released_at IS NULL").fetchall():
+            summary = {**loads(row['summary'], {}), 'done': {'recovered': reason, 'coverage': 'unconfirmed'}}
+            conn.execute('UPDATE runs SET released_at=?, summary=? WHERE id=?', (now, db.dumps(summary), row['id']))
+            report['released_runs'] += 1
         report["released_batches"] = conn.execute(
             "UPDATE batches SET state='mature', claimed_run=NULL, claimed_at=NULL WHERE state='claimed'").rowcount
         report["released_feedback"] = conn.execute(

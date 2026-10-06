@@ -18,7 +18,7 @@ confirmation) and enables the Kanban integration.
 | `kanban.auto_decompose` (Hermes default `true`) | when on, Hermes fans `triage` cards out into new cards on every board; the loop breaker parks a second same-kind question in triage. Global in Hermes. |
 | dispatcher limits (`kanban.max_in_progress`, ...) | how many cards run at once, on every board |
 
-`todo-manager health` shows what the two switches mean while they are on (read once a day,
+`todo-manager status --details` shows what the two switches mean while they are on (read once a day,
 as notes, not problems), with the command to turn them off if you want deliveries to wait for
 you:
 

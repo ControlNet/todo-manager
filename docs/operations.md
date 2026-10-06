@@ -20,77 +20,48 @@ python3 -m unittest discover -s tests -t .        # expect "OK" (Hermes integrat
 
 Requirements: Python ≥ 3.11 (standard library only), Hermes with cron and Kanban.
 
-`install` runs these steps in order. Each step detects what is already done, so the command is
-safe to re-run (to finish an install, or after an upgrade):
+`install` discovers settings in a temporary workspace. It asks about source scope (selected
+mailboxes, Slack conversation types, GitHub participation), the Notion home page and identity,
+a valid execution profile or disabled delegations, and whether new cron jobs should start.
+Previously configured choices are kept. Discovery performs remote reads only. All concrete
+writes are shown in one combined preview; confirmation never supplies a missing answer.
 
-| Step | Inferred from | Asked / confirmed |
-|---|---|---|
-| `workspace` | `hermes config get display.language` and `timezone`, else the system time zone | the time zone, only when Hermes has none and the machine runs on UTC |
-| `email` | himalaya accounts with a Gmail token command (`~/.config/himalaya/config.toml`); addresses from the Gmail profile | which mailboxes to read, when there are several |
-| `slack` | `~/.hermes/credentials/slack_user_token`, else `SLACK_USER_TOKEN` in Hermes' `.env`; `auth.test` gives your user id and workspace | — (DMs, group DMs and member channels are read; leave some out with `slack.exclude`) |
-| `github` | `gh auth token`; `GET /user` gives your login | — |
-| `notion` | `NOTION_API_KEY` in Hermes' `.env` (`hermes config env-path`); your user id is the workspace's only person | **the home page, always** (a list of the top-level pages shared with the integration; an id or URL is accepted too); the writes (`notion plan`) need a yes; your user, when the workspace has several people |
-| `kanban` | `kanban.review_dispatch` / `kanban.auto_decompose` and the board | a yes for `hermes config set …` (global Hermes settings) and creating the board |
-| `hermes` | — | a yes for the launcher, gate scripts, skill and cron jobs (below) |
-| `schedule` | — | a yes to start the cron jobs |
+Without a terminal it returns structured `needs_answer` or `needs_confirmation` and exit 3.
+Repeat the returned command with the requested `--answer KEY=VALUE`. After all answers are
+known, use the provided confirmation command with `--yes`. There are no separate workspace,
+Hermes, Notion or schedule CLI stages. Source secrets remain in environment/token helpers.
 
-What is inferred or chosen is written into `config.toml` key by key; comments and everything
-else in the file stay as they are. A key you set yourself is kept: a source whose `enabled` is
-in `config.toml` is left as configured, and identities are only added to. No token is written
-to `config.toml`, and reading the other systems is read-only (nothing is sent).
-
-Without a terminal (for example from a Hermes chat) `install` stops at the first question or
-confirmation, prints it as JSON and exits with status 3; the JSON carries the command to run next:
-
-```bash
-./bin/todo-manager install                                   # {"status": "needs_answer", "key": "notion.home_page", "options": [...], "answer_with": "..."}
-./bin/todo-manager install --answer notion.home_page=1       # an option number, a page id or a page URL
-./bin/todo-manager install --answer notion.home_page=1 --yes notion   # or --no notion; --yes all confirms every step
-```
-
-Answers are not remembered between runs until their step is done, so repeat them (the
-`answer_with` / `confirm_with` commands do). The separate commands still exist for single steps:
-`init` (workspace only), `notion plan|setup`, `hermes install|status|resume|pause`.
-
-The `hermes` step writes a launcher `~/.local/bin/todo-manager`, two pre-run scripts under
-`~/.hermes/scripts/`, the skill `todo-manager` and two cron jobs. The jobs are created paused,
-deliver `local` (kept in Hermes, nothing sent) and run with `TODO_HOME` as their working
-directory, so Hermes loads `TODO_HOME/AGENTS.md` (managed framework instructions, unless shadowed by native priority) as their project context:
-
-| Job | Schedule | Pre-run gate |
-|---|---|---|
-| `todo-manager-intake` | `*/5 * * * *` | fetch sources, batch, wake the model only for mature batches, due follow-ups or the daily commit digest |
-| `todo-manager-feedback` | `2-59/5 * * * *` | Notion edits/comments, Kanban results, outbox, home freshness; wakes the model only for feedback that needs interpretation |
-
-`hermes install --dry-run` prints the plan only.
+The resulting two jobs are `todo-manager-intake` (`*/5 * * * *`) and
+`todo-manager-feedback` (`2-59/5 * * * *`). Installed scripts call fixed Python pre-run entry
+points. Hermes owns Script Output injection, skills, project instructions, native memory,
+workers and delivery. Missing memory/skill or shadowed project instructions are reported by
+`status --details`; no loader or global settings repair is installed.
 
 ## Upgrade
 
+Read [the CLI transition procedure](cli.md#switching-from-the-old-cli) before this breaking CLI
+release. Drain old callers with the old checkout first; do not pull new code underneath an
+active old launcher. Use a separate checkout to test and prepare the new installation. The new
+installer refuses woken unsettled runs, but arbitrary main-chat sessions must also be drained.
+
 ```bash
-cd ~/src/todo-manager && git pull
-./bin/todo-manager install            # or: todo-manager hermes install --dry-run, then --yes
+./bin/todo-manager install --json       # collect missing answers and inspect combined changes
+# Repeat the returned command, including all choices, with --yes only after review.
+./bin/todo-manager status --details --json
 ```
 
-What an upgrade does with each part (the record is `TODO_HOME/state/hermes/install.json`, the
-texts installed last are under `state/hermes/baseline/`):
-
-| Part | Owner after install | Upgrade |
-|---|---|---|
-| gate scripts, launcher | Todo Manager | replaced (a file there without the Todo Manager mark is left alone and reported) |
-| skill `todo-manager`, the two cron prompts, `TODO_HOME/AGENTS.md` | project | known owned files are backed up under `backups/framework/` then replaced; unknown ownership is reported and preserved |
-| cron job schedule, deliver, failure_deliver, workdir, skills, model, provider, reasoning_effort | you | all existing values are preserved |
-| cron job state (paused / running) | you | never changed by an upgrade |
-
-Hermes' job store is only read: every change is a `hermes cron create|edit` command. A job whose
-workdir is not `TODO_HOME` may miss managed instructions; `health` checks native discovery and memory flags.
+Owned gate/launcher/skill/prompts/AGENTS are backed up then updated. Unknown ownership conflicts
+stop the combined installation. User cron schedule, deliver, failure_deliver, workdir, skills,
+model, provider, reasoning_effort, and paused/running state are preserved. No native memory is
+replaced. A safety backup precedes local upgrade; remote application is re-runnable, not atomic.
+Global Hermes switches are read and reported, never modified.
 
 ## Change the automation
 
 Ask Hermes in chat (it uses the skill), or change it yourself:
 
 ```bash
-todo-manager prefs show                               # managed framework context, not personal memory
-todo-manager config set slack.quiet_minutes 60        # e.g. "wait an hour of Slack silence before analysing"
+todo-manager config set slack.quiet_minutes 60 --human        # e.g. "wait an hour of Slack silence before analysing"
 hermes cron edit <job id> --schedule "*/10 * * * *"   # a cron setting: kept by later upgrades
 hermes cron list                                      # find the two native job IDs
 ```
@@ -102,24 +73,24 @@ Memory capacity, enable flags and write approval apply; running sessions retain 
 ## Daily checks
 
 ```bash
-todo-manager health            # problems first; exit code 1 when there are problems
-todo-manager health --json     # sources, outbox, feedback, delegations, runs
-todo-manager metrics --days 7  # runs, wakes, completions, errors, tasks created, model token usage
-todo-manager hermes status     # launcher, scripts, skill/prompts/AGENTS.md state, upgrade conflicts, jobs
-todo-manager history <task id> # field-level history of one task or project
+todo-manager status                         # operational summary, exit 1 for problems
+todo-manager status --details --json        # health, installation, paths, metrics and native usage
 ```
+
+Use `task show ID --history` or `project show ID --history` for object history.
+
 
 Problems (stale sources, failing channels, given-up writes, quarantined delegations, failed
 feedback, a gate that has not run, a run deferred over its context budget, Notion pages a run
 could not use) also appear in the Notion freshness box. A problem is identified by what is wrong
-(the source scope or channel, the kind of problem; `problem_keys` in `health --json`), not by its
+(the source scope or channel, the kind of problem; `problem_keys` in `status --details --json`), not by its
 text, so a changing error message is still one problem.
 
 todo-manager sends no messages of its own. Results, questions and failures of delegations,
 replies to feedback and notices (an unknown approval outcome, a held comment, failed feedback)
 are Notion comments on the task page, or on the home page when there is no task page (chat
 feedback without a task, a task page in the trash). What a woken cron run reports (its last line) is
-delivered by that Hermes cron job's own `deliver` setting: `hermes install` creates the jobs
+delivered by that Hermes cron job's own `deliver` setting: `install` creates the jobs
 with `local` (kept in Hermes, nothing sent) and never changes it afterwards, so to get run
 results in a chat set it in Hermes, e.g. `hermes cron edit <job id> --deliver matrix` (the
 home channel of that platform). An idle gate (nothing to interpret) wakes no model and
@@ -133,7 +104,7 @@ delivers nothing.
   time (`next_due_at`, tomorrow's `commits.digest_time`): it is stale only 30 minutes after that
   without a read, or at once when a due read fails — never between two daily reads.
 - A **gate channel** is one of the feedback gate's own steps, kept in the same `cursors` table
-  (`health --json` shows `"channel": true`): `notion`/`comments`, `bodies`, `dirty`, `home`;
+  (`status --details --json` shows `"channel": true`): `notion`/`comments`, `bodies`, `dirty`, `home`;
   `kanban`/`settings`, `messages`, `submit`, `cards`; `gate`/`claims`, `alerts`, `outbox`. A pass
   with a failure (an API error on any page or card, or the step raising) adds a consecutive
   failure with the first error; the next clean pass clears it. A channel that merely had nothing
@@ -141,7 +112,7 @@ delivers nothing.
   channel failure. None of this creates feedback or wakes the model.
 
 ```bash
-todo-manager health --json | python3 -c 'import json,sys; r=json.load(sys.stdin); [print(s["source"], s["scope"], s["failures"], s["error"]) for s in r["sources"] if s["failures"]]'
+todo-manager status --details --json | python3 -c 'import json,sys; r=json.load(sys.stdin); [print(s["source"], s["scope"], s["failures"], s["error"]) for s in r["health"]["sources"] if s["failures"]]'
 ```
 
 Expected when all is well: no output. A failing channel prints e.g. `kanban cards 2 snapshot failed: …`.
@@ -152,18 +123,16 @@ prompt/completion tokens of the two jobs from Hermes' `cron/usage_audit.jsonl`.
 ## Pause, resume, roll back
 
 ```bash
-todo-manager hermes pause --yes     # stops both cron jobs (nothing runs, nothing is lost)
-todo-manager hermes resume --yes
+todo-manager pause                # the two cron jobs only; workers may still run
+todo-manager sync --json          # deterministic pass; no semantic claims or model
+todo-manager resume               # the two cron jobs only; recovery holds remain
 ```
 
-Roll back completely:
-
-1. `todo-manager hermes pause --yes`.
-2. `todo-manager backup` (keep the current state), then, if needed,
-   `todo-manager restore <backups/…sqlite> --yes` to return to an earlier state
-   (a `pre-restore` safety copy is taken automatically).
-3. Notion pages are not deleted by any command. Move them to the Notion trash yourself if you
-   want them gone.
+Before recovery, export the current workspace, stop old business callers and inspect the
+replacement with `restore`. Existing data is replaced only with `--yes`, after a safety backup.
+A restored workspace keeps delegation holds and unknown external actions non-replayable.
+Use `resume --release-recovery-hold --yes` only after comparing the native board and uncertain
+effects; this separate action does not resume the cron jobs. See [CLI recovery](cli.md#restore-and-controls).
 
 ## Uninstall
 
@@ -186,12 +155,12 @@ brings everything back on the same data.
 
 Two different things:
 
-- **Backup** (`backup` / `restore`): one consistent SQLite file (tasks, history, evidence,
+- **Internal safety backup** (accepted by `restore`): one consistent SQLite file (tasks, history, evidence,
   feedback, delegations, deliveries, outbox, cursors, the retired rule tables) plus a copy of
   `config.toml`, `AGENTS.md` and `rules-archive.md` in `backups/<name>.files/`. A restore puts
   both back (the `pre-restore` safety backup keeps the current ones). Delivery files and run
   context are not in a backup.
-- **Portable workspace** (`export` / `import`): everything needed to continue elsewhere. The
+- **Portable workspace** (`export` / `restore`): business data and declared framework evidence; native profile assets are excluded. The
   database is first copied with SQLite's online backup (one consistent read, safe while gates and
   applies run) and everything is written from that copy: `data.json` (every table, including
   source bodies and history), Markdown views, `workspace/config.toml` with secret-looking values
@@ -203,8 +172,8 @@ Two different things:
   a hash for every file and table, `artifact_problems` (a kept file missing or changed since it
   was recorded) and `integrity` (each task's and project's history holds exactly versions
   1..its version; no dangling reference). Not included: credentials, `backups/`,
-  earlier `exports/`, `notes/`, `migration/` working files and `state/hermes/` (the install record,
-  baselines and conflict notes of this machine).
+  earlier `exports/`, `notes/`, `migration/` working files and an actively restored installation. Installation records, baselines, conflict notes and
+  prior managed files are exported separately under `framework/` as inspection/recovery evidence.
   History that exists only on the Hermes board (card comments, run logs) stays in Hermes; what
   todo-manager needs from it (questions, answers, deliveries and their files, failures) is
   already copied into its own tables when the card is synced.
@@ -212,8 +181,7 @@ Two different things:
 ```bash
 todo-manager export            # exports/<stamp>/: data.json, workspace/, tasks/*.md, projects/*.md, views/, manifest.json
 todo-manager export --verify   # also rebuilds a scratch database from data.json, compares every table, checks history
-todo-manager backup --keep 14  # consistent SQLite copy + workspace files in backups/, keeps the newest 14
-todo-manager restore backups/todo-<stamp>.sqlite --yes   # integrity-checked; takes both gate locks
+todo-manager restore backups/todo-<stamp>.sqlite --yes   # integrity-checked; exclusive workspace lock
 ```
 
 `export` prints `"integrity": []` and `"artifact_problems": []` when all is well and exits 1 when
@@ -221,24 +189,24 @@ the history check fails (`--verify` also fails then). `restore` (and its preview
 `--yes`) shows `integrity_problems` for the backup; a restore is not refused for them (it is the
 way back), an import is.
 
-Moving to a new directory or machine (the target must be absent or empty; nothing is written
-until the whole bundle has been checked against its manifest and its history):
+Moving to a new directory or machine (an absent/empty target is rebuilt directly; an existing target requires preview and --yes.
+Nothing is replaced until the bundle has been checked against its manifest and history):
 
 ```bash
 todo-manager export
-todo-manager import ~/.hermes/workspace/todo-manager/exports/<stamp> --into /path/to/new/todo-manager
-export NOTION_API_KEY=...        # secrets come from your environment again, never from the bundle
-todo-manager --home /path/to/new/todo-manager health
+todo-manager --home /path/to/new/todo-manager restore /path/to/export-bundle
+# Configure credentials privately using the original environment or token helper.
+todo-manager --home /path/to/new/todo-manager status --details
 todo-manager --home /path/to/new/todo-manager delegate list
-todo-manager --home /path/to/new/todo-manager delegate release-hold   # after checking the board
+todo-manager --home /path/to/new/todo-manager resume --release-recovery-hold --yes   # after checking the board
 ```
 
 **No replay after an import or restore.** Claims of runs that no longer exist are released;
 Notion comments that may already have gone out are marked dead instead of
 being sent again (idempotent Notion state pushes stay queued); card submissions and messages to
-the board are held. `health` shows "delegations held since …" until you have compared the board
+the board are held. `status --details` shows "delegations held since …" until you have compared the board
 (`hermes kanban --board todo-manager list --tenant todo-manager`) with `todo-manager delegate list` and run
-`delegate release-hold`. Old workers are never restarted by todo-manager; the next sync reads the
+`resume --release-recovery-hold --yes`. Old workers are never restarted by todo-manager; the next sync reads the
 board as it is.
 
 ## Upgrading an existing workspace (schema migrations)
@@ -246,7 +214,7 @@ board as it is.
 This version uses schema 10. Schema 9 added child-card associations and event history, message
 target cards, pinned notification routes and predecessor delegation/delivery IDs. Schema 10
 adds persistent child-discovery synchronization responsibility. F01–F05 makes no schema change. Existing task,
-feedback, approval and uncertain-action data remain intact. The first database open creates
+feedback, approval and uncertain-action data remain intact. Installation, not inspection, creates
 `backups/pre-schema-v10-from-v<old>-<stamp>.sqlite` using SQLite online backup before migration.
 
 Schema <=7 rule records are preserved verbatim in `rules-archive.md`; no natural-language
@@ -285,7 +253,7 @@ Values are set with `todo-manager config set <key> <value>` (comments and other 
 | `kanban.max_retries` | 1 | Hermes per-card failure breaker; cards allowed an external action always get 1 |
 | `hermes.model`, `hermes.provider`, `hermes.reasoning_effort` | unset (Hermes' defaults) | set on the cron jobs by `install`; a value you change in Hermes is kept |
 
-Keys that no longer have an effect (`health` names them while `config.toml` still sets them):
+Keys that no longer have an effect (`status --details` names them while `config.toml` still sets them):
 
 | Key | Why |
 |---|---|
@@ -298,11 +266,11 @@ Keys that no longer have an effect (`health` names them while `config.toml` stil
 The migration is proposal-based and read-only on the old pages:
 
 ```bash
-todo-manager migrate fetch --tasks-ds <old tasks data source> --projects-ds <old projects data source>
-todo-manager migrate propose ~/.hermes/workspace/todo-manager/migration/<stamp>
+python3 -B -m todo_manager.migrate_legacy fetch --tasks-ds <old tasks data source> --projects-ds <old projects data source>
+python3 -B -m todo_manager.migrate_legacy propose ~/.hermes/workspace/todo-manager/migration/<stamp>
 # edit tasks.csv / projects.csv: action = keep | history | drop (resolve every "review")
-todo-manager migrate apply ~/.hermes/workspace/todo-manager/migration/<stamp>          # preview
-todo-manager migrate apply ~/.hermes/workspace/todo-manager/migration/<stamp> --yes --resolve-threads
+python3 -B -m todo_manager.migrate_legacy apply ~/.hermes/workspace/todo-manager/migration/<stamp>          # preview
+python3 -B -m todo_manager.migrate_legacy apply ~/.hermes/workspace/todo-manager/migration/<stamp> --yes --resolve-threads
 ```
 
 `keep` rows become open tasks (pushed to Notion on the next sync); `history` rows become closed
@@ -312,14 +280,16 @@ closed; `drop` rows stay only in the old system. Nothing old is modified or dele
 
 ## Recovering from failures
 
-- A gate never crashes the cron job: failures are recorded per step, the wake line is still
-  printed, and one failing system (Notion, Kanban, a source) does not stop the others.
+- Recoverable source/sync failures are recorded per step without pretending inputs are complete.
+  A gate-level exception exits nonzero. Hermes may inject Script Error and wake the agent; the
+  prompt requires [CRON_FAILURE] with no business mutation.
 - Outbound writes go through the outbox with retries and back-off; an uncertain write is
-  reconciled (looked up) before any retry. Given-up writes show in `health`; after fixing the
-  cause, the next dirty scan re-queues the push.
+  reconciled (looked up) before any retry. Given-up writes show in `status --details`; after fixing the
+  cause, unchanged projections retain their retry/exhaustion state; a real projection change
+  uses the existing replacement/reconciliation path without resetting active Retry-After.
 - Feedback that the model claimed but never applied is retried (bounded), then marked failed
-  (a comment on its task page; `health` lists it).
-- Overlapping runs are prevented by per-gate locks; a restore takes both locks.
+  (a comment on its task page; `status --details` lists it).
+- Overlapping runs are prevented by per-gate locks; a restore takes the shared writers’ workspace lock exclusively.
 - A message to the board that Hermes applied to a newer question or version than the one you
   replied to (someone acted on the dashboard at the same moment) is kept as sent, marked
   `raced` on the message (`todo-manager task show <task>`), and you get a task comment; check

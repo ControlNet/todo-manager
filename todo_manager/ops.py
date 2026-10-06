@@ -137,11 +137,11 @@ def not_ready(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any]) -> str 
 def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, feedback_id: str | None = None,
             request: str | None = None, said: str | None = None, origin: str = "matrix",
             scope: str | None = None, key: str | None = None,
-            write: bool = True) -> Ctx:
+            write: bool = True, human: bool = False) -> Ctx:
     """Resolve and check the context of a command (``write``: it changes Todo data)."""
-    given = [x for x in (run, feedback_id, request) if x]
+    given = [x for x in (run, feedback_id, request, human) if x]
     if len(given) > 1:
-        raise OpError("INVALID", "give one of --run, --feedback, --request")
+        raise OpError("INVALID", "give one of --run, --feedback, --request, --human")
     if (said or "").strip() and not request:
         raise OpError("INVALID", "--said goes with --request <id>: the Matrix event id of the user's message, or"
                                  " one id you choose for this request")
@@ -170,8 +170,14 @@ def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, fe
         return Ctx("feedback", feedback_id, actor="human", origin=_fb_origin(fb), fb=fb, key=key,
                    refusal=refusal, cfg=cfg)
     if request:
-        if not (said or "").strip():
-            raise OpError("INVALID", "--request needs --said with the user's words")
+        prior = conn.execute("SELECT text FROM feedback WHERE source_id IN (?,?) AND kind='direct' AND origin=? "
+                             "ORDER BY rowid LIMIT 1", (request.strip(), f'record:{request.strip()}', origin)).fetchone()
+        if prior and (said or '').strip() and (prior['text'] or '').strip() != said.strip():
+            raise OpError('REQUEST_ID_REUSED', 'this request ID already names different words')
+        if not (said or '').strip():
+            if prior is None:
+                raise OpError('INVALID', "a new --request needs --said with the user's words")
+            said = prior['text']
         scope_type, _, scope_id = (scope or "global").partition(":")
         fid, created = feedback.record(conn, origin=origin if origin in ("matrix", "cli") else "matrix",
                                        source_id=request.strip(), text=said, scope_type=scope_type,
@@ -188,6 +194,8 @@ def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, fe
             with tx(conn):
                 feedback.supersede(conn, recorded, "handled directly in the chat", by=fid)
         return Ctx("request", request.strip(), actor="human", origin=fb["origin"], fb=fb, key=key)
+    if write and not human:
+        raise OpError("CONTEXT_REQUIRED", "use --run, --feedback, --request, or --human for a manual write")
     return Ctx("cli", None, actor="human", origin="cli", key=key)
 
 
@@ -427,20 +435,6 @@ def task_update(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, task_id: str, *
     return perform(conn, ctx, "task update", args, apply)
 
 
-def task_rewrite_box(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, task_id: str) -> dict[str, Any]:
-    """Let the Todo-Manager box of the task's page be written again after a user edit inside it
-    was clarified and settled (an edit resolved as applied or ignored releases it by itself)."""
-    if store.get_task(conn, task_id) is None:
-        raise OpError("NOT_FOUND", f"no task {task_id}")
-
-    def apply() -> dict[str, Any]:
-        release_body(conn, task_id)
-        effects.task_push(conn, task_id)
-        return {"task": task_id, "box": "written again with the next sync"}
-
-    return perform(conn, ctx, "task rewrite-box", {"task": task_id}, apply)
-
-
 def task_link(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, task_id: str,
               evidence: list[tuple[str, str]], reason: str | None = None) -> dict[str, Any]:
     if not evidence:
@@ -597,7 +591,7 @@ def followup_checked(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, task_id: s
 
 def digest_done(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, reason: str | None = None) -> dict[str, Any]:
     if ctx.run is None:
-        raise OpError("INVALID", "digest done needs --run")
+        raise OpError("INVALID", "digest confirmation needs a run")
     manifest = runs.read_json(cfg.home, ctx.run["id"], "manifest.json") or {}
     digest = manifest.get("digest")
     if not digest:
@@ -653,7 +647,13 @@ def release_body(conn: sqlite3.Connection, task_id: str) -> None:
 
 
 def feedback_resolve(conn: sqlite3.Connection, cfg: Config, feedback_id: str, *, outcome: str,
-                     reply: str | None = None, reason: str | None = None) -> dict[str, Any]:
+                     reply: str | None = None, reason: str | None = None, settles: str | None = None) -> dict[str, Any]:
+    with tx(conn):
+        return _feedback_resolve(conn, cfg, feedback_id, outcome=outcome, reply=reply, reason=reason, settles=settles)
+
+
+def _feedback_resolve(conn: sqlite3.Connection, cfg: Config, feedback_id: str, *, outcome: str,
+                     reply: str | None = None, reason: str | None = None, settles: str | None = None) -> dict[str, Any]:
     fb = feedback.get(conn, feedback_id)
     if fb is None:
         raise OpError("NOT_FOUND", f"no feedback item {feedback_id}")
@@ -661,7 +661,7 @@ def feedback_resolve(conn: sqlite3.Connection, cfg: Config, feedback_id: str, *,
         raise OpError("INVALID", f"--outcome must be one of {', '.join(FEEDBACK_OUTCOMES)}")
     reply = (reply or "").strip()
     if fb["status"] != "pending":
-        if fb["status"] == outcome:
+        if fb["status"] == outcome and (fb.get("result") or {}).get("settles") == settles:
             return {"feedback": feedback_id, "outcome": outcome, "duplicate": True}
         if fb["status"] == "superseded":
             raise OpError("SUPERSEDED", f"{feedback_id} was replaced by a later edit of the same text; nothing to"
@@ -680,7 +680,21 @@ def feedback_resolve(conn: sqlite3.Connection, cfg: Config, feedback_id: str, *,
     if len(reply) > MAX_REPLY_CHARS:
         raise OpError("INVALID", f"--reply has {len(reply)} characters; a Notion comment holds {MAX_REPLY_CHARS}")
     with tx(conn):
-        result: dict[str, Any] = {"reason": reason}
+        result: dict[str, Any] = {"reason": reason, "settles": settles}
+        if settles:
+            original = feedback.get(conn, settles)
+            if (not original or original['kind'] != 'body_edit' or original['status'] != 'clarify'
+                    or original['scope_type'] != 'task' or fb['scope_type'] != 'task'
+                    or original['scope_id'] != fb['scope_id'] or not fb['author_is_user']
+                    or outcome not in ('applied', 'ignored')):
+                raise OpError('INVALID_LINK', 'settles must identify the clarified body edit of this task')
+            page = conn.execute('SELECT * FROM notion_pages WHERE page_id=?',
+                                (original['payload'].get('page_id'),)).fetchone()
+            if (not page or page['box_revision'] != original['payload'].get('revision')
+                    or page_body_unread(conn, cfg, original)):
+                raise OpError('STALE_BODY', 'a newer or unread body edit cannot be released by this answer')
+            release_body(conn, original['scope_id'])
+            effects.task_push(conn, original['scope_id'])
         if reply:
             _queue_reply(conn, fb, reply)
             result["reply"] = reply
@@ -695,9 +709,25 @@ def feedback_resolve(conn: sqlite3.Connection, cfg: Config, feedback_id: str, *,
 
 def feedback_record(conn: sqlite3.Connection, *, request: str, said: str, scope: str | None,
                     origin: str = "matrix") -> dict[str, Any]:
+    with tx(conn):
+        return _feedback_record(conn, request=request, said=said, scope=scope, origin=origin)
+
+
+def _feedback_record(conn: sqlite3.Connection, *, request: str, said: str, scope: str | None,
+                    origin: str = "matrix") -> dict[str, Any]:
     """Store what the user said for the next feedback run to interpret."""
     if not (request or "").strip() or not (said or "").strip():
         raise OpError("INVALID", "--request and --said are required")
+    prior = conn.execute("SELECT text FROM feedback WHERE source_id IN (?,?) AND kind='direct' AND origin=?",
+                         (request.strip(), f'record:{request.strip()}', origin)).fetchone()
+    if prior and (prior['text'] or '').strip() != said.strip():
+        raise OpError('REQUEST_ID_REUSED', 'this request ID already names different words')
+    direct = conn.execute("SELECT * FROM feedback WHERE source_id=? AND kind='direct' AND status='applied' AND origin=?",
+                          (request.strip(), origin)).fetchone()
+    if direct:
+        if (direct['text'] or '').strip() != said.strip():
+            raise OpError('REQUEST_ID_REUSED', 'this request was already handled with different words')
+        return {'feedback': direct['id'], 'created': False, 'status': 'already_handled', 'queued': False}
     scope_type, _, scope_id = (scope or "global").partition(":")
     if scope_type not in ("task", "project", "delegation", "global"):
         raise OpError("INVALID", "--scope is task:<id>, project:<id> or global")
@@ -739,7 +769,7 @@ def delegate_create(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, *, task_id:
                     parallel: bool = False, submit: bool = True) -> dict[str, Any]:
     _delegation_ctx(ctx)
     if not (title or "").strip() or not (goal or "").strip():
-        raise OpError("INVALID", "--title and --goal are required")
+        raise OpError("INVALID", "a task title and nonempty delegation brief are required")
     args = {"task": task_id, "title": title, "goal": goal, "context": context_text, "constraints": constraints,
             "deliverable": deliverable, "done": done_criteria, "allowed": allowed, "parallel": parallel}
     key = _key(ctx, "delegate create", args)
@@ -918,32 +948,61 @@ def config_set(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, key: str, value:
     if ctx.kind == "feedback" and GUARDED_SETTINGS.search(key):
         raise OpError("NOT_AUTHORIZED", f"{key} decides identities, credentials, programs or agent work: only the user"
                                         " changes it (terminal, or a chat request with --request/--said)")
+    native_fields = {'model', 'provider', 'reasoning_effort'}
     args = {"key": key, "value": value}
 
     def apply() -> dict[str, Any]:
+        installation = cfg.home / 'state/hermes/install.json'
+        installed_jobs = loads(installation.read_text(), {}).get('jobs') if installation.exists() else {}
+        if key.startswith('hermes.') and key.split('.', 1)[1] in native_fields and installed_jobs:
+            raise OpError('NATIVE_SETTING', 'installed cron settings belong to Hermes; use hermes cron edit on the owned job ID')
         previous = cfg.get(key)
         try:
             changed = config_file.set_values(cfg.home / "config.toml", {key: value})
         except config_file.ConfigEditError as exc:
             raise OpError("INVALID", str(exc)) from None
         return {"set": {key: value}, "previous": previous, "changed": bool(changed),
-                "file": str(cfg.home / "config.toml"), "effective": "from the next run of the jobs"}
+                "file": str(cfg.home / "config.toml"),
+                "effective": ("new installations only" if key.startswith("hermes.") and key.split(".", 1)[1] in native_fields
+                              else "from the next run of the jobs")}
 
     return perform(conn, ctx, "config set", args, apply)
 
 
 # --------------------------------------------------------------------------- runs
 
-def run_done(conn: sqlite3.Connection, cfg: Config, run_id: str, note: str | None = None) -> dict[str, Any]:
+def run_done(conn: sqlite3.Connection, cfg: Config, run_id: str, note: str | None = None, *,
+             checked: list[str] | None = None, digest_reviewed: bool = False) -> dict[str, Any]:
+    with tx(conn):
+        return _run_done(conn, cfg, run_id, note, checked=checked, digest_reviewed=digest_reviewed)
+
+
+def _run_done(conn: sqlite3.Connection, cfg: Config, run_id: str, note: str | None = None, *,
+             checked: list[str] | None = None, digest_reviewed: bool = False) -> dict[str, Any]:
     """The agent finished a run: what it left unhandled is released for a later run now
     (bounded attempts, then failed and reported) instead of waiting for the lease to expire."""
     run = runs.get(conn, run_id)
     if run is None or run["entry"] not in ("intake", "feedback"):
         raise OpError("NOT_FOUND", f"no intake or feedback run {run_id}")
+    confirmations = {"checked": sorted(set(checked or [])), "digest_reviewed": digest_reviewed}
     if run.get("released_at"):
+        if run['summary'].get('confirmations', {"checked": [], "digest_reviewed": False}) != confirmations:
+            raise OpError('SETTLEMENT_CHANGED', 'this run was completed with different confirmations')
         return {"run": run_id, "duplicate": True, **(run["summary"].get("done") or {})}
     report: dict[str, Any] = {}
     with tx(conn):
+        ctx = context(conn, cfg, run=run_id)
+        for task_id in confirmations['checked']:
+            claim = conn.execute('SELECT state, due FROM followup_checks WHERE run_id=? AND task_id=?',
+                                 (run_id, task_id)).fetchone()
+            if claim is None or claim['state'] not in ('claimed', 'done'):
+                raise OpError('STALE_RUN', f'{task_id} is not a follow-up owned by this run')
+            task = store.get_task(conn, task_id)
+            if claim['state'] == 'claimed' and (task.get('follow_up_date') or '')[:10] != claim['due']:
+                raise OpError('STALE_RUN', f'{task_id} follow-up date changed after this claim')
+            followup_checked(conn, cfg, ctx, task_id)
+        if digest_reviewed:
+            digest_done(conn, cfg, ctx)
         now = clock.iso()
         if run["entry"] == "intake":
             left = [r["id"] for r in conn.execute(
@@ -967,7 +1026,7 @@ def run_done(conn: sqlite3.Connection, cfg: Config, run_id: str, note: str | Non
             if left:
                 report["feedback_not_resolved"] = left
                 report["feedback"] = feedback.release(conn, left, int(cfg.get("feedback.max_attempts", 3)))
-        summary = {**run["summary"], "done": report, **({"note": note} if note else {})}
+        summary = {**run["summary"], "done": report, "confirmations": confirmations, **({"note": note} if note else {})}
         conn.execute("UPDATE runs SET released_at=?, agent_completed_at=COALESCE(agent_completed_at, ?), summary=?"
                      " WHERE id=?", (now, now, dumps(summary), run_id))
     return {"run": run_id, **report}

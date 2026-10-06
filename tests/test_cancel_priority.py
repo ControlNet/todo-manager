@@ -35,10 +35,10 @@ class CancelFirstTests(BindingBase):
 
     def cli(self, *args):
         with contextlib.redirect_stdout(io.StringIO()):
-            return cli.main(["--home", str(self.cfg.home), *args])
+            return cli.main(["--home", str(self.cfg.home), *args, "--human"])
 
     def cancel_task_via_cli(self):
-        self.assertEqual(self.cli("task", "update", self.task, "--set", "status=cancelled"), 0)
+        self.assertEqual(self.cli("task", "update", self.task, "--human", "--set", "status=cancelled"), 0)
 
     def voided_notices(self):
         return [t for t in self.outbox_texts() if "未执行" in t or "not carried out" in t]
