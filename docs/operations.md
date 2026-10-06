@@ -55,7 +55,7 @@ Answers are not remembered between runs until their step is done, so repeat them
 The `hermes` step writes a launcher `~/.local/bin/todo-manager`, two pre-run scripts under
 `~/.hermes/scripts/`, the skill `todo-manager` and two cron jobs. The jobs are created paused,
 deliver `local` (kept in Hermes, nothing sent) and run with `TODO_HOME` as their working
-directory, so Hermes loads `TODO_HOME/AGENTS.md` (your conventions) as their project context:
+directory, so Hermes loads `TODO_HOME/AGENTS.md` (managed framework instructions, unless shadowed by native priority) as their project context:
 
 | Job | Schedule | Pre-run gate |
 |---|---|---|
@@ -77,27 +77,27 @@ texts installed last are under `state/hermes/baseline/`):
 | Part | Owner after install | Upgrade |
 |---|---|---|
 | gate scripts, launcher | Todo Manager | replaced (a file there without the Todo Manager mark is left alone and reported) |
-| skill `todo-manager`, the two cron prompts, `TODO_HOME/AGENTS.md` | you (and Hermes acting for you) | 3-way merge of the new template into your text; unchanged text is replaced; when you and the template changed the same lines your text is kept and the merge with conflict markers is written to `state/hermes/conflicts/<name>` (`health` reports it until you resolve it and run install again) |
-| cron job schedule, delivery, working directory, skills, model, provider, reasoning effort | you | a value that differs from what was installed is yours and kept; the others follow the new version |
+| skill `todo-manager`, the two cron prompts, `TODO_HOME/AGENTS.md` | project | known owned files are backed up under `backups/framework/` then replaced; unknown ownership is reported and preserved |
+| cron job schedule, deliver, failure_deliver, workdir, skills, model, provider, reasoning_effort | you | all existing values are preserved |
 | cron job state (paused / running) | you | never changed by an upgrade |
 
 Hermes' job store is only read: every change is a `hermes cron create|edit` command. A job whose
-working directory is not `TODO_HOME` runs without your conventions; `health` reports it.
+workdir is not `TODO_HOME` may miss managed instructions; `health` checks native discovery and memory flags.
 
 ## Change the automation
 
 Ask Hermes in chat (it uses the skill), or change it yourself:
 
 ```bash
-todo-manager prefs show                               # your conventions (TODO_HOME/AGENTS.md)
+todo-manager prefs show                               # managed framework context, not personal memory
 todo-manager config set slack.quiet_minutes 60        # e.g. "wait an hour of Slack silence before analysing"
 hermes cron edit <job id> --schedule "*/10 * * * *"   # a cron setting: kept by later upgrades
-hermes cron edit <job id> --prompt "$(cat my-intake-prompt.md)"
+hermes cron list                                      # find the two native job IDs
 ```
 
-A scheduled run never changes the program, its prompts, the skill, `config.toml` or cron
-settings, and never grants itself permissions; it records a lasting preference in `AGENTS.md`
-only when your own comment says so. Changes take effect at the next run.
+A scheduled run does not change framework files or native cron settings. Authenticated user
+feedback may change allowed source settings or explicitly request native USER.md memory updates.
+Memory capacity, enable flags and write approval apply; running sessions retain their snapshots.
 
 ## Daily checks
 
@@ -243,79 +243,28 @@ board as it is.
 
 ## Upgrading an existing workspace (schema migrations)
 
-This version uses schema v8. Earlier steps: v2 binds delegation messages to Kanban events, v3
-records pending Notion writes, v4 tracks page-body reads, v5 adds exactly-once decision
-application and follow-up checks, v6 adds a revision per Notion comment / managed box / notes
-stream and the identities of delegations and messages (one table, `delegation_messages`, is
-copied row by row into a table without its old UNIQUE constraint; nothing is deleted), v7 adds
-where each message's comment sits on the card, why a feedback item is held and whether a Notion
-comment is still listed. v8 adds `approvals.answer_message_id` (an approval given with the
-answer to a worker's question) and retires the rules engine:
+This version uses schema 9. It adds child-card associations and event history, message target
+cards, pinned notification routes and predecessor delegation/delivery IDs. Existing task,
+feedback, approval and uncertain-action data remain intact. The first database open creates
+`backups/pre-schema-v9-from-v<old>-<stamp>.sqlite` using SQLite online backup before migration.
 
-- active rules of the database, and the built-in categories and limits earlier versions applied
-  (calls for papers, unaccepted review invitations, at most about three questions per run),
-  become a "Migrated conventions" section of `TODO_HOME/AGENTS.md`; an `AGENTS.md` the earlier
-  version created and you did not change is first upgraded to the new template;
-- suggested and retired rules go to `TODO_HOME/rules-archive.md`, which Hermes does not read;
-- the old rule tables stay in the database for audit and export.
+Schema <=7 rule records are preserved verbatim in `rules-archive.md`; no natural-language
+classification or automatic memory import occurs. Existing schema-8 AGENTS customizations are
+preserved by the framework deployment backup. Ask Hermes explicitly to review that archived
+content into the actual profile's native USER.md. Report staged, rejected, ambiguous or
+capacity-limited entries as not imported. Program upgrade and preference import are separate.
 
-New workspaces get no such conventions (an optional example:
-`todo_manager/hermes_assets/examples/academic.md`).
+Use the isolated, executable install/rollback steps in
+[hermes-native-verification.md](hermes-native-verification.md). Production deployment was not
+performed by this development round. Framework backups contain the previous effective prompt,
+skill, AGENTS, conflict/baseline files, installation record and business database. A workspace
+restore never restores a whole Hermes profile.
 
-The migration runs when any command first opens the database with the new code. Before it, a
-consistent copy is written to `backups/pre-schema-v8-from-v<old>-<UTC stamp>.sqlite`.
-
-```bash
-todo-manager hermes pause --yes            # no gate runs during the upgrade
-todo-manager export --verify               # optional: a portable copy as well
-cd ~/src/todo-manager && git pull     # the new code
-todo-manager health                        # opens the database: migrates, then lists problems
-ls ~/.hermes/workspace/todo-manager/backups/pre-schema-v8-*
-todo-manager prefs show                    # the migrated conventions
-todo-manager install                       # skill, prompts and AGENTS.md merged; jobs get TODO_HOME as working directory
-todo-manager hermes resume --yes
-```
-
-Expected: `health` runs without a traceback, a `pre-schema-v8-from-v<old>-*.sqlite` file exists
-and `health` lists the keys of `config.toml` that no longer have an effect (see Configuration).
-To check the schema version:
-
-```bash
-python3 -c "import sqlite3,os; c=sqlite3.connect(os.path.expanduser('~/.hermes/workspace/todo-manager/state/todo.sqlite')); print(c.execute(\"SELECT value FROM meta WHERE key='schema_version'\").fetchone()[0])"
-```
-
-Expected: `8`.
-
-Rolling back to the previous code (verified 2026-10-05 on a scratch workspace created by
-232afdd: after the upgrade the 232afdd code refuses the file with "database schema 8 is newer
-than this code (7)" and reads the pre-migration copy after the swap below; a task created after
-the upgrade stays only in the set-aside file). `restore` with the new code would migrate again,
-so the file is swapped while the jobs are paused. Changes made after the upgrade are lost (they
-stay in the set-aside file and the export). `AGENTS.md` keeps the migrated section; the earlier
-code does not read it.
-
-```bash
-todo-manager hermes pause --yes
-H=~/.hermes/workspace/todo-manager
-mv "$H/state/todo.sqlite" "$H/backups/todo-v8-set-aside.sqlite"   # keep, do not delete
-ls "$H/state"                       # no todo.sqlite-wal / -shm left (all connections closed)
-cp "$H"/backups/pre-schema-v8-from-v7-<stamp>.sqlite "$H/state/todo.sqlite"
-cd ~/src/todo-manager && git checkout <previous commit>    # e.g. 232afdd for v7
-todo-manager health                 # the previous code reads it
-```
-
-What changes for you after the v8 upgrade:
-
-- The model reads what is new directly in its context and records outcomes with small
-  commands (`todo-manager task update …`, `feedback resolve …`). A long item is clipped with the
-  command that prints the rest; nothing waits because it is long.
-- Your conventions are `TODO_HOME/AGENTS.md`: change them by editing the file or by asking
-  Hermes in chat; a Notion comment that states a lasting preference is recorded there too.
-- Notion page notes are context for the task, not instructions; structured edits are the page
-  properties, discussion is comments.
-- How many delegations run at once is Hermes' (its dispatcher); an answer that arrives late
-  still goes to the card that asked. Closing a task cancels its agent work.
-- `todo-manager uninstall` exists (see Uninstall).
+To roll back, first pause the two jobs and close all Todo Manager database connections. The
+old code refuses a schema-9 database. Preserve the new database and use the pre-schema backup
+with the old code; post-upgrade changes remain only in the preserved database/export. Restore
+old owned framework files from the matching framework backup, and replay each saved cron prompt
+through native `hermes cron edit`. Do not copy jobs.json into place or overwrite native memory.
 
 ## Configuration
 
@@ -341,7 +290,7 @@ Keys that no longer have an effect (`health` names them while `config.toml` stil
 |---|---|
 | `kanban.max_running` | Hermes schedules agent work; its dispatcher limits apply (`hermes config get kanban.max_in_progress`) |
 | `wake.over_budget`, `feedback.over_budget` | an over-budget context is clipped with pointers and the run goes ahead |
-| `wake.max_questions_per_run` | when to ask is a convention in `AGENTS.md` |
+| `wake.max_questions_per_run` | when to ask is a scoped preference in native USER.md |
 
 ## Migrating an older Notion todo system
 

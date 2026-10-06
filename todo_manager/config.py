@@ -105,12 +105,18 @@ DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "board": "todo-manager",
         "hermes_bin": "hermes",
-        "assignee": "",  # Hermes profile that executes delegations ("" = board default)
+        "assignee": "",  # Explicit executable Hermes profile; blank submissions are reported, not dispatched
         # Hermes per-card failure breaker: 1 = a crashed/timed-out/stale run parks the card for you
         # instead of an automatic respawn. Cards allowed an external action always get 1 (a respawn
         # could repeat an action whose outcome is unknown); 0 = Hermes' own default for the others.
         # Rate-limit requeues are not counted by Hermes. How many cards run at once is Hermes'.
         "max_retries": 1,
+        "skills": [],  # Optional native worker skills, never the entire Todo skill by default
+        "notify_platform": "",
+        "notify_chat_id": "",
+        "notify_thread_id": "",
+        "notify_profile": "",
+
     },
     "health": {
         "gate_idle_minutes": 60,  # a gate that has not run this long is reported
@@ -162,7 +168,7 @@ REMOVED_KEYS = {
                           " (`hermes config get kanban.max_in_progress`)",
     "wake.over_budget": "a context over wake.max_context_chars is clipped and the run goes ahead",
     "feedback.over_budget": "a context over feedback.max_context_chars is clipped and the run goes ahead",
-    "wake.max_questions_per_run": "when to ask is a convention in the workspace AGENTS.md",
+    "wake.max_questions_per_run": "workflow questions belong in the feedback prompt; personal preferences use native USER.md",
 }
 
 

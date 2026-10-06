@@ -25,7 +25,7 @@ you:
 ```bash
 hermes config get kanban.review_dispatch
 hermes config get kanban.auto_decompose
-hermes config set kanban.review_dispatch false   # your choice: global for every board
+hermes config get kanban.auto_decompose          # read only; this integration does not disable orchestration
 ```
 
 `kanban.assignee` (empty = board default) picks the Hermes profile that executes delegations.
@@ -43,7 +43,7 @@ pending_submit ──submit (lock, lookup, create)──▶ queued ──▶ run
                                                                 ├─ kanban_complete ───────────▶ ended (delivered)
                                                                 ├─ gave up (failure limit) ───▶ blocked (decide retry/cancel)
                                                                 └─ pause ─▶ paused ─ resume ─▶ running
-any state ── cancel ──▶ cancelled (card archived)
+any state ── cancel ──▶ root archived + proven descendants archived (termination reported)
 multiple matching cards ──▶ quarantined (reported, nothing dispatched)
 ```
 
@@ -80,7 +80,7 @@ The protocol tells the worker to do only this delegation and report on this card
 Notion task and its status alone, and use Hermes' native tools: `kanban_block(kind="needs_input")`
 for a question and for approval of an external action it is not allowed yet,
 `kanban_complete(summary, metadata.deliverable_markdown, artifacts)` when done, or
-`kanban_request_review` (same fields) when it wants you to check before it goes on. Nothing
+`kanban_request_review` for native execution review; human questions use blocked. Nothing
 forces review. It follows comments by `todo-manager` and stops immediately on a comment that
 starts with `[todo-manager pause]`. Cards created by earlier versions keep the protocol in their
 body (deliver for review, no `kanban_complete`) and are synced the same way.
@@ -137,3 +137,20 @@ task comment; `review` and `completed` results become a numbered delivery
 completed ends the delegation ("delivered" in the Agent work column until you close the Task or
 delegate again). Workspaces of
 finished cards are deleted by Hermes, so workers keep needed files as artifacts.
+
+
+## Native children and current scope
+
+See [architecture](architecture.md#children-questions-completion-and-cancellation) for schema-9
+child bridging. Creator/decomposition events establish ownership; dependency links do not.
+Child questions are linked to exact deliveries and cards; Notion discussion replies route back
+to them. Direct replies can name `delegate answer --question <delivery-id>`. Child results stay
+partial. Child-specific external approval is refused: do the explicitly authorized external
+operation on the root through the existing version-bound protocol.
+
+Pause/resume, supplement and revision currently affect the entry card. A pause with descendants
+adds a scope warning in Notion. Cancellation archives the root first and observes/archives
+only proven descendants; a native archive is not recursive and may release unrelated dependants.
+Unconfirmed termination is reported. No board-wide or dependency-graph cancellation occurs.
+Done-card changes create a successor delegation on the same Task, with prior delivery linkage.
+Notification registration and channel delivery are independent from Notion sync state.

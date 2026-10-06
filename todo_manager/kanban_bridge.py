@@ -74,6 +74,43 @@ def _task_dict(task) -> dict:
     return {k: getattr(task, k, None) for k in keys}
 
 
+def owned_cards(kb, conn, root):
+    """Lineage from immutable creation events, never dependency edges."""
+    parents = {}
+    for task in kb.list_tasks(conn, include_archived=True):
+        for event in kb.list_events(conn, task.id):
+            if event.kind == "created":
+                payload = event.payload or {}
+                parent = payload.get("creator_task_id") or payload.get("from_decompose_of")
+                if parent:
+                    parents[task.id] = parent
+                break
+    owned = {root}
+    while True:
+        more = {child for child, parent in parents.items() if parent in owned}
+        if more <= owned:
+            return sorted(owned - {root})
+        owned |= more
+
+
+def ensure_notify(kb, conn, tid, route, release=False):
+    from hermes_cli.kanban_db_notify import add_notify_sub, list_notify_subs
+    existing = list_notify_subs(conn, tid)
+    found = any(s["platform"] == route["platform"] and s["chat_id"] == route["chat_id"]
+                and (s.get("thread_id") or "") == (route.get("thread_id") or "") for s in existing)
+    events = kb.list_events(conn, tid)
+    # Only release our initial staging block; never lift a worker/human block on recovery.
+    staged = (kb.get_task(conn, tid).status == "blocked" and kb.get_task(conn, tid).created_by == "todo-manager"
+              and all(e.kind == "created" or (e.kind == "blocked" and (e.payload or {}).get("reason") == "initial_status")
+                      for e in events))
+    if not found:
+        add_notify_sub(conn, task_id=tid, delivery_mode="notify", **route)
+    if release and staged:
+        kb.unblock_task(conn, tid)
+    gap = not found and not staged and any(e.kind in ("completed", "blocked", "review_requested", "gave_up") for e in events)
+    return {"registered": True, "history_gap": gap, "status": kb.get_task(conn, tid).status}
+
+
 def main() -> None:
     here = os.path.dirname(os.path.abspath(__file__))
     sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != here]
@@ -98,18 +135,41 @@ def main() -> None:
         return _out({"ok": True, "result": {"missing": [n for n in names if not hasattr(kb, n)],
                                             "board_exists": kb.board_exists(board),
                                             "db_path": str(kb.kanban_db_path(board=board))}})
+    if op == "context_status":
+        from pathlib import Path
+        from agent.prompt_builder import discover_context_files
+        from hermes_cli.config import load_config
+        from tools.memory_tool import get_builtin_memory_store_flags
+        from hermes_constants import get_hermes_home
+        config = load_config() or {}
+        flags = get_builtin_memory_store_flags(config)
+        from tools.skills_tool import skill_view
+        from agent.skill_utils import normalize_skill_lookup_name
+        from agent.skill_bundles import resolve_bundle_command_key
+        missing_skills = [name for name in req.get("skills", [])
+                          if not resolve_bundle_command_key(name.lstrip("/"))
+                          and not json.loads(skill_view(normalize_skill_lookup_name(name))).get("success")]
+        candidates = discover_context_files(Path(req["workdir"]).resolve())
+        winning = next((kind for kind, label, path, content in candidates if content.strip()), None)
+        files = [str(path) for kind, label, path, content in candidates if kind == winning and content.strip()]
+        return _out({"ok": True, "result": {"project_kind": winning, "project_files": files,
+            "memory_enabled": flags[0], "user_profile_enabled": flags[1], "missing_skills": missing_skills,
+            "profile_home": str(get_hermes_home()),
+            "memory_tool_disabled": "memory" in config.get("agent", {}).get("disabled_toolsets", [])}})
     if op == "settings":
         # Read-only: the global switches the board protocol depends on, resolved the way the
         # installed dispatcher/gateway resolve them (defaults included).
         from hermes_cli.config import load_config
         from hermes_cli.kanban_db_dispatch import review_dispatch_enabled
+        from tools.memory_tool import get_builtin_memory_store_flags
         try:
             from gateway.kanban_watchers_common import _resolve_auto_decompose_settings
             auto_decompose = _resolve_auto_decompose_settings(load_config)[0]
         except ImportError:
             auto_decompose = bool(((load_config() or {}).get("kanban") or {}).get("auto_decompose", True))
         return _out({"ok": True, "result": {"review_dispatch": bool(review_dispatch_enabled()),
-                                            "auto_decompose": bool(auto_decompose)}})
+                                            "auto_decompose": bool(auto_decompose),
+                                            "memory_flags": list(get_builtin_memory_store_flags(load_config() or {}))}})
     if op == "create_board":
         meta = kb.create_board(board, name=req.get("name"), description=req.get("description"))
         return _out({"ok": True, "result": meta})
@@ -123,14 +183,24 @@ def main() -> None:
                 " WHERE idempotency_key = ? OR (body IS NOT NULL AND instr(body, ?) > 0) ORDER BY created_at",
                 (req["idem_key"], req["marker"])).fetchall()
             return _out({"ok": True, "result": [dict(r) for r in rows]})
+        if op == "owned":
+            return _out({"ok": True, "result": owned_cards(kb, conn, req["task_id"])})
+        if op == "notify":
+            return _out({"ok": True, "result": ensure_notify(kb, conn, req["task_id"], req["route"], req.get("release", False))})
         if op == "create":
+            from hermes_cli.kanban_db_dispatch import _profile_exists_fn
+            check = _profile_exists_fn()
+            if not req.get("assignee") or check is None or not check(req["assignee"]):
+                return _out({"ok": False, "error": "assignee is not a dispatchable Hermes profile", "code": "NO_PROFILE"})
             tid = kb.create_task(
                 conn, title=req["title"], body=req["body"], assignee=req.get("assignee") or None,
                 created_by=req.get("created_by", "todo-manager"), tenant=req.get("tenant"),
                 idempotency_key=req["idem_key"], workspace_kind=req.get("workspace_kind"),
                 workspace_path=req.get("workspace_path"), skills=req.get("skills"),
                 max_runtime_seconds=req.get("max_runtime_seconds"), max_retries=req.get("max_retries"),
-                board=board)
+                initial_status="blocked" if req.get("notify") else "running", board=board)
+            if req.get("notify"):
+                ensure_notify(kb, conn, tid, req["notify"], release=True)
             return _out({"ok": True, "result": tid})
         if op == "snapshot":
             task = kb.get_task(conn, req["task_id"])

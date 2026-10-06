@@ -1,25 +1,4 @@
-"""Files the user owns after install: installed from a template, upgraded by 3-way merge.
-
-The Hermes skill, the two cron prompts and the workspace ``AGENTS.md`` start as Todo Manager
-templates and then belong to the user (and to Hermes acting on the user's request). Todo
-Manager keeps the text it installed last as a baseline under
-``TODO_HOME/state/hermes/baseline/<name>``; an upgrade merges baseline -> new template into the
-user's current text:
-
-* nothing there yet          -> the template is installed (``created``)
-* user text = template       -> nothing to do (``current``)
-* user text = baseline       -> the template replaces it (``updated``)
-* template = baseline        -> the user's text is kept (``kept``)
-* both changed, no overlap   -> merged (``merged``)
-* both changed the same part -> the user's text is kept, the merge with conflict markers is
-                                written to ``state/hermes/conflicts/<name>`` (``conflict``)
-* no baseline and a text that matches no known earlier template -> kept, the template is written
-  next to it for review (``unknown-base``)
-
-The baseline moves to the new template only when the result contains it (created, updated,
-merged); after ``kept``/``conflict``/``unknown-base`` the next upgrade tries again from the old
-baseline.
-"""
+"""Ownership checks for project-managed files; unknown files are never adopted by guessing."""
 
 from __future__ import annotations
 
@@ -28,9 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import clock
-from .merge3 import merge3
 
-APPLIES = ("created", "updated", "merged")
+APPLIES = ("created", "updated")
 
 
 @dataclass
@@ -49,7 +27,7 @@ class Upgrade:
         return {
             "created": "installed from the template",
             "current": "matches the template",
-            "updated": "unchanged since install: replaced by the new template",
+            "updated": "managed file: backed up and replaced by the new template",
             "kept": "your changes kept (the template did not change)",
             "merged": "your changes kept and the template changes merged in",
             "conflict": "your changes and the template change the same lines: your file is kept; see the conflict file",
@@ -79,29 +57,14 @@ def read_text(path: Path | None) -> str | None:
 def plan(name: str, live: str | None, baseline: str | None, shipped: str,
          earlier_templates: tuple[str, ...] = ()) -> Upgrade:
     """``earlier_templates``: texts this file had in releases that kept no baseline, newest first;
-    a live text equal to one of them is treated as unchanged since install, otherwise the newest
-    one is the merge base."""
+    an exact match proves historical ownership. Edited text without a baseline stays unknown."""
     if live is None:
         return Upgrade(name, "created", shipped)
     if live == shipped:
         return Upgrade(name, "current", base=baseline)
-    if baseline is None:
-        baseline = next((t for t in earlier_templates if t == live), None)
-        if baseline is None and earlier_templates:
-            result = merge3(earlier_templates[0], live, shipped)
-            if result.clean:
-                return Upgrade(name, "merged", result.text, base=earlier_templates[0])
-            return Upgrade(name, "conflict", conflict_text=result.text, base=earlier_templates[0])
-        if baseline is None:
-            return Upgrade(name, "unknown-base", conflict_text=shipped)
-    if live == baseline:
-        return Upgrade(name, "updated", shipped, base=baseline)
-    if shipped == baseline:
-        return Upgrade(name, "kept", base=baseline)
-    result = merge3(baseline, live, shipped)
-    if result.clean:
-        return Upgrade(name, "merged", result.text, base=baseline)
-    return Upgrade(name, "conflict", conflict_text=result.text, base=baseline)
+    if baseline is None and live not in earlier_templates:
+        return Upgrade(name, "unknown-base", conflict_text=shipped)
+    return Upgrade(name, "updated", shipped, base=baseline)
 
 
 @dataclass

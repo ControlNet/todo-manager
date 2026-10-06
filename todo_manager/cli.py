@@ -67,7 +67,7 @@ def _task_line(t: dict[str, Any]) -> str:
     return f"{t['id']} v{t['version']} [{t['status']}/{t['next_actor']}]{due} {t['title']}"
 
 
-def _add_ctx(parser: argparse.ArgumentParser, rules: bool = False) -> None:
+def _add_ctx(parser: argparse.ArgumentParser) -> None:
     g = parser.add_argument_group("context (who asks for this change)")
     g.add_argument("--run", help="the cron run this is part of")
     g.add_argument("--feedback", dest="feedback_id", help="the user's feedback item this carries out")
@@ -75,13 +75,11 @@ def _add_ctx(parser: argparse.ArgumentParser, rules: bool = False) -> None:
     g.add_argument("--said", help="with --request: the user's words")
     g.add_argument("--scope", help="with --request: task:<id> | project:<id> | global")
     g.add_argument("--key", help="explicit identity of this command (a retry with the same key applies once)")
-    if rules:
-        g.add_argument("--rules", help="the conventions version you re-read after a RULES_CHANGED refusal")
 
 
 def _ctx(conn: Any, cfg: config.Config, args: argparse.Namespace) -> ops.Ctx:
     return ops.context(conn, cfg, run=args.run, feedback_id=args.feedback_id, request=args.request, said=args.said,
-                       scope=args.scope, rules_ack=getattr(args, "rules", None), key=args.key)
+                       scope=args.scope, key=args.key)
 
 
 def _run(fn: Any) -> int:
@@ -144,8 +142,8 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
 def cmd_paths(args: argparse.Namespace) -> int:
     cfg = config.load(args.home)
-    _print({"home": str(cfg.home), "conventions": str(prefs.agents_path(cfg.home)),
-            "conventions_version": prefs.file_hash(cfg.home), "rules_archive": str(prefs.archive_path(cfg.home)),
+    _print({"home": str(cfg.home), "framework_context": str(prefs.agents_path(cfg.home)),
+            "rules_archive": str(prefs.archive_path(cfg.home)),
             "config": str(cfg.home / "config.toml"), "database": str(cfg.db_path),
             "language": cfg.language, "language_name": i18n.language_name(cfg.language), "timezone": cfg.tz})
     return 0
@@ -166,10 +164,10 @@ def cmd_prefs(args: argparse.Namespace) -> int:
             return _fail("NOT_FOUND", f"no example {args.name!r}; available: academic")
         return 0
     text = prefs.show(cfg.home)
-    print(f"# {prefs.agents_path(cfg.home)} (version {prefs.file_hash(cfg.home)})")
+    print(f"# Managed framework context: {prefs.agents_path(cfg.home)}")
     for problem in prefs.problems(cfg.home):
         print(f"# problem: {problem}")
-    print(text if text else "(no conventions yet: the defaults of the todo-manager skill apply)")
+    print(text if text else "(managed AGENTS.md is missing; run the installer to deploy it)")
     return 0
 
 
@@ -395,7 +393,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             "SELECT status, COUNT(*) AS n FROM delegations GROUP BY status")},
         "last_runs": {entry: [{k: r[k] for k in ("id", "started_at", "status", "wake_reasons")}
                               for r in runs.recent(conn, entry, 3)] for entry in ("intake", "feedback")},
-        "conventions": {"file": str(prefs.agents_path(cfg.home)), "version": prefs.file_hash(cfg.home),
+        "conventions": {"file": str(prefs.agents_path(cfg.home)),
                         "problems": prefs.problems(cfg.home)},
         "problems": health.problems(health.report(conn, cfg), cfg),
     }
@@ -479,7 +477,7 @@ def cmd_delegate(args: argparse.Namespace) -> int:
             return ops.delegate_message(conn, cfg, ctx, args.id, kind=args.kind, body=args.body,
                                         delivery=args.delivery)
         if args.action == "answer":
-            return ops.delegate_answer(conn, cfg, ctx, args.id, body=args.body, approve=args.approve)
+            return ops.delegate_answer(conn, cfg, ctx, args.id, body=args.body, approve=args.approve, question=args.question)
         return ops.delegate_approve(conn, cfg, ctx, args.id, delivery=args.delivery, action=args.action_name,
                                     detail=args.detail)
     return _run(act)
@@ -720,7 +718,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("paths", help="where the workspace, conventions and settings are")
     s.set_defaults(fn=cmd_paths)
 
-    s = sub.add_parser("prefs", help="the user's Todo conventions (AGENTS.md in the workspace)")
+    s = sub.add_parser("prefs", help="legacy preferences archive / managed workspace context; personal preferences use native memory")
     s.add_argument("action", nargs="?", default="show", choices=("show", "path", "example"))
     s.add_argument("name", nargs="?", default="academic", help="example name (example)")
     s.set_defaults(fn=cmd_prefs)
@@ -806,7 +804,7 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--outcome", required=True, choices=ops.OUTCOMES)
     x.add_argument("--label", help="your own name for the outcome (e.g. one a convention names)")
     x.add_argument("--reason", required=True)
-    _add_ctx(x, rules=True)
+    _add_ctx(x)
     x = its.add_parser("defer", help="decide later: offered again with new activity or at --until")
     x.add_argument("items", nargs="+")
     x.add_argument("--reason", required=True)
@@ -887,6 +885,7 @@ def build_parser() -> argparse.ArgumentParser:
                                       " else the latest)")
     _add_ctx(x)
     x = ds.add_parser("answer", help="answer the agent's open question")
+    x.add_argument("--question", help="delivery ID of the exact root or child question")
     x.add_argument("id")
     x.add_argument("--body", required=True)
     x.add_argument("--approve", action="append", metavar="ACTION[:DETAIL]",

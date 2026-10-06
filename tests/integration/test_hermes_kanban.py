@@ -75,11 +75,11 @@ class HermesKanbanIntegration(WorkspaceCase):
         delegation.sync_cards(self.conn, self.cfg, self.kb)
 
     def test_settings_are_read_as_the_installed_dispatcher_reads_them(self):
-        self.assertEqual(self.kb.settings(), {"review_dispatch": False, "auto_decompose": False})
+        self.assertEqual(self.kb.settings(), {"review_dispatch": False, "auto_decompose": False, "memory_flags": [True, True]})
         defaults = Path(tempfile.mkdtemp(prefix="tm-hermes-defaults-"))
         try:
             kb = BridgeKanban(BOARD, str(HERMES_PY), str(HERMES_REPO), str(defaults))
-            self.assertEqual(kb.settings(), {"review_dispatch": True, "auto_decompose": True},
+            self.assertEqual(kb.settings(), {"review_dispatch": True, "auto_decompose": True, "memory_flags": [True, True]},
                              "Hermes' defaults: its own reviewer takes review cards")
             self.assertIn("kanban.review_dispatch is on", delegation.observe_settings(self.conn, kb)["notes"][0])
         finally:

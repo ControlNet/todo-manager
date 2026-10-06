@@ -1,7 +1,7 @@
 # Example conventions: academic work
 
-An optional example, not installed. Copy the bullets that fit you into your `AGENTS.md` (under
-the matching heading) and adapt them; `todo-manager prefs example academic` prints this file.
+An optional example, not installed. Ask Hermes explicitly to adapt selected bullets into
+this profile's native USER.md via its memory tool, within capacity and approval settings; `todo-manager prefs example academic` prints this file.
 
 ## What becomes a task
 

@@ -54,7 +54,6 @@ class Ctx:
     origin: str = "cli"
     run: dict[str, Any] | None = None
     fb: dict[str, Any] | None = None
-    rules_ack: str | None = None      # --rules <hash>: the conventions the agent has re-read
     key: str | None = None            # --key: explicit identity of this command
     notes: list[str] = field(default_factory=list)
     # Why a new command may not act in this context (the feedback item was resolved meanwhile...).
@@ -117,7 +116,7 @@ def not_ready(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any]) -> str 
 
 def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, feedback_id: str | None = None,
             request: str | None = None, said: str | None = None, origin: str = "matrix",
-            scope: str | None = None, rules_ack: str | None = None, key: str | None = None,
+            scope: str | None = None, key: str | None = None,
             write: bool = True) -> Ctx:
     """Resolve and check the context of a command (``write``: it changes Todo data)."""
     given = [x for x in (run, feedback_id, request) if x]
@@ -130,7 +129,7 @@ def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, fe
         row = runs.get(conn, run)
         if row is None or row["entry"] not in ("intake", "feedback"):
             raise OpError("NOT_FOUND", f"no intake or feedback run {run}")
-        return Ctx("run", run, actor="agent", origin=row["entry"], run=row, rules_ack=rules_ack, key=key)
+        return Ctx("run", run, actor="agent", origin=row["entry"], run=row, key=key)
     if feedback_id:
         fb = feedback.get(conn, feedback_id)
         if fb is None:
@@ -148,7 +147,7 @@ def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, fe
         elif write and not_ready(conn, cfg, fb):
             refusal = OpError("NOT_READY", f"{feedback_id}: {not_ready(conn, cfg, fb)}; it is offered again when"
                                            " ready")
-        return Ctx("feedback", feedback_id, actor="human", origin=_fb_origin(fb), fb=fb, rules_ack=rules_ack, key=key,
+        return Ctx("feedback", feedback_id, actor="human", origin=_fb_origin(fb), fb=fb, key=key,
                    refusal=refusal)
     if request:
         if not (said or "").strip():
@@ -168,8 +167,8 @@ def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, fe
         if recorded:
             with tx(conn):
                 feedback.supersede(conn, recorded, "handled directly in the chat", by=fid)
-        return Ctx("request", request.strip(), actor="human", origin=fb["origin"], fb=fb, rules_ack=rules_ack, key=key)
-    return Ctx("cli", None, actor="human", origin="cli", rules_ack=rules_ack, key=key)
+        return Ctx("request", request.strip(), actor="human", origin=fb["origin"], fb=fb, key=key)
+    return Ctx("cli", None, actor="human", origin="cli", key=key)
 
 
 def _key(ctx: Ctx, command: str, args: dict[str, Any]) -> str | None:
@@ -481,18 +480,6 @@ def project_update(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, project_id: 
 
 # --------------------------------------------------------------------------- material without a task
 
-def _rules_check(ctx: Ctx, cfg: Config) -> None:
-    """A dismissal decided under conventions that changed during the run is refused until the
-    agent has re-read them (additive operations are not affected)."""
-    if ctx.run is None or not ctx.run.get("rules_hash"):
-        return
-    current = prefs.file_hash(cfg.home)
-    if current != ctx.run["rules_hash"] and ctx.rules_ack != current:
-        raise OpError("RULES_CHANGED", [
-            f"{prefs.agents_path(cfg.home)} changed after this run started (now {current})",
-            f"re-read it (`todo-manager prefs show`); if the dismissal still holds, repeat the command with --rules {current}"])
-
-
 def item_dismiss(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, item_ids: list[str], *, outcome: str,
                  reason: str, label: str | None = None) -> dict[str, Any]:
     if outcome not in OUTCOMES:
@@ -501,7 +488,6 @@ def item_dismiss(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, item_ids: list
         raise OpError("INVALID", "--reason is required (one line: why no task)")
     if not item_ids:
         raise OpError("INVALID", "name at least one item")
-    _rules_check(ctx, cfg)
     args = {"items": sorted(item_ids), "outcome": outcome, "label": label, "reason": reason}
 
     def apply() -> dict[str, Any]:
@@ -805,7 +791,7 @@ def parse_approvals(values: list[str] | None) -> list[tuple[str, str]]:
 
 
 def delegate_answer(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, delegation_id: str, *,
-                    body: str, approve: list[str] | None = None) -> dict[str, Any]:
+                    body: str, approve: list[str] | None = None, question: str | None = None) -> dict[str, Any]:
     """Answer the card's open question (bound to that question, however late the answer).
     ``approve``: external actions (``action[:detail]``) the user allows with this answer, e.g.
     when the worker asked whether it may send the email; each is used at most once."""
@@ -816,6 +802,22 @@ def delegate_answer(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, delegation_
         raise OpError("NOT_FOUND", f"no delegation {delegation_id}")
     if not (body or "").strip():
         raise OpError("INVALID", "--body is required")
+    question = question or ((ctx.fb or {}).get("payload") or {}).get("delivery_id")
+    if question:
+        row = conn.execute("SELECT * FROM deliveries WHERE id=? AND delegation_id=? AND kind='question'",
+                           (question, delegation_id)).fetchone()
+        if row is None:
+            raise OpError("INVALID", "question does not belong to this delegation")
+        if row["card_id"] != d["card_id"]:
+            if approvals:
+                raise OpError("INVALID", "child external approvals are not supported by this adapter; "
+                              "ask the root to perform the authorized external action")
+            from . import child_links
+            args = {"delegation": delegation_id, "question": question, "body": body}
+            key = _key(ctx, "delegate answer", args)
+            return perform(conn, ctx, "delegate answer", args,
+                           lambda: child_links.queue_answer(conn, d, dict(row), body, key,
+                                                            ctx.fb["id"] if ctx.fb else None))
     if d["status"] != "blocked":
         raise OpError("INVALID", f"the agent work is {d['status']}: there is no open question (more information:"
                                  " `delegate message --kind supplement`)")

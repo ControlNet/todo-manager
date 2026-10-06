@@ -21,7 +21,8 @@ class WorkspaceCase(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="tm-test-"))
         clock.set_now(T0)
         # The fixtures assert Chinese labels: run under zh-CN (English is covered in test_i18n).
-        base = {"language": "zh-CN", "timezone": "Pacific/Auckland", "identity": {"emails": ["me@example.edu"], "github_logins": ["me-gh"],
+        base = {"language": "zh-CN", "timezone": "Pacific/Auckland",
+                "hermes": {"home": str(self.tmp / "hermes")}, "identity": {"emails": ["me@example.edu"], "github_logins": ["me-gh"],
                              "slack_user_ids": ["UME"], "display_names": ["Test User"]}}
         self.cfg = config.load(self.tmp, overrides=config._deep_merge(base, self.overrides))
         # As `todo-manager init` leaves it: the workspace conventions file Hermes loads.

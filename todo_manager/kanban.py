@@ -82,7 +82,10 @@ class Kanban(Protocol):
 
     def find(self, idem_key: str, marker: str) -> list[dict[str, Any]]: ...
     def create(self, *, title: str, body: str, idem_key: str, assignee: str | None, tenant: str,
-               workspace: str | None = None, max_retries: int | None = None) -> str: ...
+               workspace: str | None = None, max_retries: int | None = None, notify: dict | None = None,
+               skills: list[str] | None = None) -> str: ...
+    def owned(self, card_id: str) -> list[str]: ...
+    def notify(self, card_id: str, route: dict, release: bool = False) -> dict: ...
     def snapshot(self, card_id: str, after_event: int = 0, after_comment: int = 0) -> dict[str, Any]: ...
     def comment(self, card_id: str, body: str, author: str = "todo-manager") -> dict[str, Any]: ...
     def block(self, card_id: str, reason: str, kind: str | None = None) -> bool: ...
@@ -94,7 +97,7 @@ class Kanban(Protocol):
     def transition(self, card_id: str, action: str, anchor: int | None = None,
                    summary: str | None = None) -> dict[str, Any]: ...
     def counts(self) -> dict[str, int]: ...
-    def settings(self) -> dict[str, bool]: ...
+    def settings(self) -> dict[str, Any]: ...
 
 
 class BridgeKanban:
@@ -113,7 +116,7 @@ class BridgeKanban:
     def from_config(cls, cfg: Config) -> "BridgeKanban":
         k = cfg.section("kanban")
         return cls(k.get("board", "todo-manager"), k.get("hermes_python", "~/.hermes/hermes-agent/venv/bin/python"),
-                   k.get("hermes_repo", "~/.hermes/hermes-agent"), k.get("hermes_home") or None)
+                   k.get("hermes_repo", "~/.hermes/hermes-agent"), k.get("hermes_home") or cfg.get("hermes.home") or os.environ.get("HERMES_HOME") or "~/.hermes")
 
     def call(self, op: str, mutating: bool = True, **args: Any) -> Any:
         env = {k: v for k, v in os.environ.items() if not k.startswith("HERMES_KANBAN_")}
@@ -148,11 +151,18 @@ class BridgeKanban:
         return self.call("find", mutating=False, idem_key=idem_key, marker=marker)
 
     def create(self, *, title: str, body: str, idem_key: str, assignee: str | None, tenant: str,
-               workspace: str | None = None, max_retries: int | None = None) -> str:
+               workspace: str | None = None, max_retries: int | None = None, notify: dict | None = None,
+               skills: list[str] | None = None) -> str:
         kind, _, path = (workspace or "").partition(":")
         return self.call("create", title=title, body=body, idem_key=idem_key, assignee=assignee, tenant=tenant,
                          created_by="todo-manager", workspace_kind=kind or None, workspace_path=path or None,
-                         max_retries=max_retries)
+                         max_retries=max_retries, notify=notify, skills=skills)
+
+    def owned(self, card_id: str) -> list[str]:
+        return self.call("owned", mutating=False, task_id=card_id)
+
+    def notify(self, card_id: str, route: dict, release: bool = False) -> dict:
+        return self.call("notify", task_id=card_id, route=route, release=release)
 
     def snapshot(self, card_id: str, after_event: int = 0, after_comment: int = 0) -> dict[str, Any]:
         return self.call("snapshot", mutating=False, task_id=card_id, after_event=after_event,
@@ -191,7 +201,7 @@ class BridgeKanban:
     def counts(self) -> dict[str, int]:
         return self.call("counts", mutating=False)
 
-    def settings(self) -> dict[str, bool]:
+    def settings(self) -> dict[str, Any]:
         """Effective global ``kanban.review_dispatch`` / ``kanban.auto_decompose`` (read-only)."""
         return self.call("settings", mutating=False)
 
@@ -215,6 +225,8 @@ class FakeKanban:
         # "comment": run right before a comment is stored (e.g. the worker submits meanwhile).
         self.interleave: dict[str, Any] = {}
         self.settings_values = {"review_dispatch": False, "auto_decompose": False}
+        self.subscriptions = {}
+        self.ownership = {}
         self._n = 0
 
     def _event(self, card_id: str, kind: str, payload: dict | None = None, run_id: int | None = None) -> None:
@@ -235,7 +247,8 @@ class FakeKanban:
                 for c in self.cards.values() if c["idem_key"] == idem_key or marker in c["body"]]
 
     def create(self, *, title: str, body: str, idem_key: str, assignee: str | None, tenant: str,
-               workspace: str | None = None, max_retries: int | None = None) -> str:
+               workspace: str | None = None, max_retries: int | None = None, notify: dict | None = None,
+               skills: list[str] | None = None) -> str:
         self._maybe_fail("create")
         for card in self.cards.values():
             if card["idem_key"] == idem_key and card["status"] != "archived":
@@ -243,13 +256,36 @@ class FakeKanban:
         self._n += 1
         cid = f"t_{self._n:04d}"
         self.cards[cid] = {"id": cid, "title": title, "body": body, "idem_key": idem_key, "status": "ready",
-                           "assignee": assignee, "tenant": tenant, "block_kind": None, "block_recurrences": 0,
+                           "assignee": assignee, "tenant": tenant, "skills": skills, "workspace": workspace, "block_kind": None, "block_recurrences": 0,
                            "max_retries": max_retries, "consecutive_failures": 0}
         self._event(cid, "created")
+        if notify:
+            self.cards[cid].update(status="blocked", staged=True)
+            try:
+                self.notify(cid, notify, release=True)
+            except KanbanError as exc:
+                raise KanbanError(str(exc), uncertain=True) from exc
         if "create" in self.lose_response:
             self.lose_response.discard("create")
             raise KanbanError("bridge timeout during create", uncertain=True)
         return cid
+
+    def owned(self, card_id: str) -> list[str]:
+        owned = {card_id}
+        while True:
+            more = {c for c, p in self.ownership.items() if p in owned}
+            if more <= owned:
+                return sorted(owned - {card_id})
+            owned |= more
+
+    def notify(self, card_id: str, route: dict, release: bool = False) -> dict:
+        self._maybe_fail("notify")
+        gap = card_id not in self.subscriptions and self.cards[card_id]["status"] in ("done", "review", "blocked")
+        self.subscriptions[card_id] = route
+        if release and self.cards[card_id].pop("staged", False):
+            self.unblock(card_id)
+            gap = False
+        return {"registered": True, "history_gap": gap, "status": self.cards[card_id]["status"]}
 
     def snapshot(self, card_id: str, after_event: int = 0, after_comment: int = 0) -> dict[str, Any]:
         self._maybe_fail("snapshot")
@@ -421,6 +457,6 @@ class FakeKanban:
             result[card["status"]] = result.get(card["status"], 0) + 1
         return result
 
-    def settings(self) -> dict[str, bool]:
+    def settings(self) -> dict[str, Any]:
         self._maybe_fail("settings")
         return dict(self.settings_values)

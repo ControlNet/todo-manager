@@ -154,8 +154,6 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None,
     run_id = runs.start(conn, "feedback")
     summary: dict[str, Any] = {}
     try:
-        with tx(conn):
-            conn.execute("UPDATE runs SET rules_hash=? WHERE id=?", (prefs.file_hash(cfg.home), run_id))
         summary, _ = sync_all(conn, cfg, notion=notion, kanban=kanban)
         problems = problems_due(conn, cfg, "feedback", ("notion", "kanban", "gate"))
         if problems:

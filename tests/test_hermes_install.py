@@ -148,65 +148,72 @@ class FreshInstallTests(InstallCase):
 
 
 class UserFileUpgradeTests(InstallCase):
-    def test_a_skill_improved_in_hermes_is_kept_and_the_new_template_merged_in(self):
+    def test_owned_customizations_are_backed_up_then_updated(self):
         self.install()
-        shipped = self.skill()
-        learned = shipped + "\n## Learned\n\n- Prefer one-line replies in Matrix.\n"
-        self.paths.install_skill_path.write_text(learned)
-        self.assertEqual(hermes_install.status(self.cfg)["user_files"]["skill/SKILL.md"]["state"], "kept")
+        originals = {"skill/SKILL.md": self.skill() + "\nCustom skill text\n",
+                     "workspace/AGENTS.md": prefs.show(self.home) + "\nCustom preference\n",
+                     "cron/intake.md": templates.cron_prompt("intake") + "\nCustom prompt\n"}
+        self.paths.install_skill_path.write_text(originals["skill/SKILL.md"])
+        prefs.agents_path(self.home).write_text(originals["workspace/AGENTS.md"])
+        self.user_edit("intake", "--prompt", originals["cron/intake.md"])
         self.install()
-        self.assertEqual(self.skill(), learned, "nothing shipped changed: the user's skill stays as it is")
-        older = shipped.replace("The user's personal task system.", "The user's task system.")
-        self.assertNotEqual(older, shipped)
-        self.ship("skill/SKILL.md", older)
-        self.paths.install_skill_path.write_text(older + "\n## Learned\n\n- Prefer one-line replies in Matrix.\n")
-        self.install()
-        self.assertEqual(self.skill(), learned, "the template change merged into the user's skill")
-        self.assertEqual(self.paths.store.baseline("skill/SKILL.md"), shipped)
+        self.assertEqual(self.skill(), hermes_install.asset("skill/SKILL.md"))
+        self.assertEqual(prefs.show(self.home), templates.workspace_agents(self.cfg.language))
+        self.assertEqual(self.job("intake")["prompt"], templates.cron_prompt("intake"))
+        backups = list((self.home / "backups/framework").glob("upgrade-*"))
+        self.assertTrue(any((p / "SKILL.md").exists() and (p / "SKILL.md").read_text() == originals["skill/SKILL.md"]
+                            for p in backups))
+        self.assertTrue(any((p / "AGENTS.md").exists() and (p / "AGENTS.md").read_text() == originals["workspace/AGENTS.md"]
+                            for p in backups))
+        self.assertTrue(any(json.loads((p / "cron.json").read_text()).get("todo-manager-intake", {}).get("prompt")
+                            == originals["cron/intake.md"].strip() for p in backups))
 
-    def test_a_skill_conflict_keeps_the_users_text_and_is_reported(self):
+    def test_unknown_skill_and_agents_are_not_adopted(self):
+        self.paths.install_skill_path.parent.mkdir(parents=True)
+        self.paths.install_skill_path.write_text("---\nname: todo-manager\n---\nForeign skill")
+        self.paths.store.baseline_path(prefs.USERFILE).unlink(missing_ok=True)
+        prefs.agents_path(self.home).write_text("Foreign instructions")
         self.install()
-        shipped = self.skill()
-        older = shipped.replace("The user's personal task system.", "The user's task system.")
-        mine = shipped.replace("The user's personal task system.", "My own task system, my rules.")
-        self.ship("skill/SKILL.md", older)
-        self.paths.install_skill_path.write_text(mine)
-        actions = self.install()
-        skill = next(a for a in actions if a.record.get("user_file") == "skill/SKILL.md")
-        self.assertEqual(skill.kind, "conflict")
-        self.assertEqual(self.skill(), mine)
-        self.assertIn("<<<<<<<", self.paths.store.conflict_path("skill/SKILL.md").read_text())
-        self.assertIn("skill/SKILL.md", hermes_install.status(self.cfg)["conflicts"])
-        self.assertTrue(any("skill/SKILL.md" in p for p in prefs.problems(self.home)), "health reports it")
+        self.assertTrue(self.skill().endswith("Foreign skill"))
+        self.assertEqual(prefs.show(self.home), "Foreign instructions")
+        self.assertIn("skill/SKILL.md", self.paths.store.conflicts())
 
-    def test_a_prompt_edited_in_hermes_is_kept_and_a_new_template_merged(self):
+    def test_unrelated_user_selected_skill_is_not_overwritten(self):
         self.install()
-        shipped = templates.cron_prompt("intake")
-        mine = shipped + "\n\nAlways answer in two sentences."
-        self.user_edit("intake", "--prompt", mine)
-        self.hermes.calls.clear()
+        other = self.paths.skills_root / "other/SKILL.md"
+        other.parent.mkdir(parents=True)
+        other.write_text("---\nname: other\n---\nUnrelated")
+        self.user_edit("intake", "--skill", "other")
+        self.paths.install_skill_path.unlink()
         self.install()
-        self.assertEqual(self.hermes.edits(), [], "an edited prompt is the user's")
-        self.assertEqual(self.job("intake")["prompt"], mine)
-        first_line = shipped.splitlines()[0]
-        older = shipped.replace(first_line, first_line + " (old wording)")
-        self.ship("cron/intake.md", older)
-        self.user_edit("intake", "--prompt", older + "\n\nAlways answer in two sentences.")
-        self.install()
-        [edit] = self.hermes.edits()
-        self.assertEqual(flag(edit, "--prompt"), mine, "merged: the template change plus the user's line")
-        self.assertEqual(self.job("intake")["prompt"], mine)
+        self.assertTrue(other.read_text().endswith("Unrelated"))
+        self.assertEqual(self.job("intake")["skills"], ["other"])
 
-    def test_agents_md_edited_by_the_user_is_merged_never_replaced(self):
+    def test_old_conflict_and_baseline_are_backed_up_before_clearing(self):
         self.install()
-        shipped = prefs.show(self.home)
-        mine = shipped + "\n## 我的约定\n\n- 周五下午不安排新任务。\n"
-        prefs.agents_path(self.home).write_text(mine)
-        older = shipped.replace(shipped.splitlines()[0], shipped.splitlines()[0] + "（旧版）")
-        self.ship(prefs.USERFILE, older)
-        prefs.agents_path(self.home).write_text(older + "\n## 我的约定\n\n- 周五下午不安排新任务。\n")
+        path = self.paths.store.conflict_path("skill/SKILL.md")
+        path.parent.mkdir(parents=True)
+        path.write_text("Unresolved old conflict")
+        self.paths.install_skill_path.write_text(self.skill() + "\nCustomization")
         self.install()
-        self.assertEqual(prefs.show(self.home), mine)
+        self.assertTrue(any(p.read_text() == "Unresolved old conflict" for p in
+                            (self.home / "backups/framework").glob("*/state/hermes/conflicts/skill/SKILL.md")))
+
+    def test_replaced_foreign_cron_identity_is_not_adopted_or_removed(self):
+        self.install()
+        old = self.job("intake")["id"]
+        self.hermes.cron(["cron", "remove", old])
+        self.hermes.cron(["cron", "create", "--name", "todo-manager-intake", "--paused",
+                          "*/20 * * * *", "Foreign automation"])
+        foreign = self.job("intake")["id"]
+        self.assertNotEqual(foreign, old)
+        self.install()
+        self.assertEqual(json.loads(self.paths.manifest.read_text())["jobs"]["intake"]["id"], old)
+        inst = self.installer()
+        inst.set_jobs_state("pause")
+        actions = inst.uninstall_plan()
+        inst.uninstall(actions)
+        self.assertEqual(self.job("intake")["id"], foreign)
 
 
 class CronSettingTests(InstallCase):
@@ -218,15 +225,12 @@ class CronSettingTests(InstallCase):
                                                + 'reasoning_effort = "low"\n')
         self.hermes.calls.clear()
         actions = self.install()
-        [edit] = [c for c in self.hermes.edits() if c[2] == self.job("intake")["id"]]
-        self.assertEqual(flag(edit, "--reasoning-effort"), "low", "a setting the user did not touch follows")
-        for user_flag in ("--schedule", "--deliver", "--model", "--skill", "--prompt"):
-            self.assertNotIn(user_flag, edit)
+        self.assertEqual(self.hermes.edits(), [], "all runtime settings stay as configured")
         job = self.job("intake")
         self.assertEqual((job["schedule"]["expr"], job["deliver"], job["model"], job["skills"]),
                          ("*/15 * * * *", "matrix", "fast-model", ["productivity-umbrella"]))
         update = next(a for a in actions if a.target == "todo-manager-intake")
-        self.assertEqual(set(update.kept), {"schedule", "deliver", "model", "skills"})
+        self.assertEqual(set(update.kept), {"schedule", "deliver", "model", "skills", "reasoning_effort"})
         self.hermes.calls.clear()
         self.install()
         self.assertEqual(self.hermes.calls, [], "kept settings are not re-proposed")
@@ -256,7 +260,7 @@ class CronSettingTests(InstallCase):
         edits = {c[2]: c for c in self.hermes.edits()}
         self.assertEqual(len(edits), 2)
         intake = edits[self.job("intake")["id"]]
-        self.assertEqual(flag(intake, "--workdir"), str(self.home))
+        self.assertIsNone(flag(intake, "--workdir"), "existing native workdir is preserved; health reports missing context")
         self.assertEqual(flag(intake, "--prompt"), templates.cron_prompt("intake"), "an untouched prompt is updated")
         self.assertNotIn("--deliver", intake)
         self.assertEqual(self.job("intake")["deliver"], "matrix")

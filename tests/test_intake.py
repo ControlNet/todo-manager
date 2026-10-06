@@ -278,20 +278,11 @@ class RecordTests(WorkspaceCase):
         self.assertEqual(self.conn.execute("SELECT state FROM source_items").fetchone()[0], "batched",
                          "never dropped: the item stays for the user to see")
 
-    def test_dismissal_refused_when_conventions_changed_during_the_run(self):
+    def test_managed_file_changes_do_not_create_a_personal_rules_gate(self):
         run_id, _ = self.woken_run(mail("m1", "t1", "Call for papers: ICFP"))
-        prefs.agents_path(self.cfg.home).write_text("# My Todo conventions\n\n- CFPs from my own community are tasks.\n",
-                                                    encoding="utf-8")
-        with self.assertRaises(ops.OpError) as caught:
-            ops.item_dismiss(self.conn, self.cfg, self.ctx(run_id), [self.item_id("m1")], outcome="informational",
-                             reason="cfp")
-        self.assertEqual(caught.exception.code, "RULES_CHANGED")
-        current = prefs.file_hash(self.cfg.home)
-        self.assertIn(current, " ".join(caught.exception.details))
-        # Re-read, still a dismissal: acknowledged with the new version.
-        ops.item_dismiss(self.conn, self.cfg, self.ctx(run_id, rules_ack=current), [self.item_id("m1")],
-                         outcome="informational", reason="cfp, not my community")
-        # Creating a task is never blocked by it.
+        prefs.agents_path(self.cfg.home).write_text("# Changed managed context\n")
+        ops.item_dismiss(self.conn, self.cfg, self.ctx(run_id), [self.item_id("m1")],
+                         outcome="informational", reason="not my responsibility")
         self.assertEqual(self.conn.execute("SELECT state FROM source_items").fetchone()[0], "processed")
 
     def test_create_and_followup_update_same_matter(self):

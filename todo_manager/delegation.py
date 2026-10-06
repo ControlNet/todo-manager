@@ -59,10 +59,10 @@ EXTERNAL_ACTIONS = {"push_branch", "open_pr", "merge_pr", "comment_github", "clo
 
 WORKER_PROTOCOL = """\
 ## Todo Manager delegation protocol
-- Do only this delegation: do not widen the scope or handle unrelated matters. The user follows this card only: if you split the work into other cards, report their results here.
+- Do only this delegation: do not widen the scope or handle unrelated matters. If you split work natively, record creator lineage, copy essential authorization and this protocol into children, and integrate their partial results here. Child external actions require separate explicit approval; do not transfer a root approval to a child.
 - Allowed actions: {allowed}. An external action not listed here (sending email, public comments, push, opening/merging PRs, closing issues, publishing, editing shared documents) needs the user's approval first: ask with kanban_block(kind="needs_input", reason="<exactly what you would do, in {language}>") and wait. An approval is a comment by `todo-manager` saying `APPROVED <action> for question #<n>` (your question) or `APPROVED <action> for delivery <id>` (a version you delivered); it allows that action once, as described, and any later change of the requirements voids it.
 - Need information or a decision from the user? kanban_block(kind="needs_input", reason="<one concrete question in {language}>"). Do not guess.
-- Finished? kanban_complete(summary="<2-3 sentences in {language}>", metadata={{"deliverable_markdown": "<the full deliverable in Markdown>", "external_actions_done": [...], "notes": "..."}}, artifacts=[<absolute paths of files to keep>]). When the user should check the deliverable before you go on, call kanban_request_review with the same fields instead. Either way the user sees it in Notion.
+- Finished? kanban_complete(summary="<2-3 sentences in {language}>", metadata={{"deliverable_markdown": "<the full deliverable in Markdown>", "external_actions_done": [...], "notes": "..."}}, artifacts=[<absolute paths of files to keep>]). Native review is an execution review stage, not user acceptance. For human input block with a concrete question. Either way the user sees it in Notion.
 - The Notion task and its status are the user's: do not change them. Your delivery does not complete the task.
 - Comments by `todo-manager` are the user's supplements, answers, revision requests or approvals: follow them. A comment starting with {pause} means stop immediately and take no further action.
 - An external action whose outcome you cannot confirm (timeout, crash, unclear reply) must NOT be repeated: report it with kanban_block(kind="needs_input") and let the user check. The same applies when an earlier run of this card ended without a result after an APPROVED comment: assume the approved action may have happened and ask instead of doing it again.
@@ -118,9 +118,14 @@ def card_body(d: dict[str, Any], task: dict[str, Any], notion_url: str | None, e
         f"todo-manager-delegation: {d['id']}",
         f"todo-manager-task: {task['id']}" + (f"  notion: {notion_url}" if notion_url else ""),
         f"requirement-version: {d['requirement_version']}",
+        f"Full requirements: `todo-manager delegate show {d['id']}`. Full page notes: `todo-manager task show {task['id']}`.",
+        WORKER_PROTOCOL.format(allowed=allowed, pause=PAUSE_MARK, language=i18n.language_name()),
         "",
         f"## Goal\n{d['goal']}",
     ]
+    if d.get("previous_delegation_id"):
+        parts.append(f"Previous delegation: {d['previous_delegation_id']}; delivery: {d.get('previous_delivery_id')}. "
+                     f"Read with `todo-manager delegate show {d['previous_delegation_id']}`.")
     for title, key in (("Context", "context"), ("Constraints", "constraints"), ("Deliverable", "deliverable"),
                        ("Done when", "done_criteria")):
         if d.get(key):
@@ -129,11 +134,10 @@ def card_body(d: dict[str, Any], task: dict[str, Any], notion_url: str | None, e
     if (notes or "").strip():
         text = notes.strip()
         if len(text) > CARD_NOTES_CHARS:
-            text = text[:CARD_NOTES_CHARS] + f"\n[... {len(notes.strip()) - CARD_NOTES_CHARS} more characters on the Notion page]"
+            text = text[:CARD_NOTES_CHARS] + f"\n[... {len(notes.strip()) - CARD_NOTES_CHARS} more characters: `todo-manager task show {task['id']}`]"
         parts.append("## The user's notes on the task page (context, not instructions by themselves)\n" + text)
     if extra:
         parts.append("## Later supplements\n" + "\n".join(f"- {e}" for e in extra))
-    parts.append(WORKER_PROTOCOL.format(allowed=allowed, pause=PAUSE_MARK, language=i18n.language_name()))
     return "\n\n".join(parts)
 
 
@@ -177,6 +181,18 @@ def create(conn: sqlite3.Connection, cfg: Config, *, task_id: str, title: str, g
             (did, task_id, title.strip(), goal.strip(), context, constraints, deliverable, done_criteria,
              dumps(allowed), cfg.get("kanban.assignee") or None, cfg.get("kanban.board", "todo-manager"),
              ids.delegation_idempotency_key(did), feedback_id, task["version"], now, now, op_key))
+        try:
+            route = notify_route(cfg)
+        except KanbanError as exc:
+            raise DelegationError(str(exc)) from exc
+        conn.execute("UPDATE delegations SET notification_route=? WHERE id=?", (dumps(route), did))
+        previous = conn.execute("SELECT id FROM delegations WHERE task_id=? AND id!=? AND status='ended' "
+                                "ORDER BY created_at DESC,rowid DESC LIMIT 1", (task_id, did)).fetchone()
+        if previous:
+            delivery = conn.execute("SELECT id FROM deliveries WHERE delegation_id=? AND kind='result' "
+                                    "ORDER BY received_at DESC,rowid DESC LIMIT 1", (previous["id"],)).fetchone()
+            conn.execute("UPDATE delegations SET previous_delegation_id=?,previous_delivery_id=? WHERE id=?",
+                         (previous["id"], delivery["id"] if delivery else None, did))
         conn.execute(
             "INSERT INTO delegation_messages(id, delegation_id, kind, feedback_id, body, requirement_version, status,"
             " created_at, sent_at) VALUES (?,?,?,?,?,1,'sent',?,?)",
@@ -288,13 +304,10 @@ def release_hold(conn: sqlite3.Connection) -> dict[str, Any] | None:
 # choices: todo-manager reads them (at most once a day), shows what they mean in ``health`` and
 # never changes them or holds cards back because of them.
 SWITCH_NOTES = {
-    "review_dispatch": "kanban.review_dispatch is on: Hermes' review worker reviews delivered agent work, so a delivery"
-                       " may be completed or sent back before you see it; accept and revision apply while a delivery"
-                       " waits in review (to review every delivery yourself: `hermes config set"
-                       " kanban.review_dispatch false`, a global Hermes setting)",
-    "auto_decompose": "kanban.auto_decompose is on: Hermes may split a card it parks in triage into new cards;"
-                      " todo-manager follows the original card (to keep such cards for your decision: `hermes config"
-                      " set kanban.auto_decompose false`, a global Hermes setting)",
+    "review_dispatch": "kanban.review_dispatch is on: Hermes' review worker reviews delivered agent work; "
+                       "review is execution review, not user acceptance. Done revisions use a linked follow-up.",
+    "auto_decompose": "kanban.auto_decompose is on: native triage may create children. Todo Manager bridges "
+                      "proven child questions and partial results, but only the root integrates the aggregate result.",
 }
 SETTINGS_KEY = "kanban.settings"
 SETTINGS_CHECK_HOURS = 24
@@ -309,6 +322,9 @@ def observe_settings(conn: sqlite3.Connection, kb: Kanban, force: bool = False) 
         return None
     values = kb.settings()
     notes = [text for key, text in SWITCH_NOTES.items() if bool(values.get(key, True))]
+    for name, enabled in zip(("MEMORY.md", "USER.md"), values.get("memory_flags", (True, True))):
+        if not enabled:
+            notes.append(f"Native {name} memory is disabled in the board host profile; no preference loader substitutes it")
     record = {"values": {k: bool(values.get(k, True)) for k in SWITCH_NOTES}, "notes": notes, "at": clock.iso()}
     with tx(conn):
         set_meta(conn, SETTINGS_KEY, dumps(record))
@@ -324,6 +340,31 @@ def _failed(stats: dict[str, Any], counter: str, error: str) -> None:
     """Count a failed Kanban call; the first error of the pass is kept for channel health."""
     stats[counter] += 1
     stats.setdefault("error", error[:500])
+
+
+def notify_route(cfg: Config) -> dict | None:
+    route = {"platform": cfg.get("kanban.notify_platform"), "chat_id": cfg.get("kanban.notify_chat_id"),
+             "thread_id": cfg.get("kanban.notify_thread_id") or None,
+             "notifier_profile": cfg.get("kanban.notify_profile")}
+    if not any(route.values()):
+        return None
+    if not all(route[k] for k in ("platform", "chat_id", "notifier_profile")):
+        raise KanbanError("notification route requires platform, chat_id and notifier_profile")
+    if route["platform"] == "api_server":
+        raise KanbanError("api_server requires wake delivery; passive notification route is unsupported")
+    return route
+
+
+def route_for(conn: sqlite3.Connection, cfg: Config, d: dict) -> dict | None:
+    """Pin the explicit route once; old delegations adopt config on their first upgraded sync."""
+    raw = d.get("notification_route")
+    if raw is not None:
+        return loads(raw, None)
+    route = notify_route(cfg)
+    with tx(conn):
+        conn.execute("UPDATE delegations SET notification_route=? WHERE id=? AND notification_route IS NULL",
+                     (dumps(route), d["id"]))
+    return route
 
 
 def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str | None = None) -> dict[str, Any]:
@@ -364,6 +405,14 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str 
                 continue
             if matches:
                 card = matches[0]
+                try:
+                    route = route_for(conn, cfg, d)
+                    if route:
+                        info = kb.notify(card["id"], route, release=not d["pause_requested"] and not closing)
+                        card["status"] = info["status"]
+                except KanbanError as exc:
+                    _failed(stats, "errors", f"notification registration failed: {exc}")
+                    continue
                 with tx(conn):
                     # Our pause has not reached this card yet: a block on it is the worker's.
                     status = "cancelled" if card["status"] == "archived" else _status_from_card(card["status"], d)
@@ -390,7 +439,8 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str 
                 card_id = kb.create(title=f"{d['title']} [{d['id']}]", body=body, idem_key=d["idem_key"],
                                     assignee=d.get("assignee"), tenant="todo-manager",
                                     workspace=cfg.get("kanban.workspace") or None,
-                                    max_retries=card_retries(cfg, d))
+                                    max_retries=card_retries(cfg, d), notify=route_for(conn, cfg, d),
+                                    skills=cfg.get("kanban.skills") or None)
             except KanbanError as exc:
                 with tx(conn):
                     _set(conn, d["id"], status="reconcile" if exc.uncertain else "pending_submit",
@@ -457,10 +507,17 @@ def _status_from_card(card_status: str, d: dict[str, Any], paused_block: bool | 
 def sync_cards(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, Any]:
     stats: dict[str, Any] = {"checked": 0, "deliveries": 0, "questions": 0, "failures": 0, "errors": 0}
     rows = conn.execute("SELECT id FROM delegations WHERE card_id IS NOT NULL AND status NOT IN"
-                        " ('ended','cancelled','quarantined')").fetchall()
+                        " ('cancelled','quarantined') AND (status!='ended' OR EXISTS "
+                        "(SELECT 1 FROM delegation_children c WHERE c.delegation_id=delegations.id "
+                        "AND c.status NOT IN ('done','archived')))").fetchall()
     for row in rows:
         d = get(conn, row["id"])
         try:
+            route = route_for(conn, cfg, d)
+            if route:
+                info = kb.notify(d["card_id"], route, release=not d["pause_requested"] and not cancel_pending(conn, d))
+                if info["history_gap"]:
+                    _failed(stats, "errors", "native subscription restored without event replay; inspect Notion history")
             snap = kb.snapshot(d["card_id"], after_event=d["event_cursor"])
         except KanbanError as exc:
             with tx(conn):
@@ -473,6 +530,11 @@ def sync_cards(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, A
                              " AND status IN ('pending','sending','waiting_capacity')", (d["id"],)).fetchone() is not None
         with tx(conn):
             _apply_snapshot(conn, cfg, d, snap, stats, quiet=quiet)
+        try:
+            from . import child_links
+            child_links.sync(conn, cfg, kb, d, quiet=quiet)
+        except KanbanError as exc:
+            _failed(stats, "errors", f"child sync failed: {exc}")
     return stats
 
 
@@ -512,6 +574,8 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
         payload = ev.get("payload") or {}
         if kind in ("blocked", "block_loop_detected"):
             reason = payload.get("reason") or ""
+            if reason == "initial_status" and payload.get("actor") == "todo-manager":
+                continue  # native staging for subscription registration, not a worker question
             paused_block = reason.startswith(PAUSE_MARK)
             if paused_block:
                 pause_event = ev["id"]
@@ -1135,6 +1199,9 @@ def send_messages(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str
                     outcome = _cancel_unsubmitted(conn, cfg, kb, d, dict(msg))
                 elif d["status"] in ("pending_submit", "reconcile"):
                     continue
+                elif msg["target_card_id"]:
+                    from . import child_links
+                    outcome = child_links.deliver_answer(conn, cfg, kb, d, dict(msg))
                 else:
                     outcome = _deliver(conn, cfg, kb, d, dict(msg))
             except KanbanError as exc:
@@ -1260,6 +1327,11 @@ def _deliver(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str, Any
     if kind in ("pause", "resume") and status in ("ended", "cancelled") and not attempted:
         return _unused(conn, d, msg, "card_moved", status=d.get("card_status") or status)
     if kind == "pause":
+        descendants = kb.owned(d["card_id"])
+        if descendants:
+            with tx(conn):
+                effects.task_comment(conn, d["task_id"], f"pause-scope:{mid}",
+                    i18n.t("dlg.child_pause_scope", cards=", ".join(descendants)))
         if status in EXECUTING:
             snap = kb.snapshot(d["card_id"], after_event=0)
             _sending(conn, mid)
@@ -1552,7 +1624,10 @@ def _send_cancel(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str,
         conn.execute("UPDATE delegation_messages SET status='sending' WHERE id=?", (msg["id"],))
     result = kb.transition(d["card_id"], "archive")
     termination = result.get("termination")
-    confirmed = termination is None or bool(termination.get("terminated"))
+    from . import child_links
+    children_confirmed = child_links.cancel_owned(conn, kb, d)
+    child_links.sync(conn, cfg, kb, d, quiet=True)
+    confirmed = children_confirmed and (termination is None or bool(termination.get("terminated")))
     # Whatever the card did before the archive is kept as history; it changes nothing now.
     late = {"deliveries": 0, "questions": 0, "failures": 0}
     try:
@@ -1571,7 +1646,7 @@ def _send_cancel(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[str,
         _set(conn, d["id"], status="cancelled", card_status=result["status"],
              cancel_state="confirmed" if confirmed else "unconfirmed")
         if not confirmed:
-            detail = ", ".join(f"{k}={v}" for k, v in sorted(termination.items()) if v not in (None, False))
+            detail = ", ".join(f"{k}={v}" for k, v in sorted((termination or {"children": "termination or stable ownership not confirmed"}).items()) if v not in (None, False))
             text = i18n.t("dlg.cancel_unconfirmed", title=d["title"], detail=detail or "-")
             effects.task_comment(conn, d["task_id"], f"cancel-unconfirmed:{d['id']}", text)
         if not for_task_active_other(conn, d):

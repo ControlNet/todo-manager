@@ -236,8 +236,6 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[
     run_id = runs.start(conn, "intake")
     summary: dict[str, Any] = {}
     try:
-        with tx(conn):
-            conn.execute("UPDATE runs SET rules_hash=? WHERE id=?", (prefs.file_hash(cfg.home), run_id))
         attempts = int(cfg.get("wake.max_attempts", 3))
         summary["recovery"] = batching.release_stale_claims(conn, STALE_CLAIM_MINUTES, attempts)
         summary["fetch"] = fetch_all(conn, conversation_adapters)

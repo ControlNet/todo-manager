@@ -82,8 +82,7 @@ def record_problems(conn: sqlite3.Connection, origin: str, found: list[str]) -> 
 
 def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
     out: dict[str, Any] = {"at": clock.iso(), "schema": get_meta(conn, "schema_version"),
-                           "conventions": {"path": str(prefs.agents_path(cfg.home)),
-                                           "version": prefs.file_hash(cfg.home)}}
+                           "conventions": {"path": str(prefs.agents_path(cfg.home))}}
     out["sources"] = [{"source": r["source"], "scope": r["scope"], "last_success_at": r["last_success_at"],
                        "minutes_since_success": round(clock.minutes_since(r["last_success_at"]) or -1),
                        "failures": r["consecutive_failures"], "error": (r["last_error"] or "")[:200],

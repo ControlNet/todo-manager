@@ -446,7 +446,8 @@ class HermesSettingsTests(Base):
         self.assertEqual(len(self.kb.cards), 1, "Hermes decides how its board runs")
         self.assertEqual(self.d(did)["status"], "queued")
         [note] = [n for n in self.notes() if "review_dispatch" in n]
-        self.assertIn("hermes config set kanban.review_dispatch false", note)
+        self.assertIn("review is execution review, not user acceptance", note)
+        self.assertNotIn("hermes config set", note)
         self.assertFalse([p for p in health.report(self.conn, self.cfg)["problems"] if "review_dispatch" in p])
         self.assertEqual(self.kb.settings_values["review_dispatch"], True, "the global switch is not touched")
 

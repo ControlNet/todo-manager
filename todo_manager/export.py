@@ -4,7 +4,7 @@
   read, safe while gates and applies run), then writes from that copy only: human-readable
   Markdown (tasks/, projects/, views/, and rules/ for the rules of a pre-8 workspace),
   ``data.json`` (every table, including the board linkage) and ``workspace/`` (config.toml
-  without secrets, the conventions AGENTS.md and rules-archive.md, the run context
+  without secrets, the managed AGENTS.md and rules-archive.md, the run context
   ``runs/<id>`` of the runs in the snapshot, the delivery files the snapshot's deliveries refer
   to) into ``exports/<stamp>/``;
   ``manifest.json`` lists every file with its SHA-256, every table with its row hash, kept
@@ -212,8 +212,7 @@ def _write_export(conn: sqlite3.Connection, cfg: Config, root: Path) -> None:
         (root / "projects" / f"{pid}.md").write_text(_project_md(conn, store.get_project(conn, pid)), encoding="utf-8")
     legacy = conn.execute("SELECT * FROM rules ORDER BY status, created_at, id").fetchall()
     if legacy:
-        # Rules of a workspace from before schema 8 (their content now lives in AGENTS.md and
-        # rules-archive.md, exported under workspace/); kept for audit.
+        # Legacy rule records remain audit data; semantic import into native memory is separate.
         (root / "rules").mkdir(parents=True, exist_ok=True)
         rule_lines = [f"# {_t('rules')}", ""] + [
             f"- [{r['status']}] {r['id']} r{r['revision']} ({r['scope_type']}{':' + r['scope_id'] if r['scope_id'] else ''})"
@@ -230,6 +229,30 @@ def _write_export(conn: sqlite3.Connection, cfg: Config, root: Path) -> None:
     run_ids = [r["id"] for r in data.get("runs", [])]
     artifacts = [a for d in data.get("deliveries", []) for a in loads(d["artifacts"], []) if isinstance(a, dict)]
     redacted, artifact_problems = _export_workspace(cfg.home, root / "workspace", run_ids, artifacts)
+    from . import hermes_install, templates
+    paths = hermes_install.Paths.from_config(cfg)
+    framework = root / "framework"
+    framework.mkdir(exist_ok=True)
+    installation = hermes_install.load_manifest(paths)
+    live_jobs = hermes_install.load_jobs(paths) if installation else {}
+    owned_ids = {job.get("id") for job in installation.get("jobs", {}).values()}
+    live_jobs = {name: job for name, job in live_jobs.items() if job.get("id") in owned_ids}
+    (framework / "cron.json").write_text(json.dumps(live_jobs, ensure_ascii=False, indent=2))
+    skill = hermes_install.live_skill(paths, live_jobs) if installation else None
+    if skill:
+        shutil.copyfile(skill, framework / "SKILL.md")
+    for entry in ("intake", "feedback"):
+        (framework / f"{entry}.md").write_text(templates.cron_prompt(entry))
+        if installation and paths.script(entry).is_file():
+            shutil.copyfile(paths.script(entry), framework / f"gate_{entry}.py")
+    if installation and paths.launcher.is_file() and hermes_install.LAUNCHER_MARK in paths.launcher.read_text():
+        shutil.copyfile(paths.launcher, framework / "launcher.py")
+    for source, target in ((paths.state_dir, framework / "install-state"),
+                           (cfg.home / "backups" / "framework", framework / "prior-files")):
+        if source.is_dir():
+            shutil.copytree(source, target, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns("*.sqlite", "*.sqlite-wal", "*.sqlite-shm"))
+    (framework / "version.json").write_text(json.dumps({"framework": "hermes-native/3", "schema": db.SCHEMA_VERSION}))
     files = {str(p.relative_to(root)): {"sha256": sha256_file(p), "size": p.stat().st_size}
              for p in sorted(root.rglob("*")) if p.is_file() and p != root / "manifest.json"}
     manifest = {"format": EXPORT_FORMAT, "exported_at": clock.iso(), "schema_version": db.schema_version(conn),
@@ -237,7 +260,11 @@ def _write_export(conn: sqlite3.Connection, cfg: Config, root: Path) -> None:
                 "files": files, "redacted_config_keys": redacted, "artifact_problems": artifact_problems,
                 "integrity": integrity_problems(conn),
                 "not_exported": ["secrets (environment variables, token files)", "backups/", "state/locks",
-                                 "state/hermes (machine-specific install record)",
+                                 f"native memory: {paths.hermes_home}/memories/USER.md and MEMORY.md; separately back up profile memories/",
+                                 f"native identity: {paths.hermes_home}/SOUL.md; separately back up that file",
+                                 f"complete Kanban history: configured Kanban home (kanban.hermes_home or HERMES_HOME)/kanban; "
+                                 "back up via SQLite online backup with gateway quiesced, including artifacts/workspaces",
+                                 "native notification delivery checkpoints and gateway session history",
                                  "files no run or delivery of the snapshot refers to (written after it)"]}
     (root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
 

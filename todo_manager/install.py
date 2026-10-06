@@ -216,7 +216,7 @@ def init_workspace(home: str | os.PathLike[str] | None, language: str, timezone:
     else:
         language = config.load(home).language   # an existing config is never rewritten here
     # The conventions file is the user's: created from the template when missing, otherwise left
-    # to the Hermes step (3-way merge with the new template).
+    # to the Hermes step (backup and managed replacement).
     prefs.ensure(cfg.home, language)
     db.connect(cfg.db_path).close()
     return {"home": str(cfg.home), "config": str(target), "config_created": created, "db": str(cfg.db_path),

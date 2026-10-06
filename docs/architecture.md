@@ -1,261 +1,198 @@
-# Architecture: Todo Manager on Hermes Agent
+# Hermes-native architecture
 
-Todo Manager installs and maintains a Todo automation **for** Hermes Agent. It is not an agent
-runtime of its own: Hermes runs the agent loop, calls tools, judges, reads the user's rules and
-skills, schedules the board, runs workers and owns their concurrency, recovery, memory, sessions
-and delivery. Todo Manager provides what Hermes does not have:
+Verified on 2026-10-06 against installed Hermes source `105568c1558e1cb494e6edf1a2998d524ebe809e`.
+Todo Manager baseline was `a820251`; both the starting checkout and remote main matched it.
+See [native verification](hermes-native-verification.md) for executable evidence and limitations.
 
-- incremental reading of sources (Gmail, Slack, GitHub, commits) with full local copies;
-- durable business data: Projects, Tasks, evidence links, history, protection of human edits;
-- the Notion UI (Projects, Tasks, views, comments) and its reliable two-way sync;
-- the durable link between a Notion Task and Hermes Kanban cards (idempotent creation, replies
-  bound to the right question/version, results recorded once, recovery after restarts);
-- cross-system de-duplication, delivery records and failure recovery;
-- install, upgrade, workspace migration, export, backup, uninstall.
+## Running pipeline
 
-The rule that decides where a mechanism lives:
+```text
+Gmail / Slack / GitHub
+  -> intake cron script: incremental fetch, pagination, full-text retention, maturity, claims
+  -> idle: {"wakeAgent": false}; work: bounded materials directly on stdout
+  -> Hermes: native skill + stored intake prompt + project context + profile memory
+  -> Todo CLI: Task/Project/evidence/outcomes -> outbox -> Notion
 
-| Kind | Examples | Lives in |
+Notion edits, comments, next_actor=Agent
+  -> feedback cron script: import human edits, record delegate_request, sync cards/outbox
+  -> Hermes feedback agent: interpret the request, prepare concrete delegated instructions
+  -> Todo CLI: persistent delegation + idempotency key + Task/page/version linkage
+  -> native ready card, or initial blocked staging when a notification route is configured
+  -> register native passive notification subscription -> native unblock
+  -> Hermes dispatcher -> profile worker in a native task workspace
+  -> native card events -> feedback script -> Notion questions, partial/aggregate results
+  -> Notion discussion reply -> bound feedback/delivery/card/event -> native comment + unblock
+```
+
+There are exactly two scheduled agent entry points. Feedback owns delegation and result sync.
+No delegation cron, execution cron, resident coordinator, model client, dependency executor or
+notification service is introduced. Source quiet windows and minimum model wake intervals are
+independent of cron schedules. Waiting on a person or a future retry does not by itself wake a model.
+
+## Responsibilities
+
+| Responsibility | Hermes | Todo Manager |
 |---|---|---|
-| A. Data correctness | idempotency keys, version checks, valid references, transactions, source authenticity, claims | code (`todo-manager`) |
-| B. User behaviour policy | what counts as a responsibility, what to ignore, reminder habits, delegation style, wording | user-maintainable text: workspace `AGENTS.md`, the Hermes skill, `config.toml` |
+| Reasoning, tools, model loop | Native agent | Supplies material and validates business writes |
+| Scheduling and pre-run scripts | Native cron, Script Output/Error | Deterministic intake/feedback scripts |
+| Prompt and context loading | Native cron skills, stored prompt, workdir discovery, profile memory | Deploys owned templates via cron CLI |
+| Work orchestration | Kanban dispatcher, claim lock, profiles, decomposition, dependencies, retry/review | Task/delegation/card associations and idempotent messages |
+| Source ingestion | Existing provider/tool ecosystem | Incremental readers, pagination, dedupe, cursors, full text, health |
+| Notion | Agent understands user requests | Property/body/comment sync, human edit protection, outbox |
+| Notifications | Cron deliver/failure_deliver; native subscriptions and gateway notifier | Explicit route registration and missing-subscription repair |
+| Recovery | Worker claims, native retry and channel delivery checkpoints | Lost create/message response reconciliation; unknown external action holds |
+| Persistence/export | Native profile and Kanban assets | Business database, framework snapshots, migration archives |
 
-## Who owns what
+## Ownership and loading
 
-| File / setting | Owner | Loaded by | Changed by |
+| Surface | Owner | Actual loading and scope | Upgrade |
 |---|---|---|---|
-| `TODO_HOME/AGENTS.md` | the user | the two cron jobs (job `workdir` = `TODO_HOME`, Hermes loads it as project context); the main agent reads it on demand (`todo-manager prefs show`) | the user; Hermes on the user's explicit request (chat) or the user's explicit long-term correction (Notion comment) |
-| Hermes skill `todo-manager` (`~/.hermes/skills/productivity/todo-manager/SKILL.md`) | the user after install (shipped as a template) | every job run (`--skill`), chat sessions on demand | the user / Hermes on request; upgrades merge (3-way) |
-| Cron job prompts (`todo-manager-intake`, `todo-manager-feedback`) | the user after install | Hermes cron | the user / Hermes on request (`hermes cron edit`); upgrades merge (3-way) |
-| Cron job schedule, model, provider, toolsets, delivery, workdir | the user | Hermes cron | the user / Hermes; upgrades never overwrite a value that differs from what was installed |
-| `TODO_HOME/config.toml` | the user | the gate scripts (script-enforced parameters: source scope, quiet windows, batch sizes) | the user, `todo-manager config set` (also used by Hermes on request) |
-| `USER.md`, `MEMORY.md`, `SOUL.md` of the Hermes profile | Hermes / the user | Hermes natively | never by Todo Manager |
-| Gate scripts, launcher (`~/.hermes/scripts/todo_manager_gate_*.py`, `~/.local/bin/todo-manager`) | Todo Manager (framework files) | Hermes cron / the shell | `todo-manager install` (overwritten, marked as generated) |
-| `TODO_HOME/state/` database, runs, exports, backups | runtime data | `todo-manager` | `todo-manager` only |
+| Dedicated Todo workspace `AGENTS.md` | Project | Hermes project discovery when cron has workdir; higher-priority HERMES.md / AGENTS.override.md may shadow it | Back up, then replace a known owned file |
+| `hermes_assets/prompts/intake.md` | Project | Source template; installer copies text into native cron `prompt` | Native cron edit, not a runtime file loader |
+| `hermes_assets/prompts/feedback.md` | Project | Same, including delegation and interaction workflow | Native cron edit; no delegation.md |
+| `skills/productivity/todo-manager/SKILL.md` | Project | Native cron skills, command reference and constraints | Back up and replace when ownership is known |
+| `<profile home>/memories/USER.md` | User/Hermes | Native profile preference snapshot at session start; shared by both cron sessions in that profile | Never managed by this installer |
+| `<profile home>/memories/MEMORY.md` | Hermes/user | Native factual memory, enabled independently | Never managed |
+| `<profile home>/SOUL.md` | User/Hermes | Native identity, separate from project discovery | Never managed |
+| Cron schedule, deliver, failure_deliver, workdir, skills, model, provider, reasoning_effort, paused state | User | Native cron definition | Existing values preserved even when matching an old default |
 
-Precedence when the agent decides: the user's explicit current instruction > `AGENTS.md`
-conventions > the skill's generic defaults. Source content (emails, chats, issues, comments by
-other people) never has authority, whatever it says.
+The workspace contains no substitute USER.md, MEMORY.md or SOUL.md. Short lasting preferences
+use the native memory tool's `user` target. Explicit user corrections in chat are handled in
+that chat; no Matrix history scan is scheduled. Feedback may act on an authenticated user's
+explicit preference request, respecting capacity, enable flags and write approval. A staged
+write is not a completed import. Workflow-specific preferences name their scope explicitly;
+USER.md is not a per-cron access-control boundary. Writes do not alter a running worker's
+frozen memory snapshot. Task changes go through card messages.
 
-No special file is assumed to stack: Hermes loads one project context type per working
-directory (`.hermes.md` > `AGENTS.md` chain > `CLAUDE.md` > `.cursorrules`; checked at
-hermes-agent 105568c, see `.omo/knowledges/hermes-prompt-surfaces.md`). `TODO_HOME` is not a
-git repository, so only `TODO_HOME/AGENTS.md` is loaded for the jobs. Hermes' own memory
-(`USER.md`/`MEMORY.md`) stays in the Hermes profile; Todo Manager does not imitate it in the
-workspace and does not copy `AGENTS.md`/skill text into it.
+Cron agents skip background memory/skill review in this version. Explicit memory tool calls
+are a separate path. Todo Manager does not increase memory limits, evict entries or replicate
+profile memory. Old rules and revisions remain in the database/archive for audit, without a
+runtime DSL, preference parser or approval gate. `prefs.file_hash`, `_rules_check`, `--rules`
+and gate `rules_hash` writes have been removed. The old SQL column remains for historical
+exports. Task versions, human field ownership, request idempotency and approval versions remain.
 
-## The two cron jobs
+## Gates and failure semantics
 
-Both are Hermes cron jobs with a pre-run script (the "gate"). The gate does all deterministic
-work; Hermes wakes the model only when something needs judgement.
+A nonempty work context includes its materials, not just a run ID. Oversized inputs are marked
+and give a full-text command; source bodies remain stored. Quoted source text is untrusted
+material. Text matching the native injection scanner is marked with a full-text reference;
+the scanner is not bypassed. No personal categories are encoded in gate branches.
 
-### 1. Intake (`todo-manager-intake`, every 5 minutes)
+A source failure is recorded per scope and exposed through health; other sources can continue.
+Incident context is rate-limited. A gate exception exits nonzero. A normal agent cron can still
+wake with Script Error; both prompts require no business changes and `[CRON_FAILURE]` in that
+case. This is not a guarantee of native fail-fast. Successful empty script output is skipped
+by `_build_job_prompt`; the explicit idle contract is `{"wakeAgent": false}`. Idle agent cron
+runs do not deliver a summary. `[SILENT]` suppresses ordinary final-response delivery.
 
-1. Release claims of earlier runs whose lease expired (unhandled items go back, counted).
-2. Read each enabled source incrementally (cursor per source scope), store every new item in
-   full (`source_items` + `source_bodies`); one failing source does not stop the others.
-3. Group items into conversations; a conversation matures after its quiet window
-   (`<source>.quiet_minutes`, configurable, no hidden floor) and per-source wake interval.
-4. Due follow-ups and the daily commit digest are added.
-5. Nothing to judge → print `{"wakeAgent": false}` (no model run, recorded as idle).
-6. Otherwise claim the mature conversations that fit the context budget and print the run's
-   context **directly** (it becomes the "Script Output" block of the Hermes prompt): wake
-   reasons, source problems, the user's identities, the claimed material (quoted, marked as
-   untrusted evidence), the tasks already linked to those conversations, due follow-ups, the
-   digest, and a short list of the commands to record outcomes. Hermes has already loaded
-   `AGENTS.md` and the skill; they are not repeated.
-7. The agent records outcomes with small `todo-manager` commands (below). An item is handled
-   only when an outcome is recorded for it: linked as evidence, dismissed with an outcome, or
-   deferred. Being shown is not being processed. Items left without an outcome are offered again
-   (bounded attempts, then reported as stuck; never dropped).
+## Delegation and worker boundaries
 
-### 2. Feedback and sync (`todo-manager-feedback`, every 5 minutes)
+A repeated Notion Agent property value records one delegate_request. The agent then decides
+concrete instructions. A ready card assigned to a valid dispatchable profile is a normal
+entry: triage/decomposition are optional. An invalid or missing profile is a submission error,
+not running work. Blank profile configuration is not a general routing mechanism.
 
-1. Deterministic sync, no model: Notion pull (property edits applied as human edits), comment
-   poll, Kanban: queued messages to cards, card submission, card events → deliveries/questions,
-   outbox (Notion writes, comments), home page status.
-2. Feedback that needs interpretation (comments by the user, edits inside the managed box, tasks
-   created in Notion, "next actor = Agent" requests) is claimed and its context printed directly:
-   each item with its task, delegation state and recent thread.
-3. The agent acts with the same small commands and closes each item with
-   `todo-manager feedback resolve <id> --outcome applied|clarify|ignored [--reply …]`.
-4. This job never starts or schedules workers. Cards already on the board are run by Hermes'
-   dispatcher whether or not this job runs; while it is down only the Notion display and the
-   forwarding of new feedback wait, and both catch up from durable cursors when it runs again.
+One active delegation per Task is enforced transactionally unless the existing explicit
+parallel-work option is requested. Supplements/revisions use the active delegation. The
+submission lock serializes lookup/create/link in Todo Manager; Hermes owns worker claim locks.
+Lookup includes archived cards, so a lost response or a restart cannot create a second card
+for the same delegation. Multiple matches are quarantined. No native jobs/state tables are
+written directly.
 
-### Failure semantics
+Cards carry Task/page/delegation references, requirement version, goals, context, deliverables,
+authorization and the minimum approval/pause/result/unknown-action protocol. The protocol and
+full-text commands precede potentially long content. Native worker context caps body at 8 KiB,
+comments at 2 KiB and individual result fields at 4 KiB. `delegate show` returns complete stored
+requirements; `task show` includes full page notes. Ordinary workers do not inherit feedback
+chat history or its entire prompt. Their profile memory, native project context, workdir,
+card skills, body/comments, parent results and attempt history are native inputs.
 
-| Situation | Gate output | What Hermes does |
-|---|---|---|
-| nothing to do, or the previous run still holds the lock | `{"wakeAgent": false}` | silent success |
-| one source failing, others fine | context includes a "Source problems" section when it wakes anyway; recorded in `health` and the Notion home status | normal run |
-| only source problems (no material) | wakes at most once per problem and day with a short report; the cron prompt says to answer with `[CRON_FAILURE]` | failure delivery (Hermes incident ledger de-duplicates) |
-| the gate itself fails (config, database, code) | exit code 1 with a one-line error on stderr | Hermes wakes the agent with a "Script Error" block; the cron prompt says to reply `[CRON_FAILURE]` and the error, nothing else; the run counts as failed |
+The decomposer/specifier uses a shorter 4,000-character body input and an auxiliary model,
+not a full worker loop. Native children receive their own body and are not guaranteed to
+inherit the root protocol, skills or authorization. Feedback instructions require copying
+necessary constraints into children; this is agent guidance, not a native enforcement guarantee.
 
-A gate failure is never printed as an idle run: Hermes treats `wakeAgent: false` as success and
-would close the incident.
+Scratch is the default native workspace. Coding work may use configured native worktrees;
+ordinary `dir` workspaces provide no write isolation. Todo's control workspace is not a common
+coding directory. Native decomposed worktree children omit an inherited path so dispatch can
+materialize independent worktrees. Isolation does not prove semantic non-overlap: task scopes,
+dependencies and integration ownership still matter.
 
-### Context injection rules
+## Children, questions, completion and cancellation
 
-- Source content is quoted (`> ` per line) inside a section marked as untrusted material; it can
-  neither close Hermes' code fence nor pose as a heading. Text that matches Hermes' cron
-  prompt-injection patterns (which would block the whole run) is replaced by a visible marker
-  naming the item; the full text stays readable with `todo-manager source show <item>`.
-- Large items are shown up to `wake.max_item_chars` with an explicit "N more characters:
-  `todo-manager source show <item>`" line. A conversation that does not fit the context budget
-  is cut into segments in message order; the first claimed conversation always goes in (clipped
-  if necessary), so one oversized item can never be deferred forever and is never silently cut.
-- The last line of the output is a fixed footer, so source text can never become the wake line.
-- Run ids stay for tracing, claims and idempotency. `todo-manager run show <run>` re-renders a
-  run's context for debugging and recovery; the normal path does not need it.
+`delegation_children` and `delegation_child_events` store cross-system lineage/cursors and
+local result history. Ownership is proved by creation-event `creator_task_id` or
+`from_decompose_of`, recursively; dependency edges are never used as ownership. No child is
+turned into a new Notion Task automatically. Child results are explicitly partial; root
+results represent the delegation, and neither automatically completes the user's Task.
 
-## Small business interface (`todo-manager` CLI)
+Child questions become delivery records containing the actual child card and event. Replies
+in their Notion discussion recover that delivery ID; direct replies use `delegate answer
+--question <delivery-id>`. Lost comment responses reconcile by marker before retrying.
+A later question, changed requirements, a pause or cancellation prevents stale resumption.
+External approvals on child questions are explicitly refused by this adapter: the root can
+perform the separately authorized external action using the existing version-bound protocol.
+There is no automatic transfer of a root approval to a child.
 
-Queries: `task list [--search]`, `task show`, `project list|show`, `source show`, `run show`,
-`feedback list|item`, `delegate list`, `health`, `status`.
+Review belongs to Hermes' execution/review cycle. Human waiting uses blocked. A user acceptance
+command only applies to its bound review version; native review workers can move it meanwhile.
+For done cards, Todo Manager creates a new delegation on the same Task and persists predecessor
+and previous-delivery IDs. It does not invoke review reopen on done or undo completed dependencies.
 
-Writes (each one transaction: the item plus the operations that depend on it):
+Cancellation archives the root first, then only proven owned descendants, observing lineage
+again for children committed during termination. Native termination outcomes are checked.
+Unstable lineage or unconfirmed termination remains unconfirmed. This is a bounded connector
+operation, not a resident cancellation executor. An archive can release unrelated dependants;
+those are not cancelled. Late results and unknown approvals remain recorded.
 
-| Command | Effect |
-|---|---|
-| `task create --title … [--project] [--set f=v]… [--evidence <item>[:role]]… [--follow-up-of <task>]` | new task, evidence linked, those items handled |
-| `task update <id> --set f=v… [--based-on <version>] [--evidence …] [--override-human]` | versioned field update |
-| `task link <id> --evidence …` | evidence only |
-| `project create|update` | same pattern for projects |
-| `item dismiss <item>… --outcome <outcome> [--label <your label>] --reason …` | handled without a task |
-| `item defer <item>… --reason … [--until <date>]` | left pending on purpose; offered again on new activity or at the date |
-| `followup checked <task>` / `digest done` / `run done` | close a due follow-up / the digest / release what this run did not handle |
-| `delegate create|message|answer|approve|cancel` | Kanban work for a Task |
-| `feedback resolve <id> --outcome …` | close a feedback item (with an optional reply comment) |
-| `config get|set` / `prefs show|path` | script parameters / the workspace conventions file |
+Pause/resume and ordinary supplement/revision messages currently target the entry card.
+When children exist, pause posts an explicit Notion scope notice: descendants are not confirmed
+paused. There is no atomic pause across blocked/todo/review/running child states in this adapter.
+Use scoped native controls or cancellation of the proved ownership set. Do not promise that
+modifying USER.md or notifying a chat wakes a dependency-blocked root.
 
-Every write takes the context it acts in: `--run <run id>` (cron run, actor `agent`),
-`--feedback <feedback id>` (acting on the user's Notion feedback; refused for authors that are
-not the verified user), or `--request <chat message id> --said "<the user's words>"` (the main
-agent acting on the user's chat request; the words are stored). Without any of them the CLI user
-is the actor. A retried command (same context and arguments, or the same `--key`) returns the
-first result instead of applying twice. Validation is about data correctness only: unknown ids,
-versions, enums, closed tasks, ownership of claims, authenticity of the author. There is no
-coverage check, question budget, fixed ignore category list or required call order.
+## Notifications
 
-Outcomes for dismissed material are generic (`no_action`, `informational`, `automated`,
-`not_mine`, `duplicate`, `spam`, `handled_elsewhere`) plus an optional free label the user's
-conventions may define (e.g. a label for review invitations).
+Configure platform/chat/thread/notifier profile explicitly in `kanban.notify_*`. No route means
+no registration and no sending. Routes are pinned to new delegations; migrated rows adopt
+configuration once. Passive `notify` is the default; no fabricated session or automatic wake.
+`api_server`, which requires wake-based delivery, is rejected by this passive adapter.
 
-Stale rules: a run records the hash of `AGENTS.md` when it starts. If the file changed during
-the run (the user edited a convention), `item dismiss` for that run is refused with
-`RULES_CHANGED` until the agent re-reads the file and repeats the command with `--rules <hash>`;
-additive operations (create, link, update) proceed. Unrelated work is not redone.
+New routed cards are created with native `initial_status="blocked"`. After subscription
+registration they are unblocked natively. A failed registration leaves a nondispatchable card;
+recovery finds the same card, registers and only lifts the identifiable initial staging block.
+It never lifts a worker's human question. Staging events are not shown as user questions.
 
-## Board linkage (Hermes Kanban)
+Existing subscriptions are left in place (including their cursors and user-chosen modes).
+Missing active-card/child subscriptions are re-registered; a historical gap is reported because
+new subscriptions start at the latest event. Previous rapid results remain in Notion, but are
+not claimed as channel-delivered. Native notifier retention/failure removal can remove a
+subscription. Gateway routing and connected channel availability remain necessary; registration
+alone does not prove delivery. Native retries, cursors, ping/wake checkpoints and clients are
+untouched. There is no exactly-once delivery promise.
 
-Todo Manager keeps, per delegation: Task id / Notion page, board, card id, creation idempotency
-key and marker, sync cursor, pending instructions, deliveries (with requirement version and
-files), approvals, and the bindings of answers/revisions to the card event they answer.
-Guarantees kept from the earlier design: no duplicate card after a lost create response or a
-re-scan (lookup by key and marker before every create, `reconcile` state, quarantine on
-multiple matches); an answer a day later still goes to the original card and question; comments
-carry `[tm:<message id>]` so a retry never posts twice; results are recorded once per card event;
-sync resumes from cursors after a restart; one Task may have historical and follow-up
-delegations.
+Primary channel outlets: cron deliver for semantic run summaries/source incidents; native
+Kanban notify for work status/results. Notion holds persistent questions/results. Prompts
+avoid repeating Kanban outcomes in cron summaries or proactive send_message. Native children
+inherit routes through creator/decomposition and can also inherit via dependency parents;
+this may produce one notification per child. Notification inheritance is not proof of ownership.
 
-Hermes owns execution: worker start/claim, concurrency, queue, retries, native recovery. The
-local `kanban.max_running` capacity and the "waiting for capacity" holds are gone. Hermes'
-dispatcher limits (`kanban.max_in_progress`, …) are global Hermes settings that apply to every
-board; Todo Manager neither sets nor requires them. The `review_dispatch` / `auto_decompose`
-switches are no longer preconditions: they are reported by `health` as information, because they
-change how Hermes treats review and triage cards on every board.
+## Installation and export
 
-Cards are created right after the `delegate create` command (best effort, under the submission
-lock); a failed or uncertain create is completed by the next feedback gate.
+Known project files are backed up before replacement; no generic three-way merge is active.
+Unknown files/jobs are preserved and reported. Backups include old AGENTS, live cron definitions,
+skill, baselines/conflicts, rule archive, database snapshot and install record. Database schema 9
+adds child associations, target-card binding, pinned routes and predecessor delivery linkage.
+Schema migration first takes an online SQLite backup; data is not deleted.
 
-### Personal Task status vs. agent work
+Program upgrade and personal preference import are separate. The installer archives old
+material without classifying it. An explicitly requested Hermes conversation can review the
+archive into native USER.md; rejected, ambiguous or oversized content remains archived.
+Uninstall removes recorded owned cron resources and marked generated files, preserves modified
+skills and never deletes Task/Notion data, profile memory or Kanban history.
 
-- A delegation's state lives on the delegation (Notion column "Agent work": queued, running,
-  question, review, delivered, paused, quarantined). Card events never rewrite the Task's
-  status. The one default kept: while a delegation waits for the user (question, delivery,
-  failure) and the Task's next actor is `agent`, the next actor goes back to `me`, unless the
-  user changed the next actor after the delegation started.
-- Workers use Hermes' native tools: `kanban_complete` when the work is done, `kanban_block`
-  (`needs_input`) for questions and for approval of an external action they are not allowed to
-  take, `kanban_request_review` when they want a review. Nothing forces review.
-- An agent finishing a draft does not complete the Task. Closing a Task (done or cancelled)
-  stops its active agent work: active cards are archived. Closing never accepts a delivery; an
-  explicit accept is a separate instruction.
-- External actions need explicit authorization (allowed actions at creation, or an approval of a
-  specific question or delivered version) and are audited. An approved action whose outcome is
-  unknown (the run ended without a report) is neither treated as not done nor repeated: the card
-  is paused and the user is asked. Cards with external actions are created with Hermes'
-  `max_retries = 1`, so Hermes does not respawn them automatically.
-- Prompt instructions in the card body are guidance, not tool isolation; the real limits are
-  the worker's Hermes toolsets and credentials.
-
-## Notion
-
-Projects and Tasks data sources and the home views (Focus, Waiting on others, To decide, Agent
-work, To review, Recently done) stay. Properties are structured edits (applied as human edits);
-comments are discussion, instructions and corrections (interpreted by the feedback job); the
-user's own notes on a page are kept exactly as written and used as context (they no longer wake
-the model or become instructions); the Todo-Manager box on the page (sources, summary, agent
-work, deliveries) is regenerated by the program, and an edit inside it is handled as feedback
-and never silently overwritten.
-
-## Install, upgrade, uninstall
-
-`todo-manager install` (re-runnable) creates the workspace, infers connectors from Hermes, sets
-up Notion and the board (with confirmation), and installs the Hermes parts. Ownership is
-recorded in `TODO_HOME/state/hermes/install.json` with a baseline copy of every user-editable
-template (`state/hermes/baseline/`).
-
-- Framework files (gate scripts, launcher) are overwritten.
-- User-editable templates (skill, cron prompts, workspace `AGENTS.md`) are upgraded with a
-  3-way merge: baseline (what was installed) / live (what the user has now) / new template.
-  Non-overlapping changes merge automatically; a real conflict keeps the live text, writes the
-  merge with conflict markers to `state/hermes/conflicts/` and is reported by `install` and
-  `health`.
-- Cron job settings: a field whose live value differs from what was installed (schedule,
-  delivery, workdir, skills, model, provider, reasoning effort) is the user's and is kept; the
-  others follow the new version; a job's paused/running state is never changed by an upgrade.
-  Hermes' job store is only read, all changes go through `hermes cron create|edit|remove`. New
-  jobs are created paused with `workdir` = `TODO_HOME`; `health` reports a job whose working
-  directory is elsewhere (it would run without `AGENTS.md`).
-- `todo-manager uninstall` removes only what Todo Manager installed (cron jobs, gate scripts,
-  launcher, an unchanged skill) and keeps the workspace data, the Notion pages and the board.
-  Deleting the data is left to the user (export first, then remove the directory). Profile
-  files (`USER.md`, `MEMORY.md`, `SOUL.md`) are never touched.
-- Export includes `config.toml` (secrets redacted), `AGENTS.md` and `rules-archive.md`; a backup
-  keeps the same files next to its database copy and a restore puts them back (linkage data
-  included).
-
-## Migration from the previous design (schema v7 → v8)
-
-| Old | New |
-|---|---|
-| `rules`/`rule_revisions` tables, `rule` CLI, `rule`/`update_rule`/`suggest_rule` ops, `rules_version` checks | active rules (and, for workspaces created before this version, the former built-in ignore categories and asks) are written to `AGENTS.md` under "Migrated conventions" with their ids and revisions; suggested and retired rules go to `rules-archive.md` (not loaded). The tables stay read-only for audit and export; nothing writes them |
-| intake/feedback decisions JSON (`intake show/apply`, `feedback show/apply/apply-direct/format`) | context printed by the gate; small commands per outcome |
-| `IGNORE_CATEGORIES` with personal categories (`cfp`, `review_invitation_unaccepted`) | generic outcomes + free labels; the personal categories become conventions of migrated workspaces only |
-| question budget, coverage check, Slack 30-minute floor | removed (policy belongs to the user's conventions/config) |
-| `kanban.max_running`, `waiting_capacity` holds, required global switches | removed; existing `waiting_capacity` messages become `pending` |
-| Task status/next actor rewritten from card state | delegation state shown separately; only the next-actor hand-back default |
-| closing a Task as done accepted a delegation in review | closing cancels active work; queued explicit accepts are still carried out |
-| page notes interpreted as feedback | kept as context; pending notes items are closed as superseded (the notes stay on the page and in `notion_pages.notes_text`) |
-| worker protocol forbidding `kanban_complete`, forcing review | native complete/block/review; cards created before keep the protocol in their body and are still synced the same way |
-
-Old active delegations keep working: their cards, bindings, approvals and queued messages are
-unchanged and processed by the same code paths; only the capacity hold is lifted.
-
-## Module map
-
-| Module | Role | Change |
-|---|---|---|
-| `sources/*`, `batching.py` | incremental reading, full storage, conversations, quiet windows | kept (floor removed) |
-| `gate_intake.py`, `gate_feedback.py` | deterministic gates, claims, direct context | rewritten output path |
-| `context.py` | rendering of the run context, neutralization, budgets | new (replaces `intake.render_context`, `feedback_flow.render_context`) |
-| `ops.py` | small business operations with idempotency and authority checks | new (replaces `intake.apply_decisions`, `feedback_flow.apply_*`) |
-| `prefs.py` | workspace `AGENTS.md`, rules migration, staleness hash | new |
-| `rules.py`, `prompts/` | rules engine, decision formats | deleted |
-| `store.py` | tasks/projects/evidence/history, human-edit protection | kept; status/next-actor coupling relaxed |
-| `delegation.py`, `kanban.py`, `kanban_bridge.py` | board linkage, reliable messages, approvals | kept; capacity, settings gate, Task-state coupling removed; worker protocol rewritten |
-| `notion/*` | Notion sync | kept; notes as context, delivered label |
-| `hermes_install.py`, `install.py`, `merge3.py` | install/upgrade/uninstall with ownership | 3-way merge, cron settings preserved, workdir |
-| `export.py` | export/backup/restore | workspace files included |
+Exports contain Task/Project/evidence/history, business associations and state; framework
+version, templates, effective managed files, live cron config/prompt and old customization
+archives. The manifest explicitly excludes native memory/identity, full Kanban history,
+notification delivery checkpoints and gateway sessions, and names separate backup locations.
+Importing the business workspace does not write profile memory or re-install native cron jobs.

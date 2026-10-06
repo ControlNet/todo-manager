@@ -61,7 +61,7 @@ class World:
         self.mailboxes = {"work": ("test-gmail-work", "me@work.example")}
         self.himalaya = tmp / "himalaya.toml"
         self.write_himalaya()
-        self.gh_token = "test-gh-token"
+        self.gh_token = "fake"  # Synthetic fixture; never accepted by GitHub.
         self.slack = {"ok": True, "user_id": "U0ME", "team_id": "T0LAB", "team": "Lab", "user": "me"}
         self.notion = FakeNotion()
         self.kanban = WorldKanban()
@@ -213,7 +213,8 @@ class FreshInstallTests(InstallCase):
         self.assertEqual(self.world.hermes_calls("config", "set") + self.world.hermes_calls("cron", "create")
                          + self.world.hermes_calls("cron", "edit") + self.world.hermes_calls("cron", "resume"), [])
 
-    def test_an_upgrade_keeps_the_users_prompt_and_cron_settings(self):
+    def test_an_upgrade_backs_up_prompt_and_keeps_cron_settings(self):
+        from todo_manager import templates
         self.page()
         self.install({"notion.home_page": "1"})
         cron = FakeCron(self.world.jobs_file)
@@ -222,11 +223,11 @@ class FreshInstallTests(InstallCase):
         self.assertEqual(cron(["cron", "edit", intake["id"], "--prompt", mine, "--schedule", "*/10 * * * *",
                                "--deliver", "matrix"])[0], 0)
         self.world.calls.clear()
-        prompter, run = self.install(yes=())
+        prompter, run = self.install()
         intake = cron.job("todo-manager-intake")
         self.assertEqual((intake["prompt"], intake["schedule"]["expr"], intake["deliver"]),
-                         (mine, "*/10 * * * *", "matrix"))
-        self.assertEqual(self.world.hermes_calls("cron", "edit"), [])
+                         (templates.cron_prompt("intake"), "*/10 * * * *", "matrix"))
+        self.assertEqual(len(self.world.hermes_calls("cron", "edit")), 1)
         self.assertTrue(any("kept as you set them: schedule, deliver" in n for n in run.report), run.report)
 
     def test_an_upgrade_updates_views_left_as_created_after_confirmation(self):

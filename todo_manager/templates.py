@@ -1,9 +1,4 @@
-"""Shipped templates (``hermes_assets``) and the texts earlier releases installed.
-
-Earlier releases kept no baseline for the workspace ``AGENTS.md`` and overwrote the cron
-prompts; their exact texts (``hermes_assets/legacy``) let an upgrade tell an untouched file from
-one the user edited and merge into it (see ``userfiles``).
-"""
+"""Project templates and exact historical versions used to establish ownership."""
 
 from __future__ import annotations
 
@@ -11,15 +6,17 @@ from importlib import resources
 
 # Commits whose template text is kept under hermes_assets/legacy/<dir>/<stem>.<commit>.md, newest first.
 EARLIER = {
-    "skill/SKILL.md": ("7718c03", "c1df92e", "2052e52", "ec85851", "3bfbb37"),
-    "cron/intake.md": ("7718c03", "3bfbb37"),
-    "cron/feedback.md": ("7718c03", "3bfbb37"),
-    "workspace/AGENTS.md": ("7718c03", "b99b192"),
+    "skill/SKILL.md": ("a820251", "7718c03", "c1df92e", "2052e52", "ec85851", "3bfbb37"),
+    "cron/intake.md": ("a820251", "7718c03", "3bfbb37"),
+    "cron/feedback.md": ("a820251", "7718c03", "3bfbb37"),
+    "workspace/AGENTS.md": ("a820251", "7718c03", "b99b192"),
 }
 WORKSPACE_AGENTS = {"en": "workspace/AGENTS.md", "zh-CN": "workspace/AGENTS.zh-CN.md"}
 
 
 def asset(name: str) -> str:
+    if name.startswith("cron/"):
+        name = "prompts/" + name.split("/", 1)[1]
     return resources.files("todo_manager.hermes_assets").joinpath(name).read_text(encoding="utf-8")
 
 

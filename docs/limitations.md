@@ -3,6 +3,24 @@
 Concrete, current limitations of this version. See [acceptance.md](acceptance.md) for what is
 verified and how.
 
+## Hermes-native round (2026-10-06)
+
+- No real model or production service was used in this round. Earlier trial descriptions below
+  are historical, not validation of this release's model behavior.
+- Child questions and passive native notifications are connected. Child-specific external
+  approvals are explicitly refused; root approvals remain version-bound and cannot transfer.
+- Pause/resume and ordinary modifications target the root. There is no atomic whole-delegation
+  pause; the user is told when descendants are outside that scope. Cancellation has bounded
+  ownership re-observation and can remain unconfirmed if workers keep creating new descendants.
+- Automatic decomposition receives a shorter native input and does not guarantee copying the
+  root protocol/skills. Passing essential constraints is guidance; no execution enforcement
+  layer is claimed. Remote workers need access to Todo CLI/full-text materials or must block.
+- Missing native subscriptions can be repaired, but past events cannot be replayed through a
+  newly registered subscription. Notion retains them; actual channel transport was not tested.
+- Generic `api_server` wake delivery is not wired by the passive notification adapter.
+- Native assets omitted from exports include profile memory, full Kanban history, notifier
+  delivery checkpoints and gateway sessions. The export is not all rules and runtime history.
+
 ## Verification
 
 - **Model judgement is not evaluated yet.** One real-model intake run (10 real conversations, in

@@ -78,30 +78,19 @@ class RulesMigrationTests(unittest.TestCase):
         i18n.set_language(None)
         shutil.rmtree(self.home, ignore_errors=True)
 
-    def test_active_rules_and_former_builtins_become_conventions(self):
+    def test_all_legacy_preferences_are_archived_without_automatic_memory_import(self):
+        before = prefs.show(self.home)
         code, out = tm(self.home, "prefs", "show")
         self.assertEqual(code, 0, out)
-        text = prefs.show(self.home)
-        self.assertTrue(text.startswith(templates.workspace_agents("zh-CN").rstrip("\n")),
-                        "the untouched earlier template is upgraded to the workspace language first")
-        heading = i18n.t("prefs.migrated_heading", "zh-CN")
-        section = text.split(heading, 1)[1]
-        for key in prefs.BUILTIN:
-            self.assertIn(i18n.t(key, "zh-CN"), section)
-        self.assertIn("Send the weekly report to Bob by Friday noon.", section)
-        self.assertIn("rul_1", section)
-        self.assertIn('project prj_1 "Grant renewal"', section)
-        for absent in ("department newsletter", "Remind me daily", "approve everything"):
-            self.assertNotIn(absent, text)
-        self.assertEqual(prefs.problems(self.home), [], "Hermes would load the file as written")
+        self.assertEqual(prefs.show(self.home), before, "database migration does not edit framework or memory")
         archive = prefs.archive_path(self.home).read_text()
-        for kept in ("department newsletter", "Remind me daily", "approve everything", "## History"):
+        for kept in ("Send the weekly report", "department newsletter", "Remind me daily", "approve everything",
+                     '"revisions"', '"former_defaults"'):
             self.assertIn(kept, archive)
+        self.assertFalse((self.home / "USER.md").exists())
         conn = db.connect(self.db)
-        try:
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM rules").fetchone()[0], 5, "the tables stay for audit")
-        finally:
-            conn.close()
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM rules").fetchone()[0], 5)
+        conn.close()
 
     def test_the_migration_runs_once(self):
         tm(self.home, "prefs", "show")
@@ -110,7 +99,7 @@ class RulesMigrationTests(unittest.TestCase):
         tm(self.home, "health")
         tm(self.home, "prefs", "show")
         text = prefs.show(self.home)
-        self.assertEqual(text.count(i18n.t("prefs.migrated_heading", "zh-CN")), 1)
+        self.assertEqual(prefs.archive_path(self.home).read_text().count("# Legacy preferences:"), 1)
         self.assertTrue(text.endswith("- 我自己加的一条。\n"), "the user's later edit stays")
 
     def test_the_export_carries_both_files(self):
@@ -160,26 +149,11 @@ class NextRunTests(WorkspaceCase):
         self.assertTrue(woke and wake_of(out))
         return run_id_of(out), out
 
-    def test_a_convention_changed_in_chat_or_from_a_notion_comment_applies_from_the_next_run(self):
-        first, out = self.woken("m1", "Call for papers: a workshop")
-        before = prefs.file_hash(self.cfg.home)
-        self.assertIn(f"(version {before})", out)
-        ops.run_done(self.conn, self.cfg, first)
-        # The user's Notion comment, carried out by the feedback run: a lasting convention.
-        fid = user_feedback(self.conn, "c-1", text="以后 workshop 的征稿也建任务", origin="notion_comment",
-                            scope_type="global")
-        path = prefs.agents_path(self.cfg.home)
-        path.write_text(path.read_text() + "\n- Workshop calls for papers are tasks.\n")
-        ops.feedback_resolve(self.conn, self.cfg, fid, outcome="applied", reply="已记入约定")
-        second, out = self.woken("m2", "Call for papers: another workshop")
-        after = prefs.file_hash(self.cfg.home)
-        self.assertNotEqual(before, after)
-        self.assertIn(f"(version {after})", out, "the next run works with the new conventions")
-        self.assertEqual(runs.get(self.conn, second)["rules_hash"], after)
-        # Its dismissals are not refused as stale: the run started with this version.
-        ops.item_dismiss(self.conn, self.cfg, ops.context(self.conn, self.cfg, run=second),
-                         [self.conn.execute("SELECT id FROM source_items WHERE external_id='m2'").fetchone()[0]],
-                         outcome="informational", reason="checked against the new convention")
+    def test_gate_does_not_reload_or_hash_native_preferences(self):
+        first, out = self.woken("m1", "A synthetic workshop invitation")
+        self.assertNotIn("prefs show", out)
+        self.assertIsNone(runs.get(self.conn, first)["rules_hash"])
+        self.assertNotIn("Conventions:", out)
 
     def test_a_setting_changed_on_request_is_used_by_the_next_gate(self):
         code, out = tm(self.tmp, "config", "set", "slack.quiet_minutes", "60", "--request", "$evt-quiet",

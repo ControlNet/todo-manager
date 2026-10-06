@@ -15,7 +15,7 @@ sync, the durable link between a task and its agent cards, and install/upgrade/e
   thread has gone quiet. Every new item ends up either linked to a task or dismissed with a
   reason; nothing is dropped silently, and there is no "please triage" inbox.
 - **Your conventions, in your words.** What counts as your responsibility, what to ignore, when
-  to ask: `TODO_HOME/AGENTS.md`, which you (or Hermes, when you ask it) edit. Settings such as
+  to ask: native `<profile home>/memories/USER.md`, maintained by Hermes on your explicit request. Settings such as
   "wait an hour of Slack silence" are `config.toml` values (`todo-manager config set`).
 - **Your edits win.** Changes you make in Notion properties are imported as yours; agent
   judgements based on older versions never overwrite them, and tasks you closed are never
@@ -24,7 +24,7 @@ sync, the durable link between a task and its agent cards, and install/upgrade/e
 - **Cheap when idle.** Two Hermes cron jobs run deterministic pre-run gates every five minutes
   and wake the model only when there is something to judge; the gate hands it the material
   directly.
-- **Agent work on the Hermes board.** A Notion task can be delegated to one card on the board
+- **Agent work on the Hermes board.** A Notion task can be delegated through an entry card on the board
   `todo-manager`; Hermes schedules and runs it. Questions and late answers stay on the card that
   asked, results come back to the task, closing the task cancels the work, and external actions
   happen only when allowed or approved.
@@ -48,7 +48,7 @@ First create an empty top-level Notion page (the future home page) and add your 
 integration to it (··· → Connections). Then:
 
 ```bash
-git clone <repository url> ~/src/todo-manager && cd ~/src/todo-manager
+git clone https://github.com/ControlNet/todo-manager.git ~/src/todo-manager && cd ~/src/todo-manager
 python3 -m unittest discover -s tests -t .      # expect OK
 ./bin/todo-manager install
 ```
@@ -58,8 +58,8 @@ and Kanban settings), asks only real choices (the home page, which mailboxes whe
 several) and shows every change outside the workspace before making it. It is safe to re-run;
 see [docs/operations.md](docs/operations.md#install).
 
-Upgrade with `git pull` and `./bin/todo-manager install` (your changes to the skill, the cron
-prompts, `AGENTS.md` and the cron settings are kept); remove with `todo-manager uninstall`
+Upgrade with `git pull` and `./bin/todo-manager install` (managed skill, prompts and AGENTS are
+backed up before replacement; all existing cron runtime settings are preserved); remove with `todo-manager uninstall`
 (all data stays). See [docs/operations.md](docs/operations.md#upgrade).
 
 Runtime data (database, runs, exports, backups) lives only in the workspace
@@ -69,6 +69,7 @@ never commit `.env` / `.env.local` files.
 
 ## Documentation
 
+- [docs/hermes-native-verification.md](docs/hermes-native-verification.md) – source evidence, native tests, migration and boundaries
 - [docs/architecture.md](docs/architecture.md) – what Hermes does and what Todo Manager does,
   the two jobs, authority, ownership of files and settings
 - [docs/operations.md](docs/operations.md) – install, upgrade, changing the automation, health,

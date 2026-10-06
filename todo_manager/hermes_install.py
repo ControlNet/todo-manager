@@ -1,23 +1,4 @@
-"""Install, upgrade and remove the Hermes integration: skill, cron jobs, gate scripts, launcher.
-
-Ownership (recorded in ``TODO_HOME/state/hermes/install.json``):
-
-* Framework files - the two pre-run gate scripts and the launcher - belong to todo-manager and
-  are overwritten (a file at that place without our mark is left alone and reported).
-* User files - the skill, the two cron prompts and the workspace ``AGENTS.md`` - start as
-  templates and then belong to the user (and to Hermes acting for the user). An upgrade merges
-  the new template into them, 3-way against the text installed last (``userfiles``); a conflict
-  keeps the user's text and is reported (``install``, ``health``).
-* Cron job settings: a field whose live value differs from what todo-manager installed
-  (schedule, delivery, working directory, skills, model, provider, reasoning effort) is the
-  user's and is kept; the others follow the new version. Hermes' job store is only read; every
-  change goes through ``hermes cron create|edit|remove``.
-* New cron jobs are created paused, delivering locally, with ``TODO_HOME`` as their working
-  directory (Hermes loads its ``AGENTS.md`` as the jobs' context). Resuming is a separate step.
-* ``uninstall`` removes only what todo-manager installed: the cron jobs, gate scripts and
-  launcher, and the skill when it is unchanged. The workspace data stays; Hermes profile files
-  (``USER.md``, ``MEMORY.md``, ``SOUL.md``) are never touched.
-"""
+"""Install owned framework files with backups; preserve native runtime settings and memory."""
 
 from __future__ import annotations
 
@@ -47,12 +28,14 @@ Runner = Callable[..., subprocess.CompletedProcess]
 
 SKILL_FILE = "skill/SKILL.md"           # its name in the baseline store
 # Cron job fields todo-manager sets; a live value that differs from the installed one is the user's.
-JOB_FIELDS = ("schedule", "deliver", "workdir", "skills", "model", "provider", "reasoning_effort")
+JOB_FIELDS = ("schedule", "deliver", "failure_deliver", "workdir", "skills", "model", "provider", "reasoning_effort")
 FLAGS = {"schedule": "--schedule", "deliver": "--deliver", "workdir": "--workdir", "model": "--model",
          "provider": "--provider", "reasoning_effort": "--reasoning-effort"}
 
 
 def asset(name: str) -> str:
+    if name.startswith("cron/"):
+        name = "prompts/" + name.split("/", 1)[1]
     return resources.files("todo_manager.hermes_assets").joinpath(name).read_text(encoding="utf-8")
 
 
@@ -191,11 +174,8 @@ def load_manifest(p: Paths) -> dict[str, Any]:
 
 def live_skill(p: Paths, jobs: dict[str, dict[str, Any]]) -> Path | None:
     """The installed skill: by name, else one the jobs refer to (a curator may have renamed it)."""
-    refs: set[str] = {SKILL_NAME}
-    for j in jobs.values():
-        refs.update(j.get("skills") or [])
-    live = find_live_skills(p, refs)
-    return live.get(SKILL_NAME) or next(iter(live.values()), None)
+    live = find_live_skills(p, {SKILL_NAME})
+    return live.get(SKILL_NAME)
 
 
 def skill_upgrade(p: Paths, jobs: dict[str, dict[str, Any]]) -> tuple[userfiles.Upgrade, Path | None]:
@@ -214,7 +194,7 @@ def prompt_upgrade(p: Paths, entry: str, job: dict[str, Any] | None) -> userfile
 
 def live_fields(job: dict[str, Any]) -> dict[str, Any]:
     return {"schedule": (job.get("schedule") or {}).get("expr"), "deliver": job.get("deliver") or None,
-            "workdir": job.get("workdir") or None, "skills": list(job.get("skills") or []),
+            "workdir": job.get("workdir") or None, "skills": list(job.get("skills") or []), "failure_deliver": job.get("failure_deliver"),
             "model": job.get("model") or None, "provider": job.get("provider") or None,
             "reasoning_effort": job.get("reasoning_effort") or None}
 
@@ -246,7 +226,10 @@ class Installer:
 
     def hermes(self, *args: str) -> str:
         cmd = [self.cfg.get("hermes.bin", "hermes"), *args]
-        proc = self.runner(cmd, capture_output=True, text=True, timeout=120)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("HERMES_") and k not in ("PYTHONPATH", "PYTHONHOME")}
+        env["HERMES_HOME"] = str(self.paths.hermes_home)
+        env["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
+        proc = self.runner(cmd, capture_output=True, text=True, timeout=120, env=env)
         if proc.returncode != 0:
             raise RuntimeError(f"{' '.join(cmd[:3])} failed (exit {proc.returncode}): {(proc.stdout or '')[-300:]}")
         return proc.stdout
@@ -260,6 +243,8 @@ class Installer:
         current = _read(path)
         if current == text:
             return Action("noop", str(path), "up to date", record={"file": str(path)})
+        if current is not None and mark in current and repr(str(self.paths.todo_home)) not in current:
+            return Action("conflict", str(path), "generated for another Todo workspace; left untouched")
         if current is not None and mark not in current:
             return Action("conflict", str(path), "exists and was not written by todo-manager; left untouched")
         verb = "update" if current is not None else "create"
@@ -270,7 +255,7 @@ class Installer:
 
     def user_file_action(self, up: userfiles.Upgrade, target: str, write: Callable[[str], None] | None,
                          shipped: str, live: str | None = None) -> Action:
-        """``write``: puts the merged text in place (None: the target cannot be written now);
+        """``write``: puts the managed template in place (None: the target cannot be written now);
         ``live``: the text in use now (the diff shows what the upgrade changes in it)."""
         store = self.paths.store
         record = {"user_file": up.name, "target": target, "state": up.state}
@@ -309,7 +294,7 @@ class Installer:
         out = {}
         for entry, spec in JOBS.items():
             out[entry] = {"schedule": spec["schedule"], "deliver": "local", "workdir": str(self.paths.todo_home),
-                          "skills": [SKILL_NAME], "model": self.cfg.get("hermes.model") or None,
+                          "skills": [SKILL_NAME], "failure_deliver": None, "model": self.cfg.get("hermes.model") or None,
                           "provider": self.cfg.get("hermes.provider") or None,
                           "reasoning_effort": self.cfg.get("hermes.reasoning_effort") or None}
         return out
@@ -342,20 +327,18 @@ class Installer:
                                                    f" directory {want['workdir']}", run=create,
                            record={"job": entry, "installed": want, "user_file": up.name,
                                    "target": f"{spec['name']} prompt", "state": "created"})]
+        recorded = (manifest.get("jobs") or {}).get(entry) or {}
+        if (recorded.get("id") and recorded["id"] != existing["id"]) or up.state == "unknown-base":
+            return [Action("conflict", spec["name"], "cron ownership unconfirmed; no changes made")]
         installed = ((manifest.get("jobs") or {}).get(entry) or {}).get("installed") or self.earlier_fields(entry)
         live = live_fields(existing)
         changes: dict[str, Any] = {}
         kept: list[str] = []
         record: dict[str, Any] = {}
         for key in JOB_FIELDS:
-            if live[key] == want[key]:
-                record[key] = want[key]
-            elif live[key] != installed.get(key):
-                kept.append(key)                       # changed in Hermes: the user's
-                record[key] = installed.get(key)
-            else:
-                changes[key] = want[key]
-                record[key] = want[key]
+            record[key] = live[key]
+            if live[key] != want[key]:
+                kept.append(key)
         framework = []
         if existing.get("script") != self.paths.script(entry).name:
             framework += ["--script", self.paths.script(entry).name]
@@ -408,9 +391,14 @@ class Installer:
         todo-manager installed."""
         done = []
         previous = load_manifest(self.paths)
+        if any(a.changes for a in actions):
+            from .framework_backup import capture
+            backup = capture(self.paths, load_jobs(self.paths))
+            done.append(f"backup {backup}; personal preference import remains pending")
         record: dict[str, Any] = {"version": 2, "installed_at": clock.iso(), "todo_home": str(self.paths.todo_home),
                                   "source_root": str(self.paths.source_root), "python": self.paths.python,
-                                  "framework_files": [], "user_files": {}, "jobs": dict(previous.get("jobs") or {})}
+                                  "framework_files": [], "user_files": {}, "jobs": dict(previous.get("jobs") or {}),
+                                  "framework_ownership": "project", "framework_version": "hermes-native/3"}
         for a in actions:
             if a.run is not None:
                 a.run()
@@ -423,15 +411,20 @@ class Installer:
             if "job" in a.record:
                 record["jobs"][a.record["job"]] = {"installed": a.record["installed"]}
         jobs = load_jobs(self.paths)
+        handled_jobs = {a.record["job"] for a in actions if "job" in a.record}
         for entry, spec in JOBS.items():
-            if entry in record["jobs"] and spec["name"] in jobs:
+            if entry in handled_jobs and entry in record["jobs"] and spec["name"] in jobs:
                 record["jobs"][entry].update(name=spec["name"], id=jobs[spec["name"]]["id"])
         self._write(self.paths.manifest, json.dumps(record, ensure_ascii=False, indent=1))
         return done
 
     def set_jobs_state(self, state: str) -> list[str]:
         out = []
+        owned_ids = {j.get("id") for j in load_manifest(self.paths).get("jobs", {}).values()}
         for name, job in load_jobs(self.paths).items():
+            if job["id"] not in owned_ids:
+                out.append(f"kept {name}: ownership unconfirmed")
+                continue
             self.hermes("cron", "resume" if state == "resume" else "pause", job["id"])
             out.append(f"{state} {name} ({job['id']})")
         return out
@@ -442,14 +435,19 @@ class Installer:
         """What ``uninstall`` removes: only what todo-manager installed and the user did not take over."""
         jobs = load_jobs(self.paths)
         actions = []
+        manifest = load_manifest(self.paths)
+        owned_ids = {j.get("id") for j in manifest.get("jobs", {}).values()}
         for name, job in sorted(jobs.items()):
+            if job["id"] not in owned_ids:
+                actions.append(Action("keep", name, "cron ownership unconfirmed; kept"))
+                continue
             actions.append(Action("remove", name, f"remove cron job {job['id']}",
                                   run=lambda jid=job["id"]: self.hermes("cron", "remove", jid)))
         for path, mark in [(self.paths.script(e), SCRIPT_MARK) for e in JOBS] + [(self.paths.launcher, LAUNCHER_MARK)]:
             text = _read(path)
             if text is None:
                 continue
-            if mark in text:
+            if mark in text and repr(str(self.paths.todo_home)) in text:
                 actions.append(Action("remove", str(path), "remove generated file", run=path.unlink))
             else:
                 actions.append(Action("keep", str(path), "not written by todo-manager; left in place"))
@@ -502,10 +500,37 @@ def context_problems(cfg: config.Config) -> list[str]:
         return [f"cannot read {p.jobs_file}: {exc}"]
     out = []
     for name, job in sorted(jobs.items()):
+        for shadow in (".hermes.md", "HERMES.md", "AGENTS.override.md"):
+            candidate = p.todo_home / shadow
+            if candidate.is_file() and candidate.read_text().strip():
+                out.append(f"{name}: {candidate} shadows managed AGENTS.md under native discovery")
+        refs = set(job.get("skills") or [])
+        if SKILL_NAME not in refs:
+            out.append(f"{name}: native skills does not include {SKILL_NAME}; user setting preserved")
         workdir = job.get("workdir")
         if not workdir or Path(workdir).expanduser().resolve() != p.todo_home.resolve():
             out.append(f"{name} runs in {workdir or 'no working directory'}, so Hermes does not give it"
                        f" {prefs.agents_path(p.todo_home)} (`hermes cron edit {job['id']} --workdir {p.todo_home}`)")
+    if jobs:
+        from .kanban import BridgeKanban, KanbanError
+        bridge = BridgeKanban(cfg.get("kanban.board", "todo-manager"),
+                              cfg.get("kanban.hermes_python", "~/.hermes/hermes-agent/venv/bin/python"),
+                              cfg.get("kanban.hermes_repo", "~/.hermes/hermes-agent"), str(p.hermes_home))
+        try:
+            inspected = bridge.call("context_status", mutating=False, workdir=str(p.todo_home),
+                                    skills=sorted({skill for job in jobs.values() for skill in job.get("skills", [])}))
+            for skill in inspected["missing_skills"]:
+                out.append(f"native skill or bundle {skill} is unavailable in this profile")
+            if str(prefs.agents_path(p.todo_home).resolve()) not in inspected["project_files"]:
+                out.append("native project discovery does not select managed AGENTS.md; selected: "
+                           + ", ".join(inspected["project_files"]))
+            for name in ("memory_enabled", "user_profile_enabled"):
+                if not inspected[name]:
+                    out.append(f"native {name}=false in {inspected['profile_home']}; no substitute loader is used")
+            if inspected["memory_tool_disabled"]:
+                out.append("native memory tool is disabled; feedback cannot save requested preferences")
+        except (KanbanError, OSError) as exc:
+            out.append(f"native context inspection unavailable: {exc}")
     return out
 
 
@@ -538,8 +563,8 @@ def add_parser(sub: Any) -> None:
     s = sub.add_parser("hermes", help="Hermes integration: status / install / resume / pause")
     hs = s.add_subparsers(dest="action", required=True)
     hs.add_parser("status")
-    x = hs.add_parser("install", help="show the plan, then install or upgrade (your changes to the skill, prompts,"
-                                      " AGENTS.md and job settings are kept; new jobs are created paused)")
+    x = hs.add_parser("install", help="show the plan, then install or upgrade (managed files are backed up and updated;"
+                                      " job settings are kept; new jobs are created paused)")
     x.add_argument("--dry-run", action="store_true")
     x.add_argument("--yes", action="store_true", help="apply without the interactive confirmation")
     for name in ("resume", "pause"):

@@ -153,13 +153,13 @@ class BudgetTests(Base):
         self.assertEqual(run_summary(self.conn, run_id_of(out))["context_chars"], len(context))
 
     def test_an_oversize_fixed_context_is_reported_not_silent_and_never_waits(self):
-        self.cfg.data["wake"]["max_context_chars"] = 1500   # smaller than the fixed part alone
+        self.cfg.data["wake"]["max_context_chars"] = 500   # smaller than the fixed part alone
         self.gmail.push(mail("m1", "t1", "Can you send the report?"))
         self.gate()
         clock.advance(minutes=16)
         out = self.gate()
         self.assertTrue(wake_of(out), "still makes progress, one conversation at a time")
-        self.assertGreater(run_summary(self.conn, run_id_of(out))["context_over_budget"], 1500)
+        self.assertGreater(run_summary(self.conn, run_id_of(out))["context_over_budget"], 500)
         self.assertTrue(any("context" in p and "budget" in p for p in health.report(self.conn, self.cfg)["problems"]))
 
     def test_a_failed_segment_is_retried_alone_and_does_not_block_the_rest(self):

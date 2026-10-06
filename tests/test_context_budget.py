@@ -21,7 +21,7 @@ class IntakeOverBudgetTests(WorkspaceCase):
         super().setUp()
         self.gmail = FakeSource("gmail", "mailbox:primary")
         self.cfg.data["email"]["min_wake_interval_minutes"] = 0
-        self.cfg.data["wake"]["max_context_chars"] = 1500   # smaller than the fixed part of the context
+        self.cfg.data["wake"]["max_context_chars"] = 500   # smaller than the fixed part of the context
         self.gmail.push(mail("m1", "t1", "Can you send the report?"))
         gate_intake.run_gate(self.conn, self.cfg, [self.gmail], [])
         clock.advance(minutes=16)
@@ -33,7 +33,7 @@ class IntakeOverBudgetTests(WorkspaceCase):
         self.assertIn("Can you send the report?", out)
         batch = self.conn.execute("SELECT state, claimed_run FROM batches").fetchone()
         self.assertEqual((batch["state"], batch["claimed_run"]), ("claimed", run_id_of(out)))
-        self.assertGreater(run_summary(self.conn, run_id_of(out))["context_over_budget"], 1500)
+        self.assertGreater(run_summary(self.conn, run_id_of(out))["context_over_budget"], 500)
         problems = health.report(self.conn, self.cfg)["problems"]
         self.assertTrue(any("over budget" in p and "wake.max_context_chars" in p for p in problems), problems)
 
