@@ -55,7 +55,16 @@ separate genuine requests uses separate IDs. A successfully committed identical 
 
 `feedback record` deliberately defers interpretation to a later feedback run. A recorded request
 handled directly is superseded, and recording an already handled direct request does not enqueue
-it again. Agents must not use `--human` to evade the applicable run/feedback provenance.
+it again. Registration alone is audit-only (`ignored`, `result.handled=false`), not business
+success and not an automatically queued request. A failed operation keeps its words reusable
+and leaves previously queued feedback pending. A result with rejected fields also leaves the
+queue pending, even when other fields applied. Only an operation without rejected fields
+commits direct-handling bookkeeping and supersedes its queued counterpart in the same SQL
+transaction. Historical `applied` registration alone is insufficient without a successful op log.
+This selects direct handling instead of later interpretation; it does not prove that every step
+of a natural-language request is complete. The chat agent must finish its remaining steps or
+queue a distinct, explicitly scoped request for remaining work. Agents must not use `--human`
+to evade the applicable run/feedback provenance.
 
 Manual operations explicitly say so:
 
@@ -129,6 +138,39 @@ releases only the Todo recovery hold; cron state remains unchanged. Use ordinary
 separately if needed. Unknown external actions remain non-replayable. File restoration and SQL
 replacement are not one filesystem-wide transaction: on interruption use the reported safety
 backup and inspect the result before releasing holds.
+
+## Reliability and diagnostics
+
+New run writes are checked inside their business transaction, after exact operation retry lookup.
+Released/restored, settled, idle, failed and expired runs return `STALE_RUN` (exit 2). The intake
+lease is 90 minutes from run start; feedback uses `feedback.stale_claim_minutes` (default 60).
+An active gate preparation (`running`) or woken run may write within that lease. A previously
+committed identical operation still returns `duplicate: true`; obtain a fresh run/context for new
+judgments. Recovery releases all intake/feedback runs, including interrupted gate preparation,
+and makes their unprocessed materials available again. This is separate from delegation holds.
+
+Invalid TOML or wrong types of known configuration fields return `CONFIG` with the file path
+(and parser line/column when available). Business commands never silently substitute defaults.
+For a damaged target configuration, explicitly identify the recovery workspace:
+
+```bash
+todo-manager --home /path/to/workspace restore /path/to/saved.sqlite --json
+todo-manager --home /path/to/workspace restore /path/to/saved.sqlite --yes --json
+# An export bundle directory can replace /path/to/saved.sqlite.
+```
+
+The first command previews replacement; the second replaces data after confirmation and keeps
+the original raw configuration in the reported safety backup's `.files/config.toml`. Source
+validation precedes acquiring the target lock; invalid sources and unconfirmed previews do not
+create target lock files. A SQLite backup without companion files cannot repair configuration
+files; use a backup with those files or a valid export bundle. No profile/global setting is restored.
+
+`status --json` includes installation failures in top-level `problems` and exits 1 when automation
+is incomplete. `installation.state` distinguishes `not_installed`, `partial`, `ready`, `paused`,
+and `partially_paused`. Missing jobs, gates or launcher, outdated/foreign generated files and
+installation conflicts name the affected asset and repair entry (`install`). Terminal cron jobs
+are unavailable, not merely paused. Deliberately paused jobs are listed without a health failure;
+other independent health problems still affect the exit code. Status remains read-only.
 
 ## Switching from the old CLI
 

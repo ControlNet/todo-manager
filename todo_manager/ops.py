@@ -149,7 +149,7 @@ def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, fe
         row = runs.get(conn, run)
         if row is None or row["entry"] not in ("intake", "feedback"):
             raise OpError("NOT_FOUND", f"no intake or feedback run {run}")
-        return Ctx("run", run, actor="agent", origin=row["entry"], run=row, key=key)
+        return Ctx("run", run, actor="agent", origin=row["entry"], run=row, key=key, cfg=cfg)
     if feedback_id:
         fb = feedback.get(conn, feedback_id)
         if fb is None:
@@ -182,17 +182,12 @@ def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, fe
         fid, created = feedback.record(conn, origin=origin if origin in ("matrix", "cli") else "matrix",
                                        source_id=request.strip(), text=said, scope_type=scope_type,
                                        scope_id=scope_id or None, kind="direct", author="user", author_is_user=True,
-                                       status="applied", result={"recorded": "direct request"})
+                                       # Audit-only registration: not queued and not yet applied.
+                                       status="ignored", result={"recorded": "direct request", "handled": False})
         fb = feedback.get(conn, fid)
         if not created and (fb["text"] or "").strip() != said.strip():
             raise OpError("REQUEST_ID_REUSED", f"{request} already identifies another request ({fid}, other words);"
                                                " use a new id for a new request")
-        # The same request recorded earlier for the feedback job is handled here instead.
-        recorded = [r["id"] for r in conn.execute(
-            "SELECT id FROM feedback WHERE source_id=? AND status='pending'", (f"record:{request.strip()}",))]
-        if recorded:
-            with tx(conn):
-                feedback.supersede(conn, recorded, "handled directly in the chat", by=fid)
         return Ctx("request", request.strip(), actor="human", origin=fb["origin"], fb=fb, key=key)
     if write and not human:
         raise OpError("CONTEXT_REQUIRED", "use --run, --feedback, --request, or --human for a manual write")
@@ -219,6 +214,17 @@ def perform(conn: sqlite3.Connection, ctx: Ctx, command: str, args: dict[str, An
                 return {**loads(row["result"], {}), "duplicate": True}
         if ctx.refusal is not None:
             raise ctx.refusal
+        if ctx.kind == 'run':
+            current = runs.get(conn, ctx.ref)
+            # Same claim leases as the gates; an old model turn cannot outlive its material.
+            from .gate_intake import STALE_CLAIM_MINUTES
+            lease = (ctx.cfg.get('feedback.stale_claim_minutes', 60) if ctx.cfg and
+                     current and current['entry'] == 'feedback' else STALE_CLAIM_MINUTES)
+            if (not current or current.get('released_at') or current.get('agent_completed_at')
+                    or current['status'] not in ('running', 'woke', 'success')
+                    or (current['status'] in ('woke', 'success') and not current['wake'])
+                    or clock.minutes_since(current['started_at']) >= lease):
+                raise OpError('STALE_RUN', f'{ctx.ref} is released, expired, or has no semantic work; use a new run')
         if ctx.kind == 'feedback':
             current = feedback.get(conn, ctx.fb['id'])
             if current['status'] != 'pending':
@@ -229,6 +235,13 @@ def perform(conn: sqlite3.Connection, ctx: Ctx, command: str, args: dict[str, An
             if reason:
                 raise OpError('INCOMPLETE', reason)
         result = fn()
+        if ctx.kind == 'request' and not result.get('rejected'):
+            # This records direct handling, not semantic completion of an arbitrary multi-step request.
+            feedback.resolve(conn, ctx.fb['id'], 'applied', {'handled': True, 'command': command})
+            recorded = [r['id'] for r in conn.execute(
+                "SELECT id FROM feedback WHERE source_id=? AND origin=? AND status='pending'",
+                (f'record:{ctx.ref}', ctx.origin))]
+            feedback.supersede(conn, recorded, 'handled directly in the chat', by=ctx.fb['id'])
         if ctx.notes:
             result["notes"] = ctx.notes
         if key:
@@ -724,7 +737,10 @@ def _feedback_record(conn: sqlite3.Connection, *, request: str, said: str, scope
         raise OpError('REQUEST_ID_REUSED', 'this request ID already names different words')
     direct = conn.execute("SELECT * FROM feedback WHERE source_id=? AND kind='direct' AND status='applied' AND origin=?",
                           (request.strip(), origin)).fetchone()
-    if direct:
+    handled = direct and (loads(direct['result'], {}).get('handled') is True or any(
+        not loads(row['result'], {}).get('rejected') for row in conn.execute(
+            "SELECT result FROM op_log WHERE context=?", (f'request:{request.strip()}',))))
+    if handled:
         if (direct['text'] or '').strip() != said.strip():
             raise OpError('REQUEST_ID_REUSED', 'this request was already handled with different words')
         return {'feedback': direct['id'], 'created': False, 'status': 'already_handled', 'queued': False}

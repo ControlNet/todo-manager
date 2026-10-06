@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from todo_manager import config, hermes_install
 from todo_manager.install import init_workspace
@@ -30,6 +31,10 @@ class NativeCliInstall(unittest.TestCase):
             jobs = hermes_install.load_jobs(paths)
             self.assertEqual(len(jobs), 2)
             self.assertTrue(all(j['state'] == 'paused' for j in jobs.values()))
+            with patch.object(hermes_install.Paths, 'from_config', return_value=paths):
+                reported = hermes_install.status(cfg)
+            self.assertEqual(reported['state'], 'paused', reported)
+            self.assertEqual(reported['problems'], [])
             env = {k: v for k, v in os.environ.items() if not k.startswith('HERMES_') and k not in ('PYTHONPATH','PYTHONHOME')}
             env.update(HERMES_HOME=str(paths.hermes_home), HERMES_DISABLE_LAZY_INSTALLS='1')
             for entry in ('intake','feedback'):
@@ -39,6 +44,8 @@ class NativeCliInstall(unittest.TestCase):
                 self.assertEqual(json.loads(result.stdout), {'wakeAgent': False})
             inst.set_jobs_state('resume')
             self.assertTrue(all(j['state'] != 'paused' for j in hermes_install.load_jobs(paths).values()))
+            with patch.object(hermes_install.Paths, 'from_config', return_value=paths):
+                self.assertEqual(hermes_install.status(cfg)['state'], 'ready')
             inst.set_jobs_state('pause')
             (root / 'user-workdir').mkdir()
             for job in jobs.values():

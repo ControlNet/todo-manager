@@ -339,8 +339,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    from . import batching, runs
+    from . import batching, runs, hermes_install
     cfg, conn = _open(args)
+    report = health.report(conn, cfg)
+    installation = hermes_install.status(cfg)
+    paused_idle = {f'gate_idle:{entry}' for entry, spec in hermes_install.JOBS.items()
+                   if spec['name'] in installation['paused_jobs']}
+    problems = [text for key, text in health.problem_items(report, cfg) if key not in paused_idle]
     counts = {r["status"]: r["n"] for r in conn.execute("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status")}
     out = {
         "tasks": counts,
@@ -354,13 +359,12 @@ def cmd_status(args: argparse.Namespace) -> int:
                               for r in runs.recent(conn, entry, 3)] for entry in ("intake", "feedback")},
         "conventions": {"file": str(prefs.agents_path(cfg.home)),
                         "problems": prefs.problems(cfg.home)},
-        "problems": health.problems(health.report(conn, cfg), cfg),
+        "installation": installation,
+        "problems": list(dict.fromkeys(problems + installation['problems'])),
     }
-    from . import hermes_install
-    out['installation'] = hermes_install.status(cfg)
     if args.details:
         out['paths'] = {'home': str(cfg.home), 'database': str(cfg.db_path), 'language': cfg.language}
-        out['health'] = health.report(conn, cfg)
+        out['health'] = report
         out['metrics'] = health.metrics(conn, args.days)
         manifest = hermes_install.load_manifest(hermes_install.Paths.from_config(cfg))
         out['usage'] = health.usage(cfg, [j['id'] for j in (manifest.get('jobs') or {}).values() if j.get('id')], args.days)
@@ -466,17 +470,23 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0 if not manifest["integrity"] and (not args.verify or result["rebuild"]["ok"]) else 1
 
 
+def _restore_source(file: str) -> Path:
+    from . import export
+    source = Path(file).expanduser().resolve()
+    info = export.check_bundle(source) if source.is_dir() else export.check_backup(source)
+    if not source.is_dir() and (info['integrity'] != 'ok' or not info['schema_version']
+                               or info['schema_version'] > db.SCHEMA_VERSION):
+        raise ValueError('backup integrity/schema is not compatible')
+    return source
+
+
 def cmd_restore(args: argparse.Namespace) -> int:
     import tempfile
     import sqlite3
     from . import export
-    cfg = config.load(args.home)
-    source = Path(args.file).expanduser().resolve()
+    cfg = config.recovery_config(args.home) if args.home else config.load(args.home)
     try:
-        info = export.check_bundle(source) if source.is_dir() else export.check_backup(source)
-        if not source.is_dir() and (info['integrity'] != 'ok' or not info['schema_version']
-                                   or info['schema_version'] > db.SCHEMA_VERSION):
-            raise ValueError('backup integrity/schema is not compatible')
+        source = _restore_source(args.file)
         existing = cfg.home.exists() and any(cfg.home.iterdir())
         if existing and not args.yes:
             _admin_print(args, {'would_restore': str(source), 'target': str(cfg.home),
@@ -779,8 +789,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from .locks import file_lock, lock_path
         import contextlib
-        cfg = config.load(args.home)
+        cfg = (config.recovery_config(args.home) if args.command == 'restore' and args.home
+               else config.load(args.home))
         populated = cfg.home.exists() and any(cfg.home.iterdir())
+        if args.command == 'restore':
+            from . import export
+            try:
+                _restore_source(args.file)
+            except (export.ImportError_, ValueError, OSError, sqlite3.Error, RuntimeError) as exc:
+                return _fail('RESTORE', str(exc))
+            if populated and not args.yes:
+                return cmd_restore(args)  # Preview does not even create a lock file.
         lock = (contextlib.nullcontext() if _inspection(args) or not populated else
                 file_lock(lock_path(cfg.home, 'workspace'), blocking=True, timeout=120,
                           shared=args.command not in ('restore', 'install')))

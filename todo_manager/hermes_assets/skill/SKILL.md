@@ -1,7 +1,7 @@
 ---
 name: todo-manager
 description: "The user's todos, tasks, projects, follow-ups and delegated agent work (Notion Todo Manager + Hermes Kanban), kept by the `todo-manager` command. Use it in the Todo Manager cron runs and whenever the user talks about their todos, reminders, delegated work, or how this automation should behave."
-version: 3.0.0
+version: 3.0.1
 author: todo-manager
 license: AGPL-3.0-only
 metadata:
@@ -39,6 +39,9 @@ Hermes loads this command reference through cron skills. Project AGENTS.md is ma
 - The first change takes `--request <id> --said "<the user's words>"`; later changes for the same request reuse --request without --said. The id is the Matrix event id
   of the user's message, or one id you choose for this request (`req-` plus the date and a few
   letters). Retrying a command with the same id and arguments applies it once.
+- Failed or partially rejected operations do not consume queued feedback. A successful direct
+  operation selects direct handling over the queue; it does not prove a multi-step request is
+  complete. Finish the remaining steps, or queue a distinct scoped request for the remainder.
 - To hand something to the next feedback run instead:
   `todo-manager feedback record --request <id> --said "..." [--scope task:<task>]`.
 
@@ -51,6 +54,11 @@ Do not use --human for an agent judgment. Read-only inspection does not initiali
 
 Settle a run once with all --checked task IDs and --digest-reviewed, when applicable.
 Unhandled material stays recoverable; completion does not assert total coverage.
+STALE_RUN means a released, expired, idle or failed run cannot make new writes. Use fresh
+run context, never --human to bypass it. Exact committed retries still return duplicate.
+CONFIG names invalid workspace settings; recovery with explicit --home can restore a valid
+backup despite broken target config. Status reports missing automation in problems; deliberate
+cron pause alone is not a health failure.
 A later body clarification answer uses feedback resolve ANSWER_ID --outcome applied
 --settles BODY_EDIT_ID; wrong task/revision links are refused.
 

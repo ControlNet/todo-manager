@@ -269,13 +269,38 @@ def resolve_home(home: str | os.PathLike[str] | None = None) -> Path:
     return path
 
 
+def recovery_config(home: str | os.PathLike[str]) -> Config:
+    """Recovery uses only fixed workspace paths, never the target's possibly broken settings."""
+    return Config(resolve_home(home), copy.deepcopy(DEFAULTS))
+
+
+def _validate_types(values: dict[str, Any], defaults: dict[str, Any], path: Path, prefix: str = '') -> None:
+    for key, value in values.items():
+        if key not in defaults:
+            continue
+        expected = defaults[key]
+        name = prefix + key
+        valid = (isinstance(value, (int, float)) and not isinstance(value, bool)
+                 if isinstance(expected, (int, float)) and not isinstance(expected, bool)
+                 else isinstance(value, type(expected)))
+        if not valid:
+            raise ConfigError(f'{path}: {name} must be {type(expected).__name__}, got {type(value).__name__}')
+        if isinstance(expected, dict):
+            _validate_types(value, expected, path, name + '.')
+
+
 def load(home: str | os.PathLike[str] | None = None, overrides: dict[str, Any] | None = None) -> Config:
     root = resolve_home(home)
     data = copy.deepcopy(DEFAULTS)
     cfg_file = root / "config.toml"
     if cfg_file.exists():
         with cfg_file.open("rb") as fh:
-            data = _deep_merge(data, tomllib.load(fh))
+            try:
+                loaded = tomllib.load(fh)
+            except tomllib.TOMLDecodeError as exc:
+                raise ConfigError(f'{cfg_file}: {exc}') from None
+            _validate_types(loaded, DEFAULTS, cfg_file)
+            data = _deep_merge(data, loaded)
     if overrides:
         data = _deep_merge(data, overrides)
     data["language"] = i18n.set_language(os.environ.get("TODO_MANAGER_LANG") or data.get("language"))

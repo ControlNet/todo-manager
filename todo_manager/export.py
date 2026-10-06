@@ -416,7 +416,7 @@ def reconcile_after_restore(conn: sqlite3.Connection, reason: str) -> dict[str, 
     report: dict[str, Any] = {}
     with db.tx(conn):
         report['released_runs'] = 0
-        for row in conn.execute("SELECT id, summary FROM runs WHERE wake=1 AND released_at IS NULL").fetchall():
+        for row in conn.execute("SELECT id, summary FROM runs WHERE entry IN ('intake','feedback') AND released_at IS NULL").fetchall():
             summary = {**loads(row['summary'], {}), 'done': {'recovered': reason, 'coverage': 'unconfirmed'}}
             conn.execute('UPDATE runs SET released_at=?, summary=? WHERE id=?', (now, db.dumps(summary), row['id']))
             report['released_runs'] += 1

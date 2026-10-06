@@ -86,7 +86,7 @@ class ApplyOnceTests(Base):
         item = self.item_id("m1")
         with self.assertRaises(ops.OpError) as caught:
             ops.task_create(self.conn, self.cfg, self.ctx(run1), title="审阅草稿", evidence=[(item, "origin")])
-        self.assertEqual(caught.exception.code, "CLAIMED_ELSEWHERE")
+        self.assertEqual(caught.exception.code, "STALE_RUN")  # Expired run is rejected before evidence claims.
         ops.task_create(self.conn, self.cfg, self.ctx(run2), title="审阅草稿", evidence=[(item, "origin")])
         self.assertEqual(self.count("tasks"), 1)
 

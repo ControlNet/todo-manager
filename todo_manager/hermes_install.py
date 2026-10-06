@@ -585,10 +585,33 @@ def status(cfg: config.Config) -> dict[str, Any]:
                                    "state": prefs.plan_upgrade(p.todo_home, cfg.language).state}}
     for entry, spec in JOBS.items():
         user_files[f"cron/{entry}.md"] = {"path": spec["name"], "state": prompt_upgrade(p, entry, jobs.get(spec["name"])).state}
-    return {"user_files": user_files, "conflicts": p.store.conflicts(), "files": files,
+    result = {"user_files": user_files, "conflicts": p.store.conflicts(), "files": files,
             "jobs": {n: {k: j.get(k) for k in ("id", "state", "enabled", "skills", "script", "workdir", "last_status",
                                                 "last_run_at", "last_error", "next_run_at")} for n, j in jobs.items()},
             "missing_jobs": [s["name"] for s in JOBS.values() if s["name"] not in jobs]}
+
+    missing = result['missing_jobs']
+    problems = [f'automation incomplete: missing job {name}; run todo-manager install' for name in missing]
+    for path, state in files.items():
+        if state != 'current':
+            problems.append(f'automation incomplete: {state} file {path}; run todo-manager install')
+    for conflict in result['conflicts']:
+        problems.append(f'installation conflict: {conflict}; inspect before running todo-manager install')
+    paused = []
+    for name, job in jobs.items():
+        # Hermes cron/jobs.py effective_job_state: terminal states override pause markers.
+        state = job.get('state')
+        if state in ('error', 'completed'):
+            problems.append(f'automation unavailable: job {name} is {state}; inspect Hermes cron and run todo-manager install')
+        elif not job.get('enabled', True):
+            paused.append(name)
+        elif state == 'paused' or job.get('paused_at'):
+            problems.append(f'automation inconsistent: job {name} is enabled with pause markers; inspect Hermes cron')
+    installed = bool(load_manifest(p)) or bool(jobs) or any(files[str(p.script(e))] != 'missing' for e in JOBS)
+    result.update(problems=problems, paused_jobs=paused,
+                  state=('not_installed' if not installed else 'partial' if problems else
+                         'paused' if len(paused) == len(JOBS) else 'partially_paused' if paused else 'ready'))
+    return result
 
 
 # --------------------------------------------------------------------------- CLI
