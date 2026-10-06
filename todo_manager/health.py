@@ -136,6 +136,13 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
                     + config.removed_keys(cfg.home))
     out["conventions_problems"] = prefs.problems(cfg.home) + hermes_install.context_problems(cfg)
     out["notion_ready"] = bool(get_meta(conn, "notion.tasks_data_source_id") or cfg.get("notion.tasks_data_source_id"))
+    if cfg.get('kanban.enabled'):
+        from .kanban import BridgeKanban, KanbanError
+        try:
+            if not cfg.get('kanban.assignee') or not BridgeKanban.from_config(cfg).profile_valid(cfg.get('kanban.assignee')):
+                out['conventions_problems'].append('kanban.assignee: configure a valid dispatchable Hermes profile; delegations are not ready')
+        except (KanbanError, OSError) as exc:
+            out['conventions_problems'].append(f'kanban.assignee: could not validate profile: {exc}')
     out["recorded_problems"] = {r["key"].split(".", 2)[2]: loads(r["value"], {})
                                 for r in conn.execute("SELECT key, value FROM meta WHERE key LIKE 'health.problems.%'")}
     items = problem_items(out, cfg)

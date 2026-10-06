@@ -129,6 +129,15 @@ def main() -> None:
     if not board or board == "default":
         raise ValueError("an explicit non-default board is required")
 
+    if op == 'profile_valid':
+        from hermes_cli.kanban_db_dispatch import _profile_exists_fn
+        check = _profile_exists_fn()
+        name = req.get('name')
+        try:
+            valid = bool(name and check and check(name))
+        except ValueError:
+            valid = False
+        return _out({'ok': True, 'result': {'valid': valid}})
     if op == "ping":
         names = ["create_task", "get_task", "block_task", "unblock_task", "specify_triage_task", "reopen_review_task",
                  "complete_task", "archive_task", "add_comment", "list_events", "list_runs", "list_comments_after"]

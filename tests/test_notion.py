@@ -93,7 +93,7 @@ class ViewUpgradeTests(NotionCase):
         mine = {"property": "x", "select": {"equals": "我的筛选"}}
         self.fake.views[self.views["review"]]["filter"] = mine
         updates, notes = setup.view_upgrades(self.conn, self.client)
-        self.assertEqual([u["key"] for u in updates], ["agent"])
+        self.assertEqual([u["key"] for u in updates], ["focus", "agent"])
         self.assertEqual(len(notes), 1)
         self.assertIn("待我验收", notes[0])
         self.assertIn("已交付", notes[0], "says what to add")
@@ -105,7 +105,7 @@ class ViewUpgradeTests(NotionCase):
     def test_a_removed_view_is_reported_not_recreated(self):
         del self.fake.views[self.views["agent"]]
         updates, notes = setup.view_upgrades(self.conn, self.client)
-        self.assertEqual([u["key"] for u in updates], ["review"])
+        self.assertEqual([u["key"] for u in updates], ["focus", "review"])
         self.assertTrue(any("未找到" in n for n in notes), notes)
 
     def test_a_fresh_setup_has_the_current_views(self):
@@ -411,3 +411,39 @@ class DirtyScanTests(NotionCase):
         self.drain()
         self.assertEqual(self.fake.prop(self.page_of(t2), "下一步"), "x")
         self.assertIsNotNone(self.page_of(t1))
+
+
+class ChildAttentionProjectionTests(NotionCase):
+    def test_child_questions_update_notion_label_and_clear_individually(self):
+        from todo_manager import delegation, ops, export
+        from todo_manager.kanban import FakeKanban
+        kb = FakeKanban()
+        task = store.create_task(self.conn, 'Synthetic child questions', actor='human', origin='cli')
+        did = delegation.create(self.conn, self.cfg, task_id=task, title='Draft', goal='Draft only')
+        delegation.submit_pending(self.conn, self.cfg, kb)
+        root = delegation.get(self.conn, did)['card_id']
+        children = []
+        for number in range(2):
+            child = kb.create(title='Synthetic child', body='Question', idem_key=f'child-{number}',
+                              assignee='default', tenant='test')
+            kb.ownership[child] = root
+            kb.worker_start(child)
+            kb.worker_block(child, f'Question {number}')
+            children.append(child)
+        delegation.sync_cards(self.conn, self.cfg, kb)
+        self.drain()
+        page = self.page_of(task)
+        def label():
+            return self.fake.pages[page]['properties']['委派']['select']['name']
+        self.assertEqual(label(), schema.label('delegation', 'blocked', 'zh-CN'))
+        self.assertIn(task, [t['id'] for t in export.view_rows(self.conn, self.cfg)['review']])
+        for index, child in enumerate(children):
+            question = next(x for x in delegation.deliveries(self.conn, did) if x['card_id'] == child)
+            ctx = ops.context(self.conn, self.cfg, request=f'answer-{index}', said='Markdown')
+            ops.delegate_answer(self.conn, self.cfg, ctx, did, question=question['id'], body='Markdown')
+            delegation.send_messages(self.conn, self.cfg, kb)
+            self.drain()
+            expected = 'blocked' if index == 0 else 'queued'
+            self.assertEqual(label(), schema.label('delegation', expected, 'zh-CN'))
+        self.assertEqual(kb.cards[root]['status'], 'ready')
+        self.assertFalse(export.view_rows(self.conn, self.cfg)['review'])

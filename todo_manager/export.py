@@ -146,7 +146,7 @@ def view_rows(conn: sqlite3.Connection, cfg: Config) -> dict[str, list[dict[str,
     labels = {t["id"]: delegation.task_label(conn, t["id"]) for t in open_}
     return {
         "focus": [t for t in open_ if t["status"] in ("todo", "in_progress") and t["next_actor"] == "me"
-                    and awake(t) and (t["focus"] or (t.get("due_date") and t["due_date"][:10] <= week))],
+                    and awake(t) and (labels[t["id"]] in delegation.NEEDS_USER_LABELS or t["focus"] or (t.get("due_date") and t["due_date"][:10] <= week))],
         "waiting": [t for t in open_ if t["status"] == "waiting" and awake(t)],
         "decision": [t for t in open_ if t["status"] == "decision"],
         "agent": [t for t in open_ if labels[t["id"]]],

@@ -323,3 +323,16 @@ closed; `drop` rows stay only in the old system. Nothing old is modified or dele
   replied to (someone acted on the dashboard at the same moment) is kept as sent, marked
   `raced` on the message (`todo-manager task show <task>`), and you get a task comment; check
   the card and send a correction if needed.
+
+## Recovery after the reliability review
+
+[Review operations and evidence](reliability-review-2026-10-06.md) cover schema 10, exact-question
+answers and missing-profile recovery. Configure a valid existing `kanban.assignee`; installation
+and health no longer report delegation readiness for an empty/invalid profile. A normal feedback
+pass first reconciles remote identity, then repairs only an invalid unsubmitted profile from
+configuration, with an audit comment. Existing cards are not reassigned.
+
+`delegate answer` reports pending/sent/superseded/error status, not an assumed delivery receipt.
+`delegate show` includes child attention and pending discovery. Notification failures appear
+separately in health while Notion result synchronization proceeds. Review the existing install
+plan to upgrade the owned Notion focus view; customized views remain unchanged.

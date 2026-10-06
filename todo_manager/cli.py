@@ -456,6 +456,8 @@ def cmd_delegate(args: argparse.Namespace) -> int:
         d["messages"] = [{k: m[k] for k in ("id", "kind", "status", "created_at", "sent_at", "error", "body")}
                          for m in conn.execute("SELECT * FROM delegation_messages WHERE delegation_id=?"
                                                " ORDER BY created_at, rowid", (args.id,))]
+        d["children"] = [dict(r) for r in conn.execute(
+            "SELECT * FROM delegation_children WHERE delegation_id=? ORDER BY card_id", (args.id,))]
         d["deliveries"] = delegation.deliveries(conn, args.id)
         d["approvals"] = [dict(a) for a in conn.execute("SELECT * FROM approvals WHERE delegation_id=?"
                                                          " ORDER BY granted_at", (args.id,))]

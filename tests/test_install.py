@@ -166,6 +166,15 @@ class InstallCase(unittest.TestCase):
 
 
 class FreshInstallTests(InstallCase):
+    def test_missing_profile_is_not_ready_and_configured_profile_recovers(self):
+        self.page()
+        _, run = self.install({'notion.home_page': '1'})
+        self.assertTrue(any('delegations are not ready' in x for x in run.report))
+        self.assertFalse(any('ready; delegations enabled' in x for x in run.report))
+        run.write({'kanban.assignee': 'default'})
+        _, run = self.install()
+        self.assertTrue(any('ready; delegations enabled' in x for x in run.report))
+
     def test_a_fresh_install_asks_only_the_home_page(self):
         home = self.page("我的待办")
         prompter, run = self.install({"notion.home_page": "1"})

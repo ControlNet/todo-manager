@@ -555,6 +555,10 @@ class Install:
         for key, text in delegation.SWITCH_NOTES.items():
             if bool(values.get(key, True)):
                 self.note("kanban", text)
+        if not kb.profile_valid(self.cfg().get('kanban.assignee')):
+            self.note('kanban', f"board {board!r} exists, but no dispatchable kanban.assignee; delegations are not ready. "
+                      "Run `todo-manager config set kanban.assignee <profile>` and repeat installation.")
+            return
         self.note("kanban", f"board {board!r} ready; delegations enabled")
 
     # ------------------------------------------------------------------ 7. hermes

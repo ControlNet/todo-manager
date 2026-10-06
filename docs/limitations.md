@@ -208,3 +208,10 @@ verified and how.
   for the board's assignee without write tools for mail/GitHub/publishing — a Hermes
   configuration you decide on.
 - Tokens are read from environment variables; the workspace must not be committed or shared.
+
+The six issues reviewed at `8e177d3` are addressed in
+[the reliability review](reliability-review-2026-10-06.md). Restore hold now also prevents staging
+release through notification repair. Child discovery retries survive root completion/restart,
+and channel registration failure does not hide business results. These protections do not stop
+already running native workers. Ended delegations retain child visibility without accepting new
+authority or reopening the entry. Passive notification repair still cannot replay missed events.

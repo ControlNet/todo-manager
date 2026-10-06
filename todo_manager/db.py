@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -603,6 +603,10 @@ ALTER TABLE delegation_messages ADD COLUMN target_card_id TEXT;
 ALTER TABLE delegations ADD COLUMN notification_route TEXT;
 ALTER TABLE delegations ADD COLUMN previous_delegation_id TEXT REFERENCES delegations(id);
 ALTER TABLE delegations ADD COLUMN previous_delivery_id TEXT REFERENCES deliveries(id);
+""",
+    10: """
+ALTER TABLE delegations ADD COLUMN children_sync_pending INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE delegation_children ADD COLUMN attention TEXT;
 """,
 }
 

@@ -98,6 +98,7 @@ class Kanban(Protocol):
                    summary: str | None = None) -> dict[str, Any]: ...
     def counts(self) -> dict[str, int]: ...
     def settings(self) -> dict[str, Any]: ...
+    def profile_valid(self, name: str | None) -> bool: ...
 
 
 class BridgeKanban:
@@ -205,6 +206,9 @@ class BridgeKanban:
         """Effective global ``kanban.review_dispatch`` / ``kanban.auto_decompose`` (read-only)."""
         return self.call("settings", mutating=False)
 
+    def profile_valid(self, name: str | None) -> bool:
+        return self.call('profile_valid', name=name, mutating=False)['valid']
+
 
 class FakeKanban:
     """In-memory board mirroring the Hermes semantics this project relies on:
@@ -224,6 +228,7 @@ class FakeKanban:
         # stands in for a dashboard action interleaving there (the race ``transition_raced`` reports).
         # "comment": run right before a comment is stored (e.g. the worker submits meanwhile).
         self.interleave: dict[str, Any] = {}
+        self.valid_profiles = {'default'}
         self.settings_values = {"review_dispatch": False, "auto_decompose": False}
         self.subscriptions = {}
         self.ownership = {}
@@ -249,6 +254,8 @@ class FakeKanban:
     def create(self, *, title: str, body: str, idem_key: str, assignee: str | None, tenant: str,
                workspace: str | None = None, max_retries: int | None = None, notify: dict | None = None,
                skills: list[str] | None = None) -> str:
+        if not self.profile_valid(assignee):
+            raise KanbanError('assignee is not a dispatchable Hermes profile', code='NO_PROFILE')
         self._maybe_fail("create")
         for card in self.cards.values():
             if card["idem_key"] == idem_key and card["status"] != "archived":
@@ -456,6 +463,9 @@ class FakeKanban:
         for card in self.cards.values():
             result[card["status"]] = result.get(card["status"], 0) + 1
         return result
+
+    def profile_valid(self, name: str | None) -> bool:
+        return bool(name and name in self.valid_profiles)
 
     def settings(self) -> dict[str, Any]:
         self._maybe_fail("settings")

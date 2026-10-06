@@ -802,45 +802,50 @@ def delegate_answer(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, delegation_
         raise OpError("NOT_FOUND", f"no delegation {delegation_id}")
     if not (body or "").strip():
         raise OpError("INVALID", "--body is required")
-    question = question or ((ctx.fb or {}).get("payload") or {}).get("delivery_id")
-    if question:
+    payload = (ctx.fb or {}).get('payload') or {}
+    question = question or payload.get('delivery_id')
+    if question is None:
+        row = conn.execute("SELECT * FROM deliveries WHERE delegation_id=? AND card_id=? AND kind IN ('question','failure') "
+                           "AND source_event_id=?", (delegation_id, d['card_id'], d['block_event_id'])).fetchone()
+    else:
         row = conn.execute("SELECT * FROM deliveries WHERE id=? AND delegation_id=? AND kind='question'",
                            (question, delegation_id)).fetchone()
-        if row is None:
-            raise OpError("INVALID", "question does not belong to this delegation")
-        if row["card_id"] != d["card_id"]:
-            if approvals:
-                raise OpError("INVALID", "child external approvals are not supported by this adapter; "
-                              "ask the root to perform the authorized external action")
-            from . import child_links
-            args = {"delegation": delegation_id, "question": question, "body": body}
-            key = _key(ctx, "delegate answer", args)
-            return perform(conn, ctx, "delegate answer", args,
-                           lambda: child_links.queue_answer(conn, d, dict(row), body, key,
-                                                            ctx.fb["id"] if ctx.fb else None))
-    if d["status"] != "blocked":
-        raise OpError("INVALID", f"the agent work is {d['status']}: there is no open question (more information:"
-                                 " `delegate message --kind supplement`)")
-    p = (ctx.fb or {}).get("payload") or {}
-    if p.get("delegation_id") == delegation_id and p.get("delivery_kind") == "question" \
-            and p.get("delivery_seq") not in (None, d["block_seq"]):
-        raise OpError("INVALID", f"this reply answers an earlier question (#{p.get('delivery_seq')}), not the open one"
-                                 f" (#{d['block_seq']}): send it as a supplement")
-    args = {"delegation": delegation_id, "body": body, **({"approve": approve} if approve else {})}
-    key = _key(ctx, "delegate answer", args)
+    if row is None:
+        raise OpError('INVALID', 'no matching question in this delegation')
+    question = row['id']
+    if ctx.key:
+        from dataclasses import replace
+        ctx = replace(ctx, key=f'{ctx.key}:question:{question}')
+    args = {'delegation': delegation_id, 'question': question, 'body': body,
+            **({'approve': approve} if approve else {})}
+    key = _key(ctx, 'delegate answer', args)
 
     def apply() -> dict[str, Any]:
         try:
-            mid = delegation.add_message(conn, delegation_id, "answer", body,
-                                         feedback_id=ctx.fb["id"] if ctx.fb else None, op_key=key, approve=approvals)
+            if row['card_id'] != d['card_id']:
+                if approvals:
+                    raise delegation.DelegationError('child external approvals are not supported; ask the root')
+                from . import child_links
+                return child_links.queue_answer(conn, d, dict(row), body, key, ctx.fb['id'] if ctx.fb else None)
+            if (payload.get('delegation_id') == delegation_id and payload.get('delivery_kind') == 'question'
+                    and payload.get('delivery_seq') not in (None, row['seq'])):
+                raise delegation.DelegationError('reply names an earlier question')
+            mid = delegation.add_message(conn, delegation_id, 'answer', body, delivery_id=question,
+                                         feedback_id=ctx.fb['id'] if ctx.fb else None, op_key=key, approve=approvals)
         except delegation.DelegationError as exc:
-            raise OpError("INVALID", str(exc)) from None
-        result = {"message": mid, "kind": "answer", "question": d["block_seq"]}
+            raise OpError('INVALID', str(exc)) from None
+        result = {'message': mid, 'kind': 'answer', 'question': question, 'status': 'pending'}
         if approvals:
-            result["approvals"] = [a["id"] for a in delegation.answer_approvals(conn, mid)]
+            result['approvals'] = [a['id'] for a in delegation.answer_approvals(conn, mid)]
         return result
 
-    return perform(conn, ctx, "delegate answer", args, apply)
+    result = perform(conn, ctx, 'delegate answer', args, apply)
+    message = conn.execute('SELECT status,error FROM delegation_messages WHERE id=?', (result['message'],)).fetchone()
+    if message:
+        result['status'] = message['status']
+        if message['error']:
+            result['error'] = message['error']
+    return result
 
 
 def delegate_approve(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, delegation_id: str, *, delivery: str,

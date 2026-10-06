@@ -26,7 +26,7 @@
   "dlg.cancel_voided": "Cancelling {title}: these queued messages were not carried out: {items}",
   "dlg.cancelled": "Agent work cancelled",
   "dlg.child_answer_race": "Answer to child {card} needs inspection: the question changed concurrently.",
-  "dlg.child_needs_input": "A delegated child needs input; see the linked question.",
+  "dlg.child_needs_input": "A delegated child needs attention; see its question or failure details.",
   "dlg.child_pause_scope": "Pause applies to the entry card only. Descendant workers are not confirmed paused: {cards}. Use cancellation to stop proven owned cards, or native per-card controls.",
   "dlg.child_question": "Child {card} asks: {reason}\nQuestion: {delivery}",
   "dlg.child_result": "Partial child result ({card}): {summary}\nThe root still owns the aggregate deliverable.",
@@ -223,5 +223,8 @@
   "view.projects": "Active projects",
   "view.recent": "Recent changes",
   "view.review": "To review",
-  "view.waiting": "Waiting on others"
+  "view.waiting": "Waiting on others",
+  "setup.view_update.focus": "Include agent work that needs your input even without focus or a near deadline.",
+  "setup.view_kept.focus": "View {view} was customized and is kept; include {prop}: {states} manually if wanted.",
+  "dlg.child_failure": "Child {card} needs attention after failure: {reason}"
 }

@@ -22,7 +22,8 @@ from .sync import HOME_MARKER, save_state
 SECTIONS = ("focus", "projects", "waiting", "decision", "agent", "review", "recent")
 # 2: card events no longer set a Task to "review": "Agent work" shows every state and "To
 # review" also lists agent work waiting for the user (question, delivery).
-VIEWS_VERSION = 2
+# 3: actionable agent work is visible in focus without a focus flag or near deadline.
+VIEWS_VERSION = 3
 
 
 def _not_snoozed(p: dict[str, str]) -> dict[str, Any]:
@@ -51,7 +52,8 @@ def view_specs(p: dict[str, str], q: dict[str, str], lang: str | None = None) ->
              filter={"and": [{"property": p["status"], "select": {"equals": task("todo", "in_progress")}},
                              {"property": p["next_actor"], "select": {"equals": schema.label("next_actor", "me", lang)}},
                              _not_snoozed(p),
-                             {"or": [{"property": p["focus"], "checkbox": {"equals": True}},
+                             {"or": [{"property": p["delegation"], "select": {"equals": needs_user}},
+                                     {"property": p["focus"], "checkbox": {"equals": True}},
                                      {"property": p["due_date"], "date": {"on_or_before": "one_week_from_now"}}]}]},
              sorts=[{"property": p["due_date"], "direction": "ascending"},
                     {"property": p["updated"], "direction": "descending"}],
@@ -92,9 +94,16 @@ def view_specs(p: dict[str, str], q: dict[str, str], lang: str | None = None) ->
 
 
 def _earlier_filters(p: dict[str, str], lang: str | None) -> dict[str, dict[str, Any]]:
-    """The filters views had before ``VIEWS_VERSION`` 2, to recognise a view the user left as created."""
+    """Earlier owned filters (versions 1 and 2), used to preserve customized views."""
     states = [schema.label("delegation", v, lang) for v in ("queued", "running", "paused", "quarantined")]
-    return {"agent": {"property": p["delegation"], "select": {"equals": states}},
+    # Version 2 focus required an explicit focus flag or a near deadline.
+    focus = {"and": [
+        {"property": p["status"], "select": {"equals": [schema.label('task_status', v, lang) for v in ('todo', 'in_progress')]}},
+        {"property": p["next_actor"], "select": {"equals": schema.label('next_actor', 'me', lang)}},
+        _not_snoozed(p),
+        {"or": [{"property": p['focus'], "checkbox": {"equals": True}},
+                {"property": p['due_date'], "date": {"on_or_before": 'one_week_from_now'}}]}]}
+    return {"focus": focus, "agent": {"property": p["delegation"], "select": {"equals": states}},
             "review": {"property": p["status"], "select": {"equals": schema.label("task_status", "review", lang)}}}
 
 

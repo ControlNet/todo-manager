@@ -196,3 +196,18 @@ version, templates, effective managed files, live cron config/prompt and old cus
 archives. The manifest explicitly excludes native memory/identity, full Kanban history,
 notification delivery checkpoints and gateway sessions, and names separate backup locations.
 Importing the business workspace does not write profile memory or re-install native cron jobs.
+
+## Reliability follow-up to 8e177d3
+
+See [six-finding review evidence](reliability-review-2026-10-06.md). Schema 10 persists unfinished
+child discovery and child attention. Root completion does not erase a failed discovery retry;
+only a complete pass clears that responsibility. Individual child read/notification failures
+cannot discard siblings' successful business synchronization. Completed history is not polled
+forever. Notification repair is independently recorded in health and respects restore hold,
+pause and cancellation before releasing a staging block.
+
+Answers bind exact delivery/card/event/version identities for roots and children. Child answers
+do not increment the entry's requirement version. Actionable child questions/failures contribute
+to the existing blocked presentation label without changing the native root status. Notion view
+version 3 includes actionable labels in focus, subject to task status, next actor and snooze.
+Closed human tasks keep their status and have no active Agent work presentation label.

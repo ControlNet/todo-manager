@@ -25,6 +25,7 @@ COLORS = {
                     "review": "purple", "done": "green", "cancelled": "gray"},
     "next_actor": {"me": "blue", "agent": "purple", "external": "yellow"},
     "project_status": {"active": "blue", "paused": "yellow", "done": "green", "archived": "gray"},
+    # blocked also summarizes actionable child questions/failures; native root state is unchanged.
     "delegation": {"queued": "gray", "running": "blue", "blocked": "orange", "review": "purple",
                    "delivered": "green", "paused": "yellow", "quarantined": "red"},
     "source": {"gmail": "red", "slack": "purple", "github": "default", "commit": "default", "notion": "default",

@@ -367,6 +367,30 @@ def route_for(conn: sqlite3.Connection, cfg: Config, d: dict) -> dict | None:
     return route
 
 
+def may_release_staging(conn: sqlite3.Connection, d: dict[str, Any]) -> bool:
+    """Every recovery release obeys the same local execution barriers."""
+    current = get(conn, d['id'])
+    return not held(conn) and not current['pause_requested'] and not cancel_pending(conn, current)
+
+
+def repair_notification(conn: sqlite3.Connection, cfg: Config, kb: Kanban,
+                        d: dict[str, Any], card: str, release: bool = False) -> dict | None:
+    """Notification health is independent from business event ingestion."""
+    from . import health
+    scope = f'notifications:{card}'
+    try:
+        route = route_for(conn, cfg, d)
+        if not route:
+            return None
+        result = kb.notify(card, route, release=release and may_release_staging(conn, d))
+    except KanbanError as exc:
+        health.record_channel(conn, 'kanban', scope, f'notification registration failed: {exc}')
+        return None
+    health.record_channel(conn, 'kanban', scope,
+                          'subscription restored without historical replay' if result['history_gap'] else None)
+    return result
+
+
 def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str | None = None) -> dict[str, Any]:
     """Create the cards of new delegations (``only``: just that one, right after it was created)."""
     stats: dict[str, Any] = {"submitted": 0, "linked": 0, "errors": 0, "quarantined": 0, "held": 0}
@@ -405,14 +429,9 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str 
                 continue
             if matches:
                 card = matches[0]
-                try:
-                    route = route_for(conn, cfg, d)
-                    if route:
-                        info = kb.notify(card["id"], route, release=not d["pause_requested"] and not closing)
-                        card["status"] = info["status"]
-                except KanbanError as exc:
-                    _failed(stats, "errors", f"notification registration failed: {exc}")
-                    continue
+                info = repair_notification(conn, cfg, kb, d, card['id'], release=True)
+                if info:
+                    card['status'] = info['status']
                 with tx(conn):
                     # Our pause has not reached this card yet: a block on it is the worker's.
                     status = "cancelled" if card["status"] == "archived" else _status_from_card(card["status"], d)
@@ -427,12 +446,33 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str 
                     _set(conn, d["id"], status="pending_submit", last_error=None)
                 stats["held"] += 1
                 continue
+            # Lookup above must succeed with no match before repairing an unsubmitted assignee.
+            # A remotely accepted create is linked unchanged, including an uncertain response.
+            candidate = cfg.get('kanban.assignee') or None
+            try:
+                if not kb.profile_valid(d.get('assignee')):
+                    if not kb.profile_valid(candidate):
+                        raise KanbanError('configure a valid kanban.assignee profile before submitting', code='NO_PROFILE')
+                    with tx(conn):
+                        old = d.get('assignee')
+                        _set(conn, d['id'], assignee=candidate)
+                        effects.task_comment(conn, d['task_id'], f"profile-repair:{d['id']}:{d['version']}",
+                                             f"Unsubmitted delegation profile repaired: {old!r} -> {candidate!r}; remote lookup found no card.")
+                    d = get(conn, d['id'])
+            except KanbanError as exc:
+                with tx(conn):
+                    _set(conn, d['id'], status='pending_submit', last_error=f'profile validation failed: {exc}')
+                _failed(stats, 'errors', str(exc))
+                continue
             extra = [m["body"] for m in conn.execute(
                 "SELECT body FROM delegation_messages WHERE delegation_id=? AND kind='supplement' AND status='pending'"
                 " ORDER BY created_at", (d["id"],))]
             notes = conn.execute("SELECT notes_text FROM notion_pages WHERE entity_type='task' AND entity_id=?",
                                  (task["id"],)).fetchone()
             body = card_body(d, task, _notion_url(conn, task), extra, notes["notes_text"] if notes else None)
+            if not may_release_staging(conn, d):
+                stats['held'] += 1
+                continue
             with tx(conn):
                 _set(conn, d["id"], status="reconcile", submit_attempts=d["submit_attempts"] + 1)
             try:
@@ -507,17 +547,13 @@ def _status_from_card(card_status: str, d: dict[str, Any], paused_block: bool | 
 def sync_cards(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, Any]:
     stats: dict[str, Any] = {"checked": 0, "deliveries": 0, "questions": 0, "failures": 0, "errors": 0}
     rows = conn.execute("SELECT id FROM delegations WHERE card_id IS NOT NULL AND status NOT IN"
-                        " ('cancelled','quarantined') AND (status!='ended' OR EXISTS "
+                        " ('cancelled','quarantined') AND (status!='ended' OR children_sync_pending=1 OR EXISTS "
                         "(SELECT 1 FROM delegation_children c WHERE c.delegation_id=delegations.id "
                         "AND c.status NOT IN ('done','archived')))").fetchall()
     for row in rows:
         d = get(conn, row["id"])
         try:
-            route = route_for(conn, cfg, d)
-            if route:
-                info = kb.notify(d["card_id"], route, release=not d["pause_requested"] and not cancel_pending(conn, d))
-                if info["history_gap"]:
-                    _failed(stats, "errors", "native subscription restored without event replay; inspect Notion history")
+            repair_notification(conn, cfg, kb, d, d['card_id'], release=True)
             snap = kb.snapshot(d["card_id"], after_event=d["event_cursor"])
         except KanbanError as exc:
             with tx(conn):
@@ -529,10 +565,12 @@ def sync_cards(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, A
         quiet = conn.execute("SELECT 1 FROM delegation_messages WHERE delegation_id=? AND kind='cancel'"
                              " AND status IN ('pending','sending','waiting_capacity')", (d["id"],)).fetchone() is not None
         with tx(conn):
+            # Commit retry responsibility with root progress, before any child I/O.
+            _set(conn, d['id'], children_sync_pending=1)
             _apply_snapshot(conn, cfg, d, snap, stats, quiet=quiet)
         try:
             from . import child_links
-            child_links.sync(conn, cfg, kb, d, quiet=quiet)
+            child_links.sync(conn, cfg, kb, get(conn, d["id"]), quiet=quiet)
         except KanbanError as exc:
             _failed(stats, "errors", f"child sync failed: {exc}")
     return stats
@@ -799,8 +837,16 @@ def task_label(conn: sqlite3.Connection, task_id: str) -> str | None:
     """A Task's "Agent work": the most urgent state of its active delegations, else
     "delivered" while its latest delegation ended with a result (the draft is the user's to
     use; the Task stays open until the user closes it), else None."""
+    task = store.get_task(conn, task_id)
+    if task is None or task['status'] in store.CLOSED_STATUSES:
+        return None
     statuses = {"queued" if d["status"] in ("pending_submit", "reconcile") else d["status"]
                 for d in for_task(conn, task_id, active_only=True)}
+    attention = conn.execute("SELECT c.attention FROM delegation_children c JOIN delegations d ON d.id=c.delegation_id "
+                             "WHERE d.task_id=? AND d.status NOT IN ('cancelled','quarantined') "
+                             "AND c.attention IS NOT NULL", (task_id,)).fetchall()
+    if attention:
+        statuses.add('blocked')
     for status in LABEL_ORDER:
         if status in statuses:
             return status
@@ -873,7 +919,8 @@ def received_requirement_version(conn: sqlite3.Connection, d: dict[str, Any], ev
     missing: list[int] = []
     for m in conn.execute("SELECT requirement_version, status, card_event_id, card_event_before FROM delegation_messages"
                           f" WHERE delegation_id=? AND kind IN ({','.join(repr(k) for k in REQUIREMENT_KINDS)})"
-                          " AND status NOT IN ('superseded','failed')", (d["id"],)):
+                          " AND status NOT IN ('superseded','failed') AND (target_card_id IS NULL OR target_card_id="
+                          "(SELECT card_id FROM delegations WHERE id=delegation_messages.delegation_id))", (d["id"],)):
         if m["card_event_id"] is not None:
             received = event_id is None or int(m["card_event_id"]) < int(event_id)
         else:
@@ -947,12 +994,27 @@ def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: s
         if op_key:
             existing = conn.execute("SELECT id FROM delegation_messages WHERE op_key=?", (op_key,)).fetchone()
         elif feedback_id:
-            existing = conn.execute("SELECT id FROM delegation_messages WHERE delegation_id=? AND feedback_id=? AND kind=?",
-                                    (delegation_id, feedback_id, kind)).fetchone()
+            if kind == 'answer':
+                bound = conn.execute('SELECT source_event_id FROM deliveries WHERE id=? AND delegation_id=?',
+                                     (delivery_id, delegation_id)).fetchone() if delivery_id else None
+                anchor = bound['source_event_id'] if bound else d['block_event_id']
+                existing = conn.execute("SELECT id FROM delegation_messages WHERE delegation_id=? AND feedback_id=? "
+                                        "AND kind='answer' AND target_event_id IS ?",
+                                        (delegation_id, feedback_id, anchor)).fetchone()
+            else:
+                existing = conn.execute("SELECT id FROM delegation_messages WHERE delegation_id=? AND feedback_id=? AND kind=?",
+                                        (delegation_id, feedback_id, kind)).fetchone()
         else:
             existing = None
         if existing:
             return existing["id"]
+        if kind == 'answer':
+            question_row = conn.execute("SELECT * FROM deliveries WHERE delegation_id=? AND card_id=? AND kind IN ('question','failure') "
+                                        "AND id=COALESCE(?,id) AND source_event_id=?",
+                                        (delegation_id, d['card_id'], delivery_id, d['block_event_id'])).fetchone()
+            if (d['status'] != 'blocked' or question_row is None
+                    or question_row['requirement_version'] != d['requirement_version']):
+                raise DelegationError('earlier question is stale or no longer open; no answer queued')
         mid = ids.new_id("event")
         changes_requirement = kind in ("supplement", "revision", "answer")
         requirement_version = d["requirement_version"] + (1 if changes_requirement else 0)
@@ -982,6 +1044,8 @@ def add_message(conn: sqlite3.Connection, delegation_id: str, kind: str, body: s
             (mid, delegation_id, kind, feedback_id, body, requirement_version,
              d["block_seq"] if answering else None, target_event, target_seq, target_message,
              approval_id, cause, clock.iso(), op_key))
+        if kind == 'answer':
+            conn.execute('UPDATE delegation_messages SET target_card_id=? WHERE id=?', (d['card_id'], mid))
         if changes_requirement:
             _set(conn, delegation_id, requirement_version=requirement_version)
             # A substantive change voids approvals that have not gone out yet.
@@ -1199,7 +1263,7 @@ def send_messages(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str
                     outcome = _cancel_unsubmitted(conn, cfg, kb, d, dict(msg))
                 elif d["status"] in ("pending_submit", "reconcile"):
                     continue
-                elif msg["target_card_id"]:
+                elif msg["target_card_id"] and msg["target_card_id"] != d["card_id"]:
                     from . import child_links
                     outcome = child_links.deliver_answer(conn, cfg, kb, d, dict(msg))
                 else:

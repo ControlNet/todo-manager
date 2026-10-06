@@ -295,3 +295,11 @@ the installed Hermes code in a temporary `HERMES_HOME`.
    plan in the workspace notes). `todo-manager install` does the setup after you have created
    the new top-level home page and added the integration to it; migrating the old system stays
    the separate `migrate` command.
+
+## Reliability review after 8e177d3 (2026-10-06)
+
+The six initial regressions each failed before implementation. Their causes, repairs, cross-case
+coverage, schema-10 migration and separate Fake/native test evidence are recorded in
+[the reliability acceptance record](reliability-review-2026-10-06.md). Earlier acceptance records
+above remain historical; they do not override the current prompt ownership or native execution
+boundaries.
