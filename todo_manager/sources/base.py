@@ -62,12 +62,14 @@ class FetchResult:
 
 
 class SourceError(Exception):
-    """Fetch failed; the cursor must not advance."""
+    """Fetch failed; retain the watermark. An optional checkpoint contains completed
+    pages/items and the still-pending request, for atomic persistence by the gate."""
 
     def __init__(self, message: str, retry_after: float | None = None, cursor_invalid: bool = False):
         super().__init__(message)
         self.retry_after = retry_after
         self.cursor_invalid = cursor_invalid
+        self.checkpoint: FetchResult | None = None
 
 
 def get_cursor(conn: sqlite3.Connection, source: str, scope: str) -> dict[str, Any] | None:

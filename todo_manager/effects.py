@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 
 from . import ids, outbox, store
-from .db import dumps, loads
+from .db import dumps, loads, get_meta
 import hashlib
 
 
@@ -23,6 +23,7 @@ def _push(conn: sqlite3.Connection, kind: str, entity_id: str) -> str | None:
                              if k not in ('version', 'updated_at', 'created_at', 'field_meta', 'notion_page_id')}}
     if kind == 'task':
         from . import delegation
+        projection['pending_project'] = loads(get_meta(conn, 'notion.project_pending:' + entity_id), None)
         projection['label'] = delegation.task_label(conn, entity_id)
         projection['delegations'] = [dict(r) for r in conn.execute(
             'SELECT id,title,status FROM delegations WHERE task_id=? ORDER BY created_at,id', (entity_id,))]

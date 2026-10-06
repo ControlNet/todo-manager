@@ -161,13 +161,18 @@ class TokenProvider:
         return self._token
 
 
+class _BudgetReached(Exception):
+    pass
+
+
 class GmailSource:
     name = "gmail"
 
     def __init__(self, *, account: str, address: str, token: Callable[[], str], my_addresses: list[str],
                  query: str = "-in:spam -in:trash -in:chats", page_size: int = 100,
                  overlap_minutes: int = 120, initial_lookback_days: int = 14, max_threads_per_run: int = 150,
-                 http: Callable[..., Any] = request_json):
+                 http: Callable[..., Any] = request_json, max_requests_per_run: int = 40,
+                 max_seconds_per_run: float = 180):
         self.account = account
         self.address = address
         self.token = token
@@ -178,6 +183,10 @@ class GmailSource:
         self.lookback_days = initial_lookback_days
         self.max_threads = max_threads_per_run
         self.http = http
+        self.max_requests = max(2, max_requests_per_run)
+        self.max_seconds = max_seconds_per_run
+        self._deadline = None
+        self._parts = None
 
     @property
     def scope(self) -> str:
@@ -185,9 +194,16 @@ class GmailSource:
 
     # ------------------------------------------------------------------ API helpers
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        timeout = 45
+        if self._deadline is not None:
+            remaining = self._deadline - time.monotonic()
+            if self._remaining <= 0 or remaining <= 0:
+                raise _BudgetReached()
+            self._remaining -= 1
+            timeout = min(timeout, remaining)
         try:
             return self.http("GET", f"{API}/{path}", headers={"Authorization": f"Bearer {self.token()}"},
-                             params=params, timeout=45)
+                             params=params, timeout=timeout)
         except HttpError as exc:
             if exc.status == 404 and path.startswith("history"):
                 raise SourceError("historyId expired", cursor_invalid=True) from None
@@ -195,87 +211,171 @@ class GmailSource:
         except HttpTimeout as exc:
             raise SourceError(str(exc)) from None
 
-    def _list_history(self, start: str) -> tuple[list[str], str]:
-        threads: list[str] = []
-        seen: set[str] = set()
-        page = None
-        latest = start
-        while True:
-            data = self._get("history", {"startHistoryId": start, "historyTypes": "messageAdded",
-                                         "maxResults": 500, "pageToken": page})
-            latest = data.get("historyId", latest)
-            for record in data.get("history", []) or []:
-                for added in record.get("messagesAdded", []) or []:
-                    msg = added.get("message", {})
-                    if EXCLUDED_LABELS & set(msg.get("labelIds", []) or []):
-                        continue
-                    tid = msg.get("threadId")
-                    if tid and tid not in seen:
-                        seen.add(tid)
-                        threads.append(tid)
-            page = data.get("nextPageToken")
-            if not page:
-                return threads, str(latest)
+    def set_fetch_deadline(self, deadline: float) -> None:
+        """The gate's remaining wall-clock budget, without changing global settings."""
+        self._gate_deadline = deadline
 
-    def _list_window(self, after: datetime | None) -> list[str]:
-        threads: list[str] = []
-        seen: set[str] = set()
-        page = None
-        q = f"after:{int(after.timestamp())} {self.query}".strip() if after else self.query
-        while True:
-            data = self._get("messages", {"q": q, "maxResults": self.page_size, "pageToken": page,
-                                          "includeSpamTrash": "false"})
-            for msg in data.get("messages", []) or []:
-                tid = msg.get("threadId")
-                if tid and tid not in seen:
-                    seen.add(tid)
-                    threads.append(tid)
-            page = data.get("nextPageToken")
-            if not page:
-                return threads
+    def _selection_queries(self, data: dict[str, Any]) -> list[str]:
+        """Server-side AND with candidate Message-IDs; never interpret the user's query.
+
+        Gmail search is per message. Include *all* messages in the changed thread so
+        an older matching parent still selects a new nonmatching reply's context.
+        Missing/unusual identifiers use a resumable broad search, never a false negative.
+        """
+        terms = []
+        for message in data.get('messages', []):
+            headers = message.get('payload', {}).get('headers', [])
+            values = [h['value'].strip().strip('<>') for h in headers if h['name'].lower() == 'message-id']
+            if len(values) != 1 or not re.fullmatch(r'[A-Za-z0-9._+%/=@-]{1,240}', values[0]) or '@' not in values[0]:
+                return [self.query]
+            terms.append('rfc822msgid:' + values[0])
+        terms = list(dict.fromkeys(terms))
+        return [f"({self.query}) (" + ' OR '.join(terms[i:i + 10]) + ')'
+                for i in range(0, len(terms), 10)]
 
     # ------------------------------------------------------------------ fetch
     def fetch(self, cursor: str | None, last_success_at: str | None = None) -> FetchResult:
         state = json.loads(cursor) if cursor else {}
-        queue: list[str] = list(state.get("queue", []))
-        target = state.get("queue_history_id")
-        history_id = state.get("history_id")
-        # Messages older than the system's first window are thread context, not new work.
-        floor = state.get("since") or clock.iso(clock.now() - timedelta(days=self.lookback_days))
-        meta: dict[str, Any] = {}
-        if not queue:
-            if history_id:
-                try:
-                    queue, target = self._list_history(history_id)
-                    # Gmail history has no query parameter. Let Gmail evaluate the query,
-                    # intersect changed threads, then hydrate their complete context.
-                    if queue and self.query:
-                        selected = set(self._list_window(None))
-                        queue = [tid for tid in queue if tid in selected]
-                    meta["mode"] = "history"
-                except SourceError as exc:
-                    if not exc.cursor_invalid:
-                        raise
-                    since = clock.parse(last_success_at) or clock.now() - timedelta(days=self.lookback_days)
-                    target = str(self._get("profile").get("historyId"))
-                    queue = self._list_window(since - timedelta(minutes=self.overlap))
-                    meta["mode"] = "window_fallback"
-            else:
-                target = str(self._get("profile").get("historyId"))
-                queue = self._list_window(clock.now() - timedelta(days=self.lookback_days))
-                meta["mode"] = "initial_window"
-        batch, rest = queue[: self.max_threads], queue[self.max_threads:]
+        history_id = state.get('history_id')
+        floor = state.get('since') or clock.iso(clock.now() - timedelta(days=self.lookback_days))
+        scan = state.get('scan')
+        if scan is None:
+            # Compatibility with a previously persisted, already selected backlog.
+            scan = {'phase': 'hydrate' if state.get('queue') else ('history' if history_id else 'window'),
+                    'ready': list(state.get('queue', [])), 'candidates': [],
+                    'target': state.get('queue_history_id'), 'mode': 'history' if history_id else 'initial_window'}
         items: list[Item] = []
-        for thread_id in batch:
-            items.extend(self._thread_items(thread_id))
-        for item in items:
-            if item.route == "batch" and item.occurred_at and item.occurred_at < floor:
-                item.route = "context"
-        new_state = {"history_id": history_id if rest else (target or history_id), "since": floor}
-        if rest:
-            new_state.update({"queue": rest, "queue_history_id": target})
-        meta.update({"threads": len(batch), "queued": len(rest)})
-        return FetchResult(scope=self.scope, items=items, cursor=json.dumps(new_state), complete=not rest, meta=meta)
+        self._remaining = self.max_requests
+        self._deadline = min(time.monotonic() + self.max_seconds, getattr(self, '_gate_deadline', float('inf')))
+        self._gate_deadline = float('inf')
+        threads = 0
+
+        def result() -> FetchResult:
+            complete = scan['phase'] == 'done'
+            saved = {'history_id': (scan.get('target') or history_id) if complete else history_id, 'since': floor}
+            if not complete:
+                saved['scan'] = scan
+            for item in items:
+                if item.route == 'batch' and item.occurred_at and item.occurred_at < floor:
+                    item.route = 'context'
+            return FetchResult(scope=self.scope, items=items, cursor=json.dumps(saved), complete=complete,
+                               meta={'mode': scan['mode'], 'threads': threads,
+                                     'queued': len(scan['ready']) + len(scan['candidates']),
+                                     'phase': scan['phase'], 'requests': self.max_requests - self._remaining})
+
+        try:
+            while scan['phase'] != 'done' and threads < self.max_threads:
+                phase = scan['phase']
+                if phase == 'history':
+                    try:
+                        data = self._get('history', {'startHistoryId': history_id, 'historyTypes': 'messageAdded',
+                                                    'maxResults': 500, 'pageToken': scan.get('page')})
+                    except SourceError as exc:
+                        if not exc.cursor_invalid:
+                            raise
+                        scan.update(phase='window', mode='window_fallback', page=None, target=None, candidates=[])
+                        continue
+                    known = set(scan['candidates'])
+                    for record in data.get('history', []) or []:
+                        for added in record.get('messagesAdded', []) or []:
+                            msg = added.get('message', {})
+                            tid = msg.get('threadId')
+                            if tid and tid not in known and not (EXCLUDED_LABELS & set(msg.get('labelIds', []))):
+                                known.add(tid)
+                                scan['candidates'].append(tid)
+                    scan.update(page=data.get('nextPageToken'), target=str(data.get('historyId', history_id)))
+                    if not scan['page']:
+                        scan['phase'] = 'select'
+                elif phase == 'window':
+                    if not scan.get('target'):
+                        scan['target'] = str(self._get('profile')['historyId'])
+                        since = clock.now() - timedelta(days=self.lookback_days)
+                        if scan['mode'] == 'window_fallback':
+                            since = (clock.parse(last_success_at) or since) - timedelta(minutes=self.overlap)
+                        scan['query'] = f'after:{int(since.timestamp())} {self.query}'.strip()
+                    data = self._get('messages', {'q': scan['query'], 'maxResults': self.page_size,
+                                                 'pageToken': scan.get('page'), 'includeSpamTrash': 'false'})
+                    seen = scan.setdefault('window_seen', [])
+                    scan['ready'] = list(dict.fromkeys(m['threadId'] for m in data.get('messages', [])
+                                                      if m.get('threadId') and m['threadId'] not in seen))
+                    seen.extend(scan['ready'])
+                    scan['page'] = data.get('nextPageToken')
+                    scan['return_to'] = 'window' if scan['page'] else 'done'
+                    scan['phase'] = 'hydrate'
+                elif phase == 'select':
+                    if not scan['candidates']:
+                        scan['phase'] = 'done'
+                        continue
+                    tid = scan['candidates'][0]
+                    active = scan.get('active')
+                    if active is None:
+                        if self.query:
+                            try:
+                                data = self._get(f'threads/{tid}', {'format': 'metadata', 'metadataHeaders': 'Message-ID'})
+                            except SourceError as exc:
+                                if 'HTTP 404' not in str(exc):
+                                    raise
+                                data = {'messages': []}
+                            active = {'queries': self._selection_queries(data), 'index': 0, 'page': None}
+                        else:
+                            active = {'queries': [], 'index': 0, 'page': None}
+                        scan['active'] = active
+                    matched = not self.query
+                    queries = active['queries']
+                    if active['index'] < len(queries):
+                        data = self._get('messages', {'q': queries[active['index']], 'maxResults': self.page_size,
+                                                     'pageToken': active['page'], 'includeSpamTrash': 'false'})
+                        matched = any(m.get('threadId') == tid for m in data.get('messages', []))
+                        active['page'] = data.get('nextPageToken')
+                        if not active['page']:
+                            active['index'] += 1
+                        if not matched and active['index'] < len(queries):
+                            continue
+                    scan['candidates'].pop(0)
+                    scan.pop('active', None)
+                    if matched:
+                        scan.update(phase='hydrate', ready=[tid], return_to='select')
+                elif phase == 'hydrate':
+                    if not scan['ready']:
+                        scan['phase'] = scan.pop('return_to', 'done')
+                        continue
+                    tid = scan['ready'][0]
+                    try:
+                        data = self._get(f'threads/{tid}', {'format': 'full'})
+                    except SourceError as exc:
+                        if 'HTTP 404' not in str(exc):
+                            raise
+                        data = {'messages': []}
+                    hydrated = scan.setdefault('hydrated', [])
+                    self._parts = scan.setdefault('parts', {})
+                    for msg in data.get('messages', []):
+                        if msg['id'] in hydrated:
+                            continue
+                        item = self.normalize(msg)
+                        if item is not None:
+                            items.append(item)
+                        hydrated.append(msg['id'])
+                        self._parts.clear()
+                    scan.pop('hydrated', None)
+                    scan.pop('parts', None)
+                    self._parts = None
+                    scan['ready'].pop(0)
+                    threads += 1
+                    if not scan['ready']:
+                        scan['phase'] = scan.pop('return_to', 'done')
+                        if scan['phase'] == 'select' and not scan['candidates']:
+                            scan['phase'] = 'done'
+        except _BudgetReached:
+            pass
+        except SourceError as exc:
+            # Successful pages/items can be committed together with the checkpoint;
+            # the failing request remains due and the health error is not hidden.
+            exc.checkpoint = result()
+            raise
+        finally:
+            self._deadline = None
+            self._parts = None
+        return result()
 
     def thread_key_for(self, gmail_id: str) -> str | None:
         """Thread key for a message id (or a thread id), or None when this mailbox has neither."""
@@ -293,31 +393,20 @@ class GmailSource:
 
     def _body_part(self, message_id: str, attachment_id: str) -> str | None:
         """A text part stored by reference. A transient failure fails the fetch (it is retried
-        and the cursor does not move); a permanent one returns None (recorded as incomplete)."""
+        and its checkpoint retains this message); a permanent one returns None (recorded as incomplete)."""
+        key = message_id + ':' + attachment_id
+        if self._parts is not None and key in self._parts:
+            return self._parts[key]
         try:
-            data = self.http("GET", f"{API}/messages/{message_id}/attachments/{attachment_id}",
-                             headers={"Authorization": f"Bearer {self.token()}"}, timeout=45)
-        except HttpError as exc:
-            if exc.status in PERMANENT_STATUSES:
-                return None
-            raise SourceError(f"body of message {message_id}: {exc}", retry_after=exc.retry_after) from None
-        except HttpTimeout as exc:
-            raise SourceError(f"body of message {message_id}: {exc}") from None
-        return _b64(data.get("data") or "")
-
-    def _thread_items(self, thread_id: str) -> list[Item]:
-        try:
-            data = self._get(f"threads/{thread_id}", {"format": "full"})
+            data = self._get(f"messages/{message_id}/attachments/{attachment_id}")
+            value = _b64(data.get('data') or '')
         except SourceError as exc:
-            if "HTTP 404" in str(exc):
-                return []  # thread deleted between listing and fetch
-            raise
-        items = []
-        for msg in data.get("messages", []) or []:
-            item = self.normalize(msg)
-            if item is not None:
-                items.append(item)
-        return items
+            if not any(f'HTTP {status}' in str(exc) for status in PERMANENT_STATUSES):
+                raise
+            value = None
+        if self._parts is not None:
+            self._parts[key] = value
+        return value
 
     def normalize(self, msg: dict[str, Any]) -> Item | None:
         labels = set(msg.get("labelIds", []) or [])

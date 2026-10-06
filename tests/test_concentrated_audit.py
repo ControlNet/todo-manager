@@ -345,9 +345,12 @@ class NotionAudit(notion_cases.NotionCase):
         with self.assertRaises(ops.OpError):
             ops.delegate_create(self.conn, self.cfg, ctx, task_id=fb['scope_id'], title='Draft', goal='Draft', submit=False)
         self.sync.pull('task')
-        updated = feedback.get(self.conn, fb['id'])
+        self.assertEqual(feedback.get(self.conn, fb['id'])['status'], 'superseded')
+        updated = [f for f in feedback.pending(self.conn) if f['kind'] == 'new_task'][0]
         self.assertIn('never send', updated['payload']['body'])
-        ctx = ops.context(self.conn, self.cfg, feedback_id=fb['id'])
+        clock.advance(minutes=2)
+        self.sync.pull('task')
+        ctx = ops.context(self.conn, self.cfg, feedback_id=updated['id'])
         first = ops.delegate_create(self.conn, self.cfg, ctx, task_id=fb['scope_id'], title='Draft', goal='Draft', submit=False)
         again = ops.delegate_create(self.conn, self.cfg, ctx, task_id=fb['scope_id'], title='Draft', goal='Draft', submit=False)
         self.assertTrue(again['duplicate'])
@@ -380,7 +383,9 @@ class NotionAudit(notion_cases.NotionCase):
         self.assertIsNotNone(ops.incomplete_reason(fbs[long]))
         self.fake.truncate_markdown_at = None
         self.sync.pull('task')
-        self.assertIsNone(ops.incomplete_reason(feedback.get(self.conn, fbs[long]['id'])))
+        self.assertEqual(feedback.get(self.conn, fbs[long]['id'])['status'], 'superseded')
+        current = [f for f in feedback.pending(self.conn) if f['source_id'] == long][0]
+        self.assertIsNone(ops.incomplete_reason(current))
 
     def test_d_dirty_scans_preserve_uncertain_write_and_human_change(self):
         task = self.local_task()
@@ -618,6 +623,7 @@ class SourceAndStoreAudit(WorkspaceCase):
             ('/threads/selected', {'messages': [gmail_message('one', 'selected', sender='trusted@example.edu'),
                                                 gmail_message('reply', 'selected', sender='other@example.org')]}),
             ('/threads/other', {'messages': [gmail_message('two', 'other', sender='trusted@example.edu')]}),
+            ('/threads/excluded', {'messages': [gmail_message('three', 'excluded')]}),
         ])
         source = GmailSource(account='test', address='me@example.edu', token=lambda: 'fake', my_addresses=[],
                              query='from:trusted@example.edu', http=http, max_threads_per_run=1)
@@ -625,9 +631,13 @@ class SourceAndStoreAudit(WorkspaceCase):
         self.assertFalse(first.complete)
         self.assertEqual(len(first.items), 2, 'a nonmatching reply remains full thread context')
         second = source.fetch(first.cursor)
-        self.assertTrue(second.complete)
         self.assertEqual(len(second.items), 1)
-        self.assertEqual(len(calls), 2, 'a persisted selected backlog does not rerun mailbox search')
+        third = source.fetch(second.cursor)
+        self.assertTrue(third.complete)
+        self.assertFalse(third.items)
+        self.assertEqual(sum('rfc822msgid:one@x.org' in q for q in calls), 1,
+                         'selected thread is not searched again while backlog continues')
+        self.assertTrue(all('rfc822msgid:' in q for q in calls))
 
     def test_r04_slack_old_parent_promotion_preserves_processed_batch_and_evidence(self):
         from todo_manager.sources.slack import SlackSource

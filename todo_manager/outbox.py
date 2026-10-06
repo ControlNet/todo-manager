@@ -49,7 +49,7 @@ def enqueue(conn: sqlite3.Connection, *, target: str, op: str, dedupe_key: str, 
         next_attempt = now
         if supersede_prefix:
             delayed = conn.execute("SELECT MAX(next_attempt_at) FROM outbox WHERE target=? AND op=? "
-                                   "AND entity_id=? AND status IN ('failed','uncertain','in_flight')",
+                                   "AND entity_id=? AND status IN ('pending','failed','uncertain','in_flight')",
                                    (target, op, entity_id)).fetchone()[0]
             if delayed and delayed > next_attempt:
                 next_attempt = delayed

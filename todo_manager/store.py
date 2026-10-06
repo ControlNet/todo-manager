@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from . import clock, ids
-from .db import dumps, loads, row_dict, tx
+from .db import dumps, loads, row_dict, tx, get_meta, set_meta
 
 TASK_STATUSES = ("todo", "in_progress", "waiting", "decision", "review", "done", "cancelled")
 OPEN_STATUSES = ("todo", "in_progress", "waiting", "decision", "review")
@@ -258,14 +258,31 @@ def update_task(conn: sqlite3.Connection, task_id: str, changes: dict[str, Any],
                 changes.pop("next_actor", None)
         _keep_state_pair(current, meta, changes, result, actor=actor, based_on_version=based_on_version,
                          override_human=override_human)
+        pending_key = 'notion.project_pending:' + task_id
+        pending_relation = conn.execute('SELECT value FROM meta WHERE key=?', (pending_key,)).fetchone()
+        force_fields = set()
+        if pending_relation and 'project_id' in changes:
+            # An unresolved remote choice is still a human choice, even if the local
+            # column is NULL. Apply the same protection before cancelling that intent.
+            request = loads(pending_relation['value'], {})
+            intent_meta = {**meta, 'project_id': {'by': request.get('actor', 'human'), 'v': request.get('version', current['version'])}}
+            why = _protected(intent_meta, 'project_id', actor=actor, based_on_version=based_on_version,
+                             override_human=override_human)
+            if why:
+                result.rejected['project_id'] = why
+                changes.pop('project_id')
+            else:
+                force_fields.add('project_id')
         result2 = _apply_field_changes(conn, "tasks", "task", current, changes, actor=actor,
                                        origin=origin, cause_ref=cause_ref,
                                        based_on_version=based_on_version,
-                                       override_human=override_human)
+                                       override_human=override_human, force_fields=force_fields)
         result2.rejected.update(result.rejected)
         applied = result2.applied
-        if 'project_id' in applied and origin != 'notion':
-            conn.execute('DELETE FROM meta WHERE key=?', ('notion.project_pending:' + task_id,))
+        if 'project_id' in applied and pending_relation:
+            conn.execute('DELETE FROM meta WHERE key=?', (pending_key,))
+            add_history(conn, 'task', task_id, result2.version, actor, origin, cause_ref,
+                        {'pending_project': [loads(pending_relation['value'], {}), None]})
         if "status" in applied:
             new_status = applied["status"]
             if new_status in CLOSED_STATUSES and current["status"] not in CLOSED_STATUSES:
@@ -273,6 +290,28 @@ def update_task(conn: sqlite3.Connection, task_id: str, changes: dict[str, Any],
             elif new_status not in CLOSED_STATUSES and current["status"] in CLOSED_STATUSES:
                 conn.execute("UPDATE tasks SET closed_at=NULL, closed_reason=NULL WHERE id=?", (task_id,))
     return result2
+
+
+def defer_notion_project(conn: sqlite3.Connection, task_id: str, page_id: str, *, actor: str,
+                        cause_ref: str) -> None:
+    """Persist a verified remote relation whose Project has not been imported yet.
+
+    It is an edit even when the local foreign key cannot change. Version it now so
+    an agent that read the Task before the remote choice cannot revoke that choice.
+    """
+    key = 'notion.project_pending:' + task_id
+    with tx(conn):
+        previous = loads(get_meta(conn, key), {})
+        if previous.get('page_id') == page_id:
+            return
+        current = dict(conn.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone())
+        result = _apply_field_changes(conn, 'tasks', 'task', current, {'project_id': current['project_id']},
+                                      actor=actor, origin='notion', cause_ref=cause_ref, based_on_version=None,
+                                      override_human=False, force_fields={'project_id'})
+        request = {'page_id': page_id, 'actor': actor, 'version': result.version}
+        set_meta(conn, key, dumps(request))
+        add_history(conn, 'task', task_id, result.version, actor, 'notion', cause_ref,
+                    {'pending_project': [previous or None, request]})
 
 
 def set_closed_reason(conn: sqlite3.Connection, task_id: str, reason: str) -> None:
@@ -315,12 +354,13 @@ def _keep_state_pair(current: dict[str, Any], meta: dict[str, Any], changes: dic
 
 def _apply_field_changes(conn: sqlite3.Connection, table: str, entity: str, current: dict[str, Any],
                          changes: dict[str, Any], *, actor: str, origin: str, cause_ref: str | None,
-                         based_on_version: int | None, override_human: bool) -> WriteResult:
+                         based_on_version: int | None, override_human: bool,
+                         force_fields: set[str] | None = None) -> WriteResult:
     meta = loads(current["field_meta"], {})
     result = WriteResult(current["id"], current["version"])
     to_apply: dict[str, Any] = {}
     for name, value in changes.items():
-        if current.get(name) == value:
+        if current.get(name) == value and name not in (force_fields or ()):
             continue
         why = _protected(meta, name, actor=actor, based_on_version=based_on_version, override_human=override_human)
         if why:

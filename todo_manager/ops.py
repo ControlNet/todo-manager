@@ -115,7 +115,7 @@ def page_body_unread(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any]) 
     """A box interpretation is built from our last read of the page body; while a later edit
     (pulled, not read yet) may have replaced or withdrawn its text, it is neither claimed nor
     applied: the next covering read supersedes it or keeps it."""
-    if fb["kind"] != "body_edit":
+    if fb["kind"] not in ("body_edit", "new_task"):
         return False
     row = conn.execute("SELECT last_edited_time, last_edited_by, body_read_at FROM notion_pages WHERE page_id=?",
                        ((fb["payload"] or {}).get("page_id"),)).fetchone()

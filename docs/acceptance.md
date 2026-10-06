@@ -14,7 +14,9 @@ Legend for the evidence column:
 
 Run everything: `python3 -B -m unittest discover -s tests -t .`.
 
-The current [R01–R16 reliability acceptance report](reliability-audit-2026-10-06.md) records
+The current [F01–F05 freshness and recovery report](freshness-reliability-2026-10-06.md) records
+feedback revision, project-intent protection, transitive backoff and Gmail request-cost evidence.
+The preceding [R01–R16 reliability acceptance report](reliability-audit-2026-10-06.md) records
 red-baseline evidence, cross-chains A–H, native contracts and exact split test commands.
 Commit-stamped audit tables later in this document describe historical implementations;
 removed classifier/coverage rules in those tables are not current guarantees.

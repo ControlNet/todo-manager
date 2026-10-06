@@ -297,7 +297,7 @@ class NotionSync:
 
     def body_unread(self, row: dict[str, Any]) -> bool:
         """The page's last edit (not ours) may not be reflected in our last body read."""
-        incomplete = self.conn.execute("SELECT 1 FROM feedback WHERE source_id=? AND kind='new_task' "
+        incomplete = self.conn.execute("SELECT 1 FROM feedback WHERE source_id=? AND kind IN ('new_task','body_edit') "
                                        "AND status='pending' AND (json_extract(payload,'$.complete')=0 "
                                        "OR json_extract(payload,'$.truncated')=1)", (row['page_id'],)).fetchone()
         return bool(incomplete) or body.edit_unread(row["last_edited_time"], row["last_edited_by"], row["body_read_at"],
@@ -313,7 +313,7 @@ class NotionSync:
             rows = [self.page_row(r["page_id"]) for r in self.conn.execute(
                 "SELECT page_id FROM notion_pages WHERE entity_type='task' AND trashed=0 AND last_edited_time IS NOT NULL"
                 " AND (last_edited_by IS NOT ? OR EXISTS (SELECT 1 FROM feedback f WHERE f.source_id=notion_pages.page_id "
-                "AND f.kind='new_task' AND f.status='pending' AND (json_extract(f.payload,'$.complete')=0 "
+                "AND f.kind IN ('new_task','body_edit') AND f.status='pending' AND (json_extract(f.payload,'$.complete')=0 "
                 "OR json_extract(f.payload,'$.truncated')=1)))", (self.state.bot_user_id,))]
             due = sorted((r for r in rows if self.body_unread(r)), key=lambda r: r["body_read_at"] or "")
             for row in due[:max(0, limit)]:
@@ -344,13 +344,23 @@ class NotionSync:
         trust = {"author": editor, "author_is_user": self.is_user(editor)}
         found: list[str] = []
         with tx(self.conn):
-            for pending in self.conn.execute("SELECT id,payload FROM feedback WHERE kind='new_task' "
-                                             "AND source_id=? AND status='pending'", (row['page_id'],)):
+            # Replace the identity, not only the payload: a claimed old interpretation
+            # must fail at the transactional command boundary, including after restart.
+            for pending in self.conn.execute("SELECT * FROM feedback WHERE kind='new_task' "
+                                             "AND source_id=? AND status='pending'", (row['page_id'],)).fetchall():
                 payload = loads(pending['payload'], {})
-                if payload.get('complete') is False or payload.get('truncated'):
-                    payload.update(body=notes if row['managed_hash'] else markdown.strip(), complete=not bool(doc.get('truncated')),
-                                   truncated=bool(doc.get('truncated')))
-                    self.conn.execute('UPDATE feedback SET payload=? WHERE id=?', (dumps(payload), pending['id']))
+                updated = {**payload, 'body': notes if row['managed_hash'] else markdown.strip(),
+                           'complete': not bool(doc.get('truncated')), 'truncated': bool(doc.get('truncated'))}
+                if updated != payload:
+                    fid, _ = feedback.record(
+                        self.conn, origin='notion_page', source_id=row['page_id'],
+                        source_version=f"created:after:{pending['id']}", text=pending['text'],
+                        scope_type='task', scope_id=task['id'], kind='new_task', payload=updated,
+                        author=editor if editor != self.state.bot_user_id else pending['author'],
+                        author_is_user=trust['author_is_user'] if editor != self.state.bot_user_id
+                        else bool(pending['author_is_user']))
+                    feedback.supersede(self.conn, [pending['id']], 'creation body reread', by=fid)
+                    found.append('new_task')
             if region is not None and row["managed_hash"]:
                 found += self._box_read(row, task, region, self.render_body(task), bool(doc.get("truncated")), trust)
             # The user's own notes are context (shown with the Task to the agent and in the card),
@@ -359,7 +369,7 @@ class NotionSync:
             revision = row["notes_revision"] + (1 if row["notes_hash"] is not None and notes_fp != row["notes_hash"]
                                                 else 0)
             self.conn.execute("UPDATE notion_pages SET body_read_at=?, notes_hash=?, notes_text=?, notes_revision=?"
-                              " WHERE page_id=?", (clock.iso(), notes_fp, notes, revision, row["page_id"]))
+                              " WHERE page_id=?", (None if doc.get("truncated") else clock.iso(), notes_fp, notes, revision, row["page_id"]))
         return found
 
     def _box_read(self, row: dict[str, Any], task: dict[str, Any], region: str, rendered: str, truncated: bool,
@@ -367,7 +377,12 @@ class NotionSync:
         """One read of the managed box. A changed box is a new revision: an edit replaces the
         pending interpretation of the previous one; a box back to what we wrote withdraws it."""
         fp = body.content_fingerprint(region)
-        if fp == (row["box_seen_hash"] or row["managed_hash"]):
+        pending = self.conn.execute("SELECT payload FROM feedback WHERE source_id=? AND kind='body_edit' "
+                                    "AND status='pending' ORDER BY rowid DESC LIMIT 1", (row['page_id'],)).fetchone()
+        previous = loads(pending['payload'], {}) if pending else {}
+        incomplete = previous.get('complete') is False or bool(previous.get('truncated'))
+        completeness_changed = pending is not None and incomplete != truncated
+        if fp == (row["box_seen_hash"] or row["managed_hash"]) and not completeness_changed:
             return []                                    # unchanged since the last read
         revision = row["box_revision"] + 1
         self.conn.execute("UPDATE notion_pages SET box_revision=?, box_seen_hash=? WHERE page_id=?",
@@ -382,7 +397,7 @@ class NotionSync:
                                  source_version=f"body:r{revision}:{fp}", text=region, scope_type="task",
                                  scope_id=task["id"], kind="body_edit", **trust,
                                  payload={"page_id": row["page_id"], "region": region, "would_render": rendered,
-                                          "revision": revision, "truncated": truncated, "complete": True})
+                                          "revision": revision, "truncated": truncated, "complete": not truncated})
         feedback.supersede_older(self.conn, "notion_page", row["page_id"], fid, kind="body_edit",
                                  reason="replaced by a later edit of the box")
         return ["body_edit"]
@@ -483,7 +498,7 @@ class NotionSync:
                                         focus=bool(values.get("focus")), notion_page_id=None, **fields)
                 self._link("task", tid, page, {**current, "tm_id": None})
                 if values.get('project_id') and project_id is None:
-                    set_meta(self.conn, 'notion.project_pending:' + tid, dumps({'page_id': values['project_id'], 'actor': actor}))
+                    store.defer_notion_project(self.conn, tid, values['project_id'], actor=actor, cause_ref=page['id'])
                 if page_text is not None:   # the body is in this feedback; later edits are diffed against it
                     self.conn.execute("UPDATE notion_pages SET body_read_at=?, notes_hash=?, notes_text=?"
                                       " WHERE page_id=?",
@@ -541,17 +556,14 @@ class NotionSync:
                 local['project_id'] = resolved
         author = (page.get("last_edited_by") or {}).get("id")
         with tx(self.conn):
-            if relation_changed:
-                if pending_relation:
-                    set_meta(self.conn, 'notion.project_pending:' + task_id, dumps({'page_id': pending_relation}))
-                else:
-                    self.conn.execute('DELETE FROM meta WHERE key=?', ('notion.project_pending:' + task_id,))
             before = store.get_task(self.conn, task_id)
             fid, created = feedback.record(
                 self.conn, origin="notion_property", source_id=page["id"],
                 source_version=f"{page.get('last_edited_time')}:{_h(dumps(changed))}", text=None,
                 scope_type="task", scope_id=task_id, kind="property_edit", author=author, author_is_user=True,
                 payload={"changes": changed, "before": {k: seen.get(k) for k in changed}}, status="applied")
+            if pending_relation:
+                store.defer_notion_project(self.conn, task_id, pending_relation, actor='human', cause_ref=fid)
             result = store.update_task(self.conn, task_id, local, actor="human", origin="notion", cause_ref=fid)
             after = store.get_task(self.conn, task_id)
             followups = self._edit_semantics(before, after, changed, fid, author)

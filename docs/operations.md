@@ -243,10 +243,11 @@ board as it is.
 
 ## Upgrading an existing workspace (schema migrations)
 
-This version uses schema 9. It adds child-card associations and event history, message target
-cards, pinned notification routes and predecessor delegation/delivery IDs. Existing task,
+This version uses schema 10. Schema 9 added child-card associations and event history, message
+target cards, pinned notification routes and predecessor delegation/delivery IDs. Schema 10
+adds persistent child-discovery synchronization responsibility. F01–F05 makes no schema change. Existing task,
 feedback, approval and uncertain-action data remain intact. The first database open creates
-`backups/pre-schema-v9-from-v<old>-<stamp>.sqlite` using SQLite online backup before migration.
+`backups/pre-schema-v10-from-v<old>-<stamp>.sqlite` using SQLite online backup before migration.
 
 Schema <=7 rule records are preserved verbatim in `rules-archive.md`; no natural-language
 classification or automatic memory import occurs. Existing schema-8 AGENTS customizations are
@@ -261,7 +262,7 @@ skill, AGENTS, conflict/baseline files, installation record and business databas
 restore never restores a whole Hermes profile.
 
 To roll back, first pause the two jobs and close all Todo Manager database connections. The
-old code refuses a schema-9 database. Preserve the new database and use the pre-schema backup
+code supporting only schema 9 refuses a schema-10 database. Preserve the new database and use the pre-schema backup
 with the old code; post-upgrade changes remain only in the preserved database/export. Restore
 old owned framework files from the matching framework backup, and replay each saved cron prompt
 through native `hermes cron edit`. Do not copy jobs.json into place or overwrite native memory.
@@ -354,3 +355,19 @@ projection, including agent-work display changes. Old uncertain writes reconcile
 pushes. A readable `TM effect` marker identifies new Notion comments; legacy or invisible
 uncertain comments need manual inspection, not blind resend. Notification registration health
 is separate from delivery: a `history_gap` observation never means historical events were sent.
+
+## F01–F05 reliability patch
+
+See [the repair and verification record](freshness-reliability-2026-10-06.md) before upgrading.
+Pending creation/body feedback can be superseded after a complete reread: inspect its successor
+and interpret again; a claimed old ID cannot authorize a new mutation. Successful identical
+operations remain idempotent. Clearing an unresolved project is now a versioned user edit,
+even when the local project column was already NULL. Dirty scans preserve inherited per-entity
+Retry-After through repeated projection changes.
+
+Gmail selection and body reads can span ticks. Keep their cursor; `complete:false` is remaining
+read work, not evidence that nothing matches. Persistent API errors remain health failures.
+The patch accepts old selected-thread queues, but old code cannot resume the new `scan` cursor.
+Use an explicit workspace backup before upgrading even though schema remains 10; rollback
+requires considering the preserved source checkpoint, not just database schema compatibility.
+No production switch or Hermes global-setting change is performed by these fixes.

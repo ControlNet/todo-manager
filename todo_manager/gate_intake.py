@@ -76,9 +76,22 @@ def fetch_all(conn: sqlite3.Connection, adapters: list[Any], budget: float = FET
             continue
         cursor = previous = (row or {}).get("cursor")
         try:
+            set_deadline = getattr(adapter, 'set_fetch_deadline', None)
+            if set_deadline:
+                set_deadline(started + budget)
             result = adapter.fetch(cursor, (row or {}).get("last_success_at"))
         except SourceError as exc:
-            record_fetch_error(conn, adapter.name, adapter.scope, str(exc))
+            with tx(conn):
+                if exc.checkpoint is not None:
+                    persist_fetch(conn, adapter.name, exc.checkpoint)
+                    cursor = exc.checkpoint.cursor
+                    # A checkpoint is progress, not a healthy completed read. Preserve
+                    # failure history so a persistent outage still reaches health.
+                    conn.execute('UPDATE cursors SET last_success_at=?, consecutive_failures=? '
+                                 'WHERE source=? AND scope=?',
+                                 ((row or {}).get('last_success_at'), (row or {}).get('consecutive_failures', 0),
+                                  adapter.name, adapter.scope))
+                record_fetch_error(conn, adapter.name, adapter.scope, str(exc))
             report[key] = {"error": str(exc)[:200]}
             if exc.retry_after:
                 throttled.add(adapter.name)

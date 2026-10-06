@@ -1,6 +1,7 @@
 # Known limitations
 
 Concrete, current limitations of this version. See [acceptance.md](acceptance.md) and the
+[F01–F05 freshness report](freshness-reliability-2026-10-06.md) and
 [R01–R16 reliability report](reliability-audit-2026-10-06.md) for verification and recovery boundaries.
 
 ## Hermes-native round (2026-10-06)
@@ -59,7 +60,9 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
   holds the feedback as unverified and checks again next run. `FakeNotion` implements this
   assumption; it is unverified on the real API until the first production setup.
 - **The Notion `truncated` flag of page markdown** is imitated by `FakeNotion`
-  (`truncate_markdown_at`); a body the real API cuts marks the item INCOMPLETE (clarify only).
+  (`truncate_markdown_at`); a body the real API cuts blocks business mutation. Automatic
+  complete rereads replace incomplete feedback with a new identity, even when the managed
+  region text is unchanged. Read/diagnose/clarify remain available while incomplete.
 - **Hermes transitions are checked, not atomic.** The bridge checks the Kanban event an answer,
   acceptance or revision is bound to and then calls the Hermes state function; they cannot share
   one transaction (Hermes' `write_txn` refuses nesting and `complete_task` & co. must not run
@@ -73,9 +76,12 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
   without recent activity are polled round-robin (default hourly), so a comment there can take
   up to that long to be noticed.
 - Page body edits wait for a covering read. Notion stamps edits to the minute, so a read in
-  the same minute as the last edit does not count as covering it: a body edit or page note is
+  the same minute as the last edit does not count as covering it: a body edit or pending creation request is
   claimed (and a claimed one applied) only after a read past the end of that minute, i.e. up to a
   minute plus one gate interval later. Stamps with seconds are taken as precise to the second.
+  This also protects pending creation requests; changed body or completeness supersedes the
+  old feedback identity, including claimed contexts. Later notes after that creation request
+  is resolved remain context, not automatic instructions.
 - A Notion comment whose discussion was resolved before its feedback was handled is **held**:
   not handed to the model, not applied, listed by `health` and announced once. It stays held
   until you reopen the discussion (then it is handled) or delete the comment (then it is
@@ -245,3 +251,15 @@ authority or reopening the entry. Passive notification repair still cannot repla
   still define the supported source scope.
 - Daily commit reads may span ticks. Skipped, failed or paginated reads do not consume the
   day's completion marker or model attempt, and completed repos do not need rereading that day.
+
+## Gmail incremental selection cost
+
+History candidates are filtered by Gmail's configured query AND Message-IDs from all messages
+in each changed thread, then selected threads are hydrated. Typical cost scales with changed
+threads, not mailbox size. Missing/unusual Message-ID headers require a resumable broad-search
+fallback; a nonmatch can still scan the matching mailbox across ticks. Each adapter call has
+40-request / 180-second checking limits and also receives the remaining gate budget. An HTTP
+read timeout/token helper is not a hard process deadline. Pagination, text-part hydration and
+failed-request checkpoints retain the old history watermark until complete. Live Gmail search
+behaviour is not newly validated by this round; see the linked cost tests and official API
+references in the F01–F05 report.
