@@ -568,9 +568,25 @@ def context_problems(cfg: config.Config) -> list[str]:
     return out
 
 
+def cron_diagnostics(cfg: config.Config, active: bool) -> dict[str, Any]:
+    from .kanban import BridgeKanban, KanbanError
+    p = Paths.from_config(cfg)
+    bridge = BridgeKanban('todo-manager', cfg.get('kanban.hermes_python', '~/.hermes/hermes-agent/venv/bin/python'),
+                          cfg.get('kanban.hermes_repo', '~/.hermes/hermes-agent'), str(p.hermes_home))
+    try:
+        return bridge.call('cron_health', mutating=False, active=active)
+    except (KanbanError, OSError) as exc:
+        return {'state': 'unavailable', 'write_probe': False, 'writable': None, 'skipped_runs': None,
+                'problems': [], 'warnings': [f'native cron inspection unavailable: {exc}; use hermes cron status in this profile']}
+
+
 def status(cfg: config.Config) -> dict[str, Any]:
     p = Paths.from_config(cfg)
-    jobs = load_jobs(p)
+    jobs_error = None
+    try:
+        jobs = load_jobs(p)
+    except (OSError, ValueError) as exc:
+        jobs, jobs_error = {}, f'cannot read native cron jobs {p.jobs_file}: {type(exc).__name__}'
     files = {}
     for entry in JOBS:
         current = _read(p.script(entry))
@@ -588,10 +604,13 @@ def status(cfg: config.Config) -> dict[str, Any]:
     result = {"user_files": user_files, "conflicts": p.store.conflicts(), "files": files,
             "jobs": {n: {k: j.get(k) for k in ("id", "state", "enabled", "skills", "script", "workdir", "last_status",
                                                 "last_run_at", "last_error", "next_run_at")} for n, j in jobs.items()},
-            "missing_jobs": [s["name"] for s in JOBS.values() if s["name"] not in jobs]}
+            "jobs_read_error": jobs_error,
+            "missing_jobs": [] if jobs_error else [s["name"] for s in JOBS.values() if s["name"] not in jobs]}
 
     missing = result['missing_jobs']
     problems = [f'automation incomplete: missing job {name}; run todo-manager install' for name in missing]
+    if jobs_error:
+        problems.append(jobs_error + '; inspect Hermes cron status; no repair was attempted')
     for path, state in files.items():
         if state != 'current':
             problems.append(f'automation incomplete: {state} file {path}; run todo-manager install')
@@ -607,7 +626,13 @@ def status(cfg: config.Config) -> dict[str, Any]:
             paused.append(name)
         elif state == 'paused' or job.get('paused_at'):
             problems.append(f'automation inconsistent: job {name} is enabled with pause markers; inspect Hermes cron')
-    installed = bool(load_manifest(p)) or bool(jobs) or any(files[str(p.script(e))] != 'missing' for e in JOBS)
+    native = cron_diagnostics(cfg, active=any(j.get('enabled', True) and j.get('state') not in
+                                            ('paused', 'completed', 'error') for j in jobs.values())) if jobs or jobs_error else {
+        'state': 'not_installed', 'write_probe': False, 'writable': None, 'skipped_runs': None,
+        'problems': [], 'warnings': []}
+    result['cron_health'] = native
+    problems.extend(native['problems'])
+    installed = bool(load_manifest(p)) or bool(jobs) or bool(jobs_error) or any(files[str(p.script(e))] != 'missing' for e in JOBS)
     result.update(problems=problems, paused_jobs=paused,
                   state=('not_installed' if not installed else 'partial' if problems else
                          'paused' if len(paused) == len(JOBS) else 'partially_paused' if paused else 'ready'))

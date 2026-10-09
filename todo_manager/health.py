@@ -140,7 +140,12 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
     if cfg.get('kanban.enabled'):
         from .kanban import BridgeKanban, KanbanError
         try:
-            if not cfg.get('kanban.assignee') or not BridgeKanban.from_config(cfg).profile_valid(cfg.get('kanban.assignee')):
+            bridge = BridgeKanban.from_config(cfg)
+            readiness = bridge.ping()
+            out['kanban_board'] = readiness
+            if readiness.get('missing') or not readiness.get('board_available', readiness.get('board_exists')):
+                out['conventions_problems'].append(f"kanban board unavailable: {readiness.get('reason') or readiness.get('missing') or 'missing board'}")
+            if not cfg.get('kanban.assignee') or not bridge.profile_valid(cfg.get('kanban.assignee')):
                 out['conventions_problems'].append('kanban.assignee: configure a valid dispatchable Hermes profile; delegations are not ready')
         except (KanbanError, OSError) as exc:
             out['conventions_problems'].append(f'kanban.assignee: could not validate profile: {exc}')

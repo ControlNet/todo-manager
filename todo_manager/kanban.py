@@ -125,6 +125,9 @@ class BridgeKanban:
             env["HERMES_HOME"] = str(Path(self.hermes_home).expanduser())
         env.pop("PYTHONPATH", None)
         env.pop("PYTHONHOME", None)
+        if op == 'cron_health':
+            env.pop('_HERMES_CRON_WORKER_BOOT', None)
+            env['HERMES_DISABLE_LAZY_INSTALLS'] = '1'
         payload = json.dumps({"op": op, "board": self.board, "hermes_repo": self.repo, **args})
         try:
             proc = subprocess.run([self.python, str(BRIDGE)], input=payload, capture_output=True, text=True,
@@ -233,6 +236,11 @@ class FakeKanban:
         self.subscriptions = {}
         self.ownership = {}
         self._n = 0
+
+    def ping(self) -> dict[str, Any]:
+        self._maybe_fail('ping')
+        return {'missing': [], 'board_exists': True, 'board_state': 'available',
+                'board_available': True, 'reason': None}
 
     def _event(self, card_id: str, kind: str, payload: dict | None = None, run_id: int | None = None) -> None:
         self.events.append({"id": len(self.events) + 1, "task_id": card_id, "kind": kind, "payload": payload or {},

@@ -121,6 +121,14 @@ def main() -> None:
     for var in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID",
                 "HERMES_KANBAN_WORKSPACES_ROOT", "HERMES_KANBAN_ATTACHMENTS_ROOT"):
         os.environ.pop(var, None)
+    # Load the sibling explicitly: the bridge removes its directory to avoid shadowing Hermes modules.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('tm_hermes_diagnostics', os.path.join(here, 'hermes_diagnostics.py'))
+    diagnostics = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(diagnostics)
+    if req['op'] == 'cron_health':
+        from hermes_constants import get_hermes_home
+        return _out({'ok': True, 'result': diagnostics.cron_health(str(get_hermes_home()), bool(req.get('active')))})
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect_closing
 
@@ -142,8 +150,7 @@ def main() -> None:
         names = ["create_task", "get_task", "block_task", "unblock_task", "specify_triage_task", "reopen_review_task",
                  "complete_task", "archive_task", "add_comment", "list_events", "list_runs", "list_comments_after"]
         return _out({"ok": True, "result": {"missing": [n for n in names if not hasattr(kb, n)],
-                                            "board_exists": kb.board_exists(board),
-                                            "db_path": str(kb.kanban_db_path(board=board))}})
+                                            **diagnostics.board_status(kb, board)}})
     if op == "context_status":
         from pathlib import Path
         from agent.prompt_builder import discover_context_files
@@ -179,6 +186,10 @@ def main() -> None:
         return _out({"ok": True, "result": {"review_dispatch": bool(review_dispatch_enabled()),
                                             "auto_decompose": bool(auto_decompose),
                                             "memory_flags": list(get_builtin_memory_store_flags(load_config() or {}))}})
+    board_info = diagnostics.board_status(kb, board)
+    if board_info['board_state'] not in ('available', 'missing'):
+        return _out({'ok': False, 'error': board_info['reason'],
+                     'code': 'BOARD_' + board_info['board_state'].upper()})
     if op == "create_board":
         meta = kb.create_board(board, name=req.get("name"), description=req.get("description"))
         return _out({"ok": True, "result": meta})

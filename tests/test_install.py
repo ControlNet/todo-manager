@@ -36,7 +36,8 @@ class WorldKanban(FakeKanban):
         self.settings_values = {"review_dispatch": True, "auto_decompose": False}   # Hermes' defaults differ
 
     def ping(self):
-        return {"board_exists": self.board_exists}
+        return {"board_exists": self.board_exists, "board_available": self.board_exists,
+                "board_state": "available" if self.board_exists else "missing", "missing": []}
 
     def create_board(self, name, description):
         self.board_exists = True

@@ -194,3 +194,37 @@ python3 -B -m todo_manager.migrate_legacy --help
 It retains fetch/propose/apply and the reviewed proposal workflow. It is not hidden under another
 core CLI namespace. Old rule archival and schema upgrades remain installation responsibilities;
 personal preferences still use native Hermes memory.
+
+## Native readiness diagnostics
+
+Kanban readiness distinguishes a live board from an archived tombstone, missing board metadata,
+and invalid metadata. A remaining database without board metadata is reported as orphaned.
+Installation never adopts or recreates archived/orphaned/invalid boards automatically; inspect
+recovery in Hermes. Existing configuration stays intact, and unsubmitted delegations retain
+pending state and the lookup failure for a later retry. Health exposes `kanban_board` in detailed
+output and includes unavailable configured boards in `problems`. The bridge returns stable
+`BOARD_ARCHIVED`, `BOARD_ORPHANED` or `BOARD_INVALID` errors before attempting a connection.
+
+`installation.cron_health` supplements job presence with native ticker heartbeat/success/error
+readers and storage observations. Explicit file/directory permission problems, read-only mounts,
+zero free space and active ticker failures affect the health exit code. Low disk space and absent
+heartbeats are warnings; absent heartbeat means unknown liveness, not proof of a dead gateway.
+Paused jobs do not cause stale-ticker alarms. An unreadable jobs file is reported without repair;
+its jobs are unknown, not classified as missing.
+
+This inspection intentionally does **not** invoke native `probe_report` or `load_jobs`: the former
+writes probe files, and the latter can repair native state. Native imports are isolated in a scratch
+home before read APIs are scoped to the inspected profile. `write_probe=false`, `writable=null`
+and `skipped_runs=null` are explicit: filesystem observations do not prove quota/write availability
+under the scheduler's user, and the gateway's in-memory skipped-run count is not available from a
+new process. A missing native diagnostic API or interpreter is reported as `unavailable` with a
+warning, rather than fabricated success. Installation `ready` describes installed assets, not a
+proof that the scheduler will fire. Inspect the native diagnostic in the appropriate profile when
+an actual write probe is needed:
+
+```bash
+hermes cron status
+```
+
+That native command may write temporary probe files and perform Hermes' own store repairs;
+Todo Manager's `status` does neither. No new scheduler, retry service or cron is involved.

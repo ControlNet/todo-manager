@@ -525,7 +525,12 @@ class Install:
         try:
             kb = self.env.kanban_client(cfg)
             values = kb.settings()
-            exists = bool((kb.ping() or {}).get("board_exists"))
+            readiness = kb.ping() or {}
+            exists = bool(readiness.get('board_exists'))
+            if readiness.get('missing') or readiness.get('board_state') in ('archived', 'orphaned', 'invalid'):
+                self.note('kanban', f"board {board!r} unavailable: {readiness.get('reason') or readiness.get('missing')}; "
+                          "delegations stay local; inspect Hermes board recovery")
+                return
         except (KanbanError, OSError) as exc:
             self.note("kanban", f"Hermes Kanban is not reachable ({exc}); delegations stay local")
             return
