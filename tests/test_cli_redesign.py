@@ -211,6 +211,75 @@ class InstallationContracts(InstallCase):
         return {'email.scope': 'work', 'slack.scope': 'direct_messages', 'github.enabled': 'yes',
                 'notion.home_page': '1', 'kanban.assignee': 'default', 'automation.start': 'yes'}
 
+    def install_disabled(self):
+        self.page()
+        answers = {**self.choices(), 'kanban.assignee': 'disabled'}
+        return complete(self.home, install.AnswerPrompter(answers, {'all'}, output=lambda _: None),
+                        self.world.env(), confirmed=True)
+
+    def test_disabled_install_requires_explicit_choice_even_with_yes(self):
+        self.install_disabled()
+        before = (self.home / 'config.toml').read_bytes()
+        with self.assertRaises(install.NeedsAnswer) as caught:
+            complete(self.home, install.AnswerPrompter({}, {'all'}, output=lambda _: None),
+                     self.world.env(), confirmed=True)
+        self.assertEqual(caught.exception.key, 'kanban.enabled')
+        self.assertEqual(before, (self.home / 'config.toml').read_bytes())
+        self.assertFalse(self.world.kanban.board_exists)
+
+    def test_disabled_install_can_enable_and_create_board(self):
+        self.install_disabled()
+        result = complete(self.home, install.AnswerPrompter(
+            {'kanban.enabled': 'yes', 'kanban.assignee': 'default'}, {'all'}, output=lambda _: None),
+            self.world.env(), confirmed=True)
+        from todo_manager import config
+        cfg = config.load(self.home)
+        self.assertTrue(cfg.get('kanban.enabled'))
+        self.assertEqual(cfg.get('kanban.assignee'), 'default')
+        self.assertTrue(self.world.kanban.board_exists)
+        self.assertIn('create the Hermes board', ' '.join(result['changes']))
+
+    def test_enabling_disabled_install_still_needs_confirmation(self):
+        self.install_disabled()
+        before = (self.home / 'config.toml').read_bytes()
+        user = install.AnswerPrompter({'kanban.enabled': 'yes', 'kanban.assignee': 'default'},
+                                     declined={'install'}, output=lambda _: None)
+        result = complete(self.home, user, self.world.env())
+        self.assertEqual(result['status'], 'declined')
+        self.assertEqual(before, (self.home / 'config.toml').read_bytes())
+        self.assertFalse(self.world.kanban.board_exists)
+
+    def test_enabling_disabled_install_rejects_invalid_profile_without_writes(self):
+        self.install_disabled()
+        self.world.kanban.valid_profiles = set()
+        before = (self.home / 'config.toml').read_bytes()
+        with self.assertRaises(install.NeedsAnswer) as caught:
+            complete(self.home, install.AnswerPrompter(
+                {'kanban.enabled': 'yes', 'kanban.assignee': 'default'}, {'all'}, output=lambda _: None),
+                self.world.env(), confirmed=True)
+        self.assertEqual(caught.exception.key, 'kanban.assignee')
+        self.assertEqual(before, (self.home / 'config.toml').read_bytes())
+        self.assertFalse(self.world.kanban.board_exists)
+
+    def test_disabled_install_can_stay_disabled_and_explain_status(self):
+        self.install_disabled()
+        result = complete(self.home, install.AnswerPrompter(
+            {'kanban.enabled': 'no'}, {'all'}, output=lambda _: None), self.world.env(), confirmed=True)
+        self.assertFalse(self.world.kanban.board_exists)
+        self.assertIn('Agent delegation is disabled', ' '.join(result['changes']))
+        from unittest.mock import patch
+        with patch('todo_manager.hermes_install.status', return_value={
+                'paused_jobs': [], 'problems': [], 'state': 'ready'}), \
+                patch('todo_manager.health.report', return_value={}), \
+                patch('todo_manager.health.problem_items', return_value=[]):
+            code, text = invoke(self.home, 'status', '--json')
+            self.assertEqual(code, 0, text)
+            summary = json.loads(text)['delegation_config']
+            self.assertFalse(summary['enabled'])
+            self.assertIn('todo-manager install', summary['message'])
+            code, text = invoke(self.home, 'status')
+            self.assertIn('Agent delegation is disabled', text)
+
     def test_confirmed_install_still_requires_choices_and_writes_nothing(self):
         self.page()
         with self.assertRaises(install.NeedsAnswer):

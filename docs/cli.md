@@ -228,3 +228,17 @@ hermes cron status
 
 That native command may write temporary probe files and perform Hermes' own store repairs;
 Todo Manager's `status` does neither. No new scheduler, retry service or cron is involved.
+
+## Optional Agent delegation during installation
+
+When `kanban.enabled=false` is explicitly configured, rerunning `install` now asks whether to
+configure and enable Agent delegation or keep it disabled. Choosing enable reuses the existing
+execution-profile validation and board creation preview; no setting or board is changed before
+the combined installation confirmation. Noninteractive installs must answer `kanban.enabled`
+with `yes` or `no`; `--yes` does not supply this choice. Enabled installations retain their
+profile and are not prompted again unless profile validation fails.
+
+Both text and JSON `status` include `delegation_config` with enabled, board, assignee and an
+explanation. Disabled delegation points to `todo-manager install`; it is informational, not a
+health failure. Source intake and Notion management can run without Agent delegation. Enabling
+is a configuration choice, not proof of worker readiness; existing health checks still apply.

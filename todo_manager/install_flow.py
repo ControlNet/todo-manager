@@ -70,7 +70,13 @@ class Preview(install.Install):
 
     def step_kanban(self):
         if self.explicit('kanban').get('enabled') is False:
-            return
+            [answer] = self.prompter.choose(
+                'kanban.enabled',
+                'Agent delegation is disabled. Source intake and Notion management remain available. Enable delegation?',
+                [('yes', 'Configure and enable Agent delegation'), ('no', 'Keep delegation disabled')], check=yes_no)
+            if answer == 'no':
+                return
+            self.write({'kanban.enabled': True})
         kb = self.env.kanban_client(self.cfg())
         if not kb.profile_valid(self.cfg().get('kanban.assignee')):
             def valid(picked):
@@ -150,7 +156,9 @@ def complete(home, user, env=None, language=None, confirmed=False):
                                        if discovered.get(f'slack.{k}'))
                 if discovered.get('slack.enabled') else 'Slack reading disabled',
             'GitHub participating notifications enabled' if discovered.get('github.enabled') else 'GitHub reading disabled',
-            f"execution profile: {discovered.get('kanban.assignee') or 'none'}; delegations enabled={discovered.get('kanban.enabled')}",
+            f"Agent delegation enabled; execution profile: {discovered.get('kanban.assignee') or 'none'}"
+                if discovered.get('kanban.enabled') else
+                'Agent delegation is disabled; source intake and Notion management remain available. Run todo-manager install to configure it.',
         ]
         changes.extend(choices.changes)
         # Installation does not resume previously paused jobs. New jobs need a real choice.

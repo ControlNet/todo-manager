@@ -353,6 +353,15 @@ def cmd_status(args: argparse.Namespace) -> int:
                      "deferred": conn.execute("SELECT COUNT(*) FROM batches WHERE state='mature' AND not_before > ?",
                                               (clock.iso(),)).fetchone()[0]},
         "feedback_pending": conn.execute("SELECT COUNT(*) FROM feedback WHERE status='pending'").fetchone()[0],
+        "delegation_config": {
+            "enabled": bool(cfg.get('kanban.enabled')),
+            "board": cfg.get('kanban.board'),
+            "assignee": cfg.get('kanban.assignee') or None,
+            "message": ('Agent delegation is enabled; see health problems for readiness.'
+                        if cfg.get('kanban.enabled') else
+                        'Agent delegation is disabled; source intake and Notion management remain available. '
+                        'Run todo-manager install to configure it.'),
+        },
         "agent_work": {r["status"]: r["n"] for r in conn.execute(
             "SELECT status, COUNT(*) AS n FROM delegations GROUP BY status")},
         "last_runs": {entry: [{k: r[k] for k in ("id", "started_at", "status", "wake_reasons")}
