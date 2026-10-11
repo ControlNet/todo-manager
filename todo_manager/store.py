@@ -28,7 +28,7 @@ NEXT_ACTORS = ("me", "agent", "external")
 TASK_FIELDS = (
     "title", "project_id", "status", "next_actor", "waiting_on", "responsibility", "next_step",
     "done_criteria", "summary", "due_date", "due_basis", "follow_up_date", "snooze_until",
-    "focus", "focus_reason", "change_note",
+    "focus", "focus_reason", "change_note", "decision",
 )
 PROJECT_FIELDS = (
     "title", "domain", "status", "goal", "next_step", "blockers", "recent_activity",
@@ -171,6 +171,8 @@ def create_task(conn: sqlite3.Connection, title: str, *, origin: str, actor: str
     if not title or not title.strip():
         raise StoreError("task title is required")
     status, next_actor = normalize_state(status, next_actor)
+    if fields.get("decision") not in (None, "pending", "agree", "decline", "agent"):
+        raise StoreError("invalid decision")
     if project_id and conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone() is None:
         raise StoreError(f"project {project_id} not found")
     tid = task_id or ids.new_id("task")
@@ -231,6 +233,8 @@ def update_task(conn: sqlite3.Connection, task_id: str, changes: dict[str, Any],
             raise StoreError(f"task {task_id} not found")
         current = dict(row)
         changes = dict(changes)
+        if changes.get("decision") not in (None, "pending", "agree", "decline", "agent"):
+            raise StoreError("invalid decision")
         if "focus" in changes:
             changes["focus"] = 1 if changes["focus"] else 0
         if "project_id" in changes and changes["project_id"]:

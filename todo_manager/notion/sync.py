@@ -198,6 +198,7 @@ class NotionSync:
     def task_values(self, task: dict[str, Any]) -> dict[str, Any]:
         values = {f: task.get(f) for f in ("title", "status", "next_actor", "next_step", "waiting_on", "due_date",
                                            "follow_up_date", "snooze_until", "change_note")}
+        values["decision"] = task.get("decision") or ("pending" if task["status"] == "decision" else None)
         values["focus"] = bool(task.get("focus"))
         values["project_id"] = self.project_page_id(task.get("project_id"))
         pending = loads(get_meta(self.conn, 'notion.project_pending:' + task['id']), {})
@@ -490,7 +491,7 @@ class NotionSync:
                 self.problems.append(f"body of new page {page['id']}: {exc}")
                 page_text = None
             fields = {k: values.get(k) for k in ("next_step", "waiting_on", "due_date", "follow_up_date",
-                                                 "snooze_until") if values.get(k)}
+                                                 "snooze_until", "decision") if values.get(k)}
             with tx(self.conn):
                 tid = store.create_task(self.conn, title, origin="notion", actor=actor, cause_ref=page["id"],
                                         project_id=project_id, status=values.get("status") or "todo",
@@ -544,6 +545,12 @@ class NotionSync:
                          seen: dict[str, Any], current: dict[str, Any]) -> None:
         task_id = row["entity_id"]
         local = dict(changed)
+        choice = local.get('decision') if 'decision' in local else None
+        if choice == 'agent':
+            existing = store.get_task(self.conn, task_id)
+            desired_status = local.get('status', existing['status'])
+            if existing['status'] not in store.CLOSED_STATUSES and desired_status not in store.CLOSED_STATUSES:
+                local.update(status=desired_status if desired_status in ('todo', 'in_progress') else 'todo', next_actor='agent')
         relation_changed = 'project_id' in local
         pending_relation = None
         if relation_changed:
@@ -559,14 +566,44 @@ class NotionSync:
             before = store.get_task(self.conn, task_id)
             fid, created = feedback.record(
                 self.conn, origin="notion_property", source_id=page["id"],
-                source_version=f"{page.get('last_edited_time')}:{_h(dumps(changed))}", text=None,
+                source_version=f"{page.get('last_edited_time')}:{_h(dumps(changed))}:v{before['version']}", text=None,
                 scope_type="task", scope_id=task_id, kind="property_edit", author=author, author_is_user=True,
                 payload={"changes": changed, "before": {k: seen.get(k) for k in changed}}, status="applied")
             if pending_relation:
                 store.defer_notion_project(self.conn, task_id, pending_relation, actor='human', cause_ref=fid)
             result = store.update_task(self.conn, task_id, local, actor="human", origin="notion", cause_ref=fid)
             after = store.get_task(self.conn, task_id)
-            followups = self._edit_semantics(before, after, changed, fid, author)
+            if 'decision' in changed:
+                stale = [r['id'] for r in self.conn.execute(
+                    "SELECT id,payload FROM feedback WHERE scope_type='task' AND scope_id=? AND status='pending'",
+                    (task_id,)) if loads(r['payload'], {}).get('decision_event')]
+                feedback.supersede(self.conn, stale, 'replaced by a newer decision', by=fid)
+                # Preserve creation-body completeness while replacing the entire
+                # interpretation identity when its original choice is withdrawn.
+                creations = self.conn.execute(
+                    "SELECT * FROM feedback WHERE scope_type='task' AND scope_id=? "
+                    "AND kind='new_task' AND status='pending'", (task_id,)).fetchall()
+                for creation in creations:
+                    payload = loads(creation['payload'], {})
+                    payload['values'] = {**payload.get('values', {}), **local}
+                    replacement, _ = feedback.record(
+                        self.conn, origin='notion_page', source_id=creation['source_id'],
+                        source_version='creation-choice:' + fid, text=creation['text'],
+                        scope_type='task', scope_id=task_id, kind='new_task', payload=payload,
+                        author=author, author_is_user=True)
+                    feedback.supersede(self.conn, [creation['id']], 'creation choice changed', by=replacement)
+                if not creations and after['status'] not in store.CLOSED_STATUSES and choice in ('agree', 'decline', 'agent'):
+                    feedback.record(self.conn, origin='notion_property', source_id=page['id'],
+                                    source_version='decision:' + fid, scope_type='task', scope_id=task_id,
+                                    kind='delegate_request' if choice == 'agent' else 'decision_choice',
+                                    author=author, author_is_user=True,
+                                    text=self.t('sync.decision_choice', choice=schema.label('decision', choice, self.state.language)),
+                                    payload={'decision_event': fid, 'decision': choice, 'task_version': after['version']})
+            # A board drag already queues the same durable delegation request.
+            semantic_changes = dict(changed)
+            if choice == 'agent':
+                semantic_changes.pop('next_actor', None)
+            followups = self._edit_semantics(before, after, semantic_changes, fid, author)
             feedback.resolve(self.conn, fid, "applied", {"applied": result.applied, "rejected": result.rejected,
                                                          "followups": followups})
             self._seen(page["id"], current, page)

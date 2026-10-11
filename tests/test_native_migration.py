@@ -86,7 +86,7 @@ class ReviewMigrationTests(unittest.TestCase):
             self.assertEqual(current.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
             self.assertFalse(current.execute('PRAGMA foreign_key_check').fetchall())
             current.close()
-            backups = list((Path(temp) / 'backups').glob('pre-schema-v10-from-v9-*.sqlite'))
+            backups = list((Path(temp) / 'backups').glob(f'pre-schema-v{db.SCHEMA_VERSION}-from-v9-*.sqlite'))
             self.assertEqual(len(backups), 1)
             backup = sqlite3.connect(f'file:{backups[0]}?mode=ro', uri=True)
             rollback = sqlite3.connect(Path(temp) / 'rollback.sqlite')

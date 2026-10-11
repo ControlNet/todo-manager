@@ -442,6 +442,14 @@ class Install:
         """Views created by an earlier version: those still as created are updated (confirmed
         first); those the user changed are left alone and reported."""
         from .notion import setup
+        from .notion import decision_migration
+        migration = decision_migration.plan(conn, client)
+        if migration:
+            if not self.prompter.confirm('notion_decision_ui', 'Upgrade Notion decision board and task visibility:', migration['changes']):
+                self.note('notion', 'decision UI migration not applied; run install to complete it')
+                return
+            saved = decision_migration.apply(conn, client, self.cfg().home)
+            self.note('notion', f'decision board migrated; original schema/view snapshot: {saved}')
         updates, notes = setup.view_upgrades(conn, client)
         for text in notes:
             self.note("notion", text)

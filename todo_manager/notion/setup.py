@@ -19,7 +19,7 @@ from . import body, schema
 from .client import NotionClient, NotionError
 from .sync import HOME_MARKER, save_state
 
-SECTIONS = ("focus", "projects", "waiting", "decision", "agent", "review", "recent")
+SECTIONS = ("all", "focus", "projects", "waiting", "decision", "agent", "review", "recent")
 # 2: card events no longer set a Task to "review": "Agent work" shows every state and "To
 # review" also lists agent work waiting for the user (question, delivery).
 # 3: actionable agent work is visible in focus without a focus flag or near deadline.
@@ -47,6 +47,11 @@ def view_specs(p: dict[str, str], q: dict[str, str], lang: str | None = None) ->
 
     needs_user = [schema.label("delegation", v, lang) for v in delegation.NEEDS_USER_LABELS]
     return [
+        spec("all", "task", "table",
+             filter={"and": [{"property": p["status"], "select": {"does_not_equal": task("done")}},
+                             {"property": p["status"], "select": {"does_not_equal": task("cancelled")}}]},
+             sorts=[{"property": p["due_date"], "direction": "ascending"}],
+             configuration={"type": "table", "properties": cols(p, ["title", "status", "next_step", "due_date", "next_actor", "decision"])}),
         # Worth pushing now: focus, or due within a week / overdue; snoozed tasks are hidden.
         spec("focus", "task", "table",
              filter={"and": [{"property": p["status"], "select": {"equals": task("todo", "in_progress")}},
@@ -69,10 +74,13 @@ def view_specs(p: dict[str, str], q: dict[str, str], lang: str | None = None) ->
              sorts=[{"property": p["follow_up_date"], "direction": "ascending"}],
              configuration={"type": "table", "properties": cols(p, ["title", "waiting_on", "follow_up_date",
                                                                     "next_step", "project_id"])}),
-        spec("decision", "task", "list",
-             filter={"property": p["status"], "select": {"equals": task("decision")}},
+        spec("decision", "task", "board",
+             filter={"or": [{"property": p["status"], "select": {"equals": task("decision")}},
+                            {"property": p["decision"], "select": {"is_not_empty": True}}]},
              sorts=[{"property": p["due_date"], "direction": "ascending"}],
-             configuration={"type": "list", "properties": cols(p, ["next_step", "due_date", "project_id"])}),
+             configuration={"type": "board", "group_by": {"type": "select", "property_id": p["decision"],
+                                                          "sort": {"type": "manual"}, "hide_empty_groups": False},
+                            "properties": cols(p, ["title", "next_step", "due_date", "project_id"])}),
         spec("agent", "task", "board",
              filter={"property": p["delegation"], "select": {"is_not_empty": True}},
              configuration={"type": "board", "group_by": {"type": "select", "property_id": p["delegation"],
@@ -250,7 +258,7 @@ def apply(conn: sqlite3.Connection, client: NotionClient, parent_page_id: str | 
         save_state(conn, views=views)
     done["views"] = views
     if fresh:
-        save_state(conn, views_version=str(VIEWS_VERSION))
+        save_state(conn, views_version=str(VIEWS_VERSION), decision_ui_version="1")
     if not get_meta(conn, "notion.setup_at"):
         save_state(conn, setup_at=clock.iso())
     return done

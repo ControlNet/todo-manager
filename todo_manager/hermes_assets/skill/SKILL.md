@@ -66,3 +66,8 @@ Operations: install, status --details, config, pause, resume, sync, export, rest
 Pause/resume affect cron jobs only. Ordinary resume never releases recovery holds.
 Explicit resume --release-recovery-hold --yes requires the user to have checked the native
 board/uncertain effects; it releases that hold only, not cron or unrelated human blocks.
+
+Notion decision-board choices arrive as feedback. Use the supplied --feedback ID; newer
+choices supersede pending older ones. Decision is separate from task status. A drag is not
+external-action approval: delegate create with external actions and delegate approve/answer
+with approval reject this provenance. The feedback prompt defines the interpretation workflow.

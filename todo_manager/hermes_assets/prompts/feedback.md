@@ -53,3 +53,16 @@ agent work and recent thread.
 For next_actor=Agent, understand the goal and create or reuse the active delegation. Generate concrete context, deliverables, authorization, material references and human-input requirements. The command attaches the machine protocol. A ready card with a valid profile can dispatch directly; decomposition is optional. Workers do not inherit this conversation. Include essential constraints in each child when using native orchestration; child outputs are partial until the root integrates them. Native review is execution review, not human acceptance. For done cards create a follow-up delegation on the same Task, referring to the old delivery; do not apply review reopen to done. Never claim an entire graph stopped merely because its root was archived.
 
 Pause/resume and requirement messages target the entry card, not every child. Report that scope when descendants exist. Cancellation only archives the entry and descendants proven by creator/decomposition lineage; dependency edges are not ownership. Report unconfirmed termination truthfully.
+
+## Notion decision board
+
+A `decision_choice` feedback records a verified user's drag to Agree or Decline. The
+Decision property is independent of task status. Apply the concrete choice in task context,
+update the next step/status as appropriate, and resolve the feedback with a concise reply.
+Agree does not mean the work is already done. Neither column authorizes external sends,
+RSVPs, purchases or approvals. Clarify only when the choice cannot be interpreted safely.
+Assign to Agent arrives as `delegate_request`; create/reuse agent work under the existing
+rules above. If delegation is disabled, explain that `todo-manager install` enables it.
+Returning to Pending withdraws only unprocessed decision feedback; it does not undo an
+external effect or automatically cancel active work. Never replay an unknown external action.
+Use `--feedback` for these writes so superseded choices cannot be acted on by an older turn.

@@ -242,3 +242,30 @@ Both text and JSON `status` include `delegation_config` with enabled, board, ass
 explanation. Disabled delegation points to `todo-manager install`; it is informational, not a
 health failure. Source intake and Notion management can run without Agent delegation. Enabling
 is a configuration choice, not proof of worker readiness; existing health checks still apply.
+
+## Decision board and Notion installation upgrade
+
+`install` now upgrades an existing project-owned Decisions list into a four-column board:
+Pending, Agree, Decline, Assign to Agent. Notion cannot change a view's layout type through
+PATCH, so installation creates a board as the first tab of the same database container and
+preserves the old list. It also adds All open tasks to the home page. Existing custom decision
+filters/layouts stop migration for review rather than being overwritten.
+
+The editable Decision select is separate from Task status. Agree/Decline queue version-bound
+feedback for Hermes; neither completes a task automatically or approves external actions.
+Assign to Agent queues the existing delegation workflow. Pending withdraws unprocessed choices;
+it cannot undo an already performed external effect or cancel running workers. Replies/results
+continue using the task's existing Notion discussion. Unknown authors cannot delegate by dragging.
+
+Schema 11 adds nullable `tasks.decision`, covered by normal history/human-edit protection.
+Before upgrading, drain active runs and pause the two Todo cron jobs. Installation takes its
+normal SQLite/config safety backup and saves the original remote schema/view snapshot under
+`backups/notion-decision-ui-v1.json` before remote changes. Re-running installation reconciles
+created views and never overwrites nonempty decisions. If a create times out without a discoverable
+result, installation stops with an uncertain outcome instead of blindly repeating it.
+
+For rollback, pause/drain again and restore the pre-install backup with the compatible checkout.
+The original Notion list remains available as another tab; the new property/board can remain
+unused without deleting tasks. Remote UI changes are not reverted by SQLite restore. The saved
+schema/view JSON records the original structure for a deliberate native Notion restoration.
+No credentials or private task text belong in source-control migration reports.

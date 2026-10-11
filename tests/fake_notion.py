@@ -281,9 +281,18 @@ class FakeNotion:
             return copy.deepcopy(self._add_comment(page_id, body["markdown"], body.get("discussion_id"), BOT_ID))
         if parts[0] == "blocks" and parts[2] == "children":
             return {"results": [], "has_more": False, "next_cursor": None}
+        if parts == ["views"] and method == "GET":
+            views = [v for v in self.views.values() if
+                     (not params.get('data_source_id') or v.get('data_source_id') == params['data_source_id']) and
+                     (not params.get('database_id') or (v.get('parent') or {}).get('database_id') == params['database_id'])]
+            return self._paged([{'object':'view', 'id':v['id']} for v in views], params)
         if parts == ["views"] and method == "POST":
+            position = (body.get('create_database') or {}).get('position')
+            if position and position.get('type') != 'after_block':
+                raise HttpError(400, 'linked database position must be after_block', body={'code':'validation_error'})
             vid = self._id("view")
-            self.views[vid] = {"object": "view", "id": vid, **body}
+            self.views[vid] = {"object": "view", "id": vid, **body,
+                               'parent': {'type': 'database_id', 'database_id': body.get('database_id') or self._id('linked-db')}}
             return copy.deepcopy(self.views[vid])
         if parts[0] == "views" and len(parts) == 2 and method in ("GET", "PATCH"):
             if parts[1] not in self.views:

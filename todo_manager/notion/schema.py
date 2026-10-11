@@ -21,6 +21,7 @@ from .client import plain_text, rich_text
 
 # Option colours by local value (the option NAMES come from the language catalogs).
 COLORS = {
+    "decision": {"pending": "gray", "agree": "green", "decline": "red", "agent": "purple"},
     "task_status": {"todo": "default", "in_progress": "blue", "waiting": "yellow", "decision": "orange",
                     "review": "purple", "done": "green", "cancelled": "gray"},
     "next_actor": {"me": "blue", "agent": "purple", "external": "yellow"},
@@ -67,6 +68,7 @@ class Prop:
 
 TASK_PROPS: tuple[Prop, ...] = (
     Prop("task", "title", "title"),
+    Prop("task", "decision", "select", group="decision"),
     Prop("task", "status", "select", group="task_status"),
     Prop("task", "next_actor", "select", group="next_actor"),
     Prop("task", "project_id", "relation"),

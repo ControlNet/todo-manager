@@ -424,9 +424,15 @@ def feedback_item(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any], inc
     elif fb["kind"] == "new_task":
         out.append("The user created this task in Notion. Fill in what is missing (project, next_step,"
                    " responsibility, done_criteria); keep what the user wrote.")
+        if (p.get('values') or {}).get('decision'):
+            out.append("The task was created in decision column " + str(p['values']['decision']) +
+                       "; apply that choice, including delegation for agent, under the same decision-board constraints.")
         if p.get("body"):
             out.append("Page body:")
             out.append(material(p["body"], item_chars(cfg), more))
+    elif fb["kind"] == "decision_choice":
+        out.append("The user dragged the decision card to " + str(p.get("decision")) +
+                   ". Interpret this choice for the current task; do not treat agreement as task completion or external-action approval.")
     elif fb["kind"] == "delegate_request":
         out.append("The user set the task's next actor to Agent: start agent work with a concrete goal and"
                    " deliverable when the task makes it clear, otherwise clarify with one question.")

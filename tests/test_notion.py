@@ -50,7 +50,7 @@ class SetupTests(NotionCase):
     def test_setup_creates_structure_once(self):
         self.assertTrue(self.sync.state.ready)
         self.assertEqual(len(self.fake.databases), 2)
-        self.assertEqual(len(self.fake.views), 7)
+        self.assertEqual(len(self.fake.views), 8)
         names = set(self.fake.data_sources[self.tasks_ds]["properties"])
         self.assertTrue({"任务", "状态", "下一步由谁", "项目", "TM ID", "委派"} <= names)
         self.assertIn("任务", self.fake.data_sources[self.projects_ds]["properties"], "dual relation on projects")
@@ -70,7 +70,7 @@ class SetupTests(NotionCase):
             self.assertEqual(md.count("数据新鲜度"), 1)
             self.assertIn("我自己写的说明", md)
             self.assertEqual(load_state(conn, self.cfg).home_page_id, home)
-            self.assertEqual(len(self.fake.views), 14, "7 more views on the adopted page")
+            self.assertEqual(len(self.fake.views), 16, "8 more views on the adopted page")
         finally:
             conn.close()
 

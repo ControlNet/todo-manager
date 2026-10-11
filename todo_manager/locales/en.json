@@ -227,5 +227,13 @@
   "setup.view_update.focus": "Include agent work that needs your input even without focus or a near deadline.",
   "setup.view_kept.focus": "View {view} was customized and is kept; include {prop}: {states} manually if wanted.",
   "dlg.child_failure": "Child {card} needs attention after failure: {reason}",
-  "dlg.child_closed": "The root delegation has ended. This is residual work, not an invitation to resume it. Cancel the delegation to stop owned cards before creating a follow-up; replies cannot reopen this delegation."
+  "dlg.child_closed": "The root delegation has ended. This is residual work, not an invitation to resume it. Cancel the delegation to stop owned cards before creating a follow-up; replies cannot reopen this delegation.",
+  "notion.task.decision": "Decision",
+  "home.section.all": "📋 All open tasks",
+  "view.all": "All open tasks",
+  "sync.decision_choice": "The user chose {choice}. Interpret it in task context; the choice alone does not authorize sending messages or other external actions.",
+  "label.decision.pending": "Pending",
+  "label.decision.agree": "Agree",
+  "label.decision.decline": "Decline",
+  "label.decision.agent": "Assign to Agent"
 }

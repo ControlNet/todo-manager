@@ -227,5 +227,13 @@
   "setup.view_update.focus": "包含需要你处理的 Agent 工作，无需重点标记或近期截止日期。",
   "setup.view_kept.focus": "视图 {view} 已自定义，保留现状；如需显示待处理工作，请手动包含 {prop}：{states}。",
   "dlg.child_failure": "子卡 {card} 执行失败，需要处理：{reason}",
-  "dlg.child_closed": "入口委派已结束。这是尚未收尾的子卡，请先取消该委派以停止归属卡片，再创建后续委派；回复不能重新启动已结束的委派。"
+  "dlg.child_closed": "入口委派已结束。这是尚未收尾的子卡，请先取消该委派以停止归属卡片，再创建后续委派；回复不能重新启动已结束的委派。",
+  "notion.task.decision": "决定",
+  "home.section.all": "📋 全部未完成任务",
+  "view.all": "全部未完成任务",
+  "sync.decision_choice": "用户将决定设为「{choice}」。根据任务背景处理；该选择本身不授权发送消息或其他外部操作。",
+  "label.decision.pending": "待决定",
+  "label.decision.agree": "同意",
+  "label.decision.decline": "不同意",
+  "label.decision.agent": "交给 Agent"
 }

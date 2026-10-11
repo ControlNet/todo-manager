@@ -341,3 +341,22 @@ The patch accepts old selected-thread queues, but old code cannot resume the new
 Use an explicit workspace backup before upgrading even though schema remains 10; rollback
 requires considering the preserved source checkpoint, not just database schema compatibility.
 No production switch or Hermes global-setting change is performed by these fixes.
+
+## Installing the decision board (schema 11)
+
+Use the same `install` preview/confirmation as other upgrades. It migrates the Notion UI,
+not just the local database. Schema 11 adds the nullable Decision field; pre-schema and
+pre-install backups retain the old data. Remote schema/view snapshots are saved separately
+in `backups/notion-decision-ui-v1.json`. See the current [CLI migration contract](cli.md#decision-board-and-notion-installation-upgrade).
+
+```bash
+todo-manager pause
+# Let any already running intake/feedback finish before changing its checkout.
+todo-manager install --json
+# Review the returned concrete changes and use its confirmation command.
+todo-manager status --details
+todo-manager resume
+```
+
+Installation preserves the paused state. Resume only jobs that were running before maintenance.
+Do not edit a live launcher's checkout while a model turn is still using its previous schema.

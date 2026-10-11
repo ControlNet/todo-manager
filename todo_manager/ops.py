@@ -779,11 +779,18 @@ def _submit_now(conn: sqlite3.Connection, cfg: Config, delegation_id: str) -> st
         "; the feedback job retries"
 
 
+def _board_choice(ctx: Ctx) -> bool:
+    payload = (ctx.fb or {}).get('payload') or {}
+    return bool(payload.get('decision_event') or (payload.get('values') or {}).get('decision'))
+
+
 def delegate_create(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, *, task_id: str, title: str, goal: str,
                     context_text: str | None = None, constraints: str | None = None, deliverable: str | None = None,
                     done_criteria: str | None = None, allowed: list[str] | None = None,
                     parallel: bool = False, submit: bool = True) -> dict[str, Any]:
     _delegation_ctx(ctx)
+    if _board_choice(ctx) and delegation.external_actions(allowed or []):
+        raise OpError('INVALID', 'a decision-board drag does not authorize external actions; request explicit approval')
     if not (title or "").strip() or not (goal or "").strip():
         raise OpError("INVALID", "a task title and nonempty delegation brief are required")
     args = {"task": task_id, "title": title, "goal": goal, "context": context_text, "constraints": constraints,
@@ -871,6 +878,8 @@ def delegate_answer(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, delegation_
     ``approve``: external actions (``action[:detail]``) the user allows with this answer, e.g.
     when the worker asked whether it may send the email; each is used at most once."""
     _delegation_ctx(ctx)
+    if approve and _board_choice(ctx):
+        raise OpError('INVALID', 'a decision-board drag is not external-action approval')
     approvals = parse_approvals(approve)
     d = delegation.get(conn, delegation_id)
     if d is None:
@@ -929,6 +938,8 @@ def delegate_approve(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, delegation
                      action: str, detail: str | None = None) -> dict[str, Any]:
     """Approve an external action for a delivered version waiting for review."""
     _delegation_ctx(ctx)
+    if _board_choice(ctx):
+        raise OpError('INVALID', 'a decision-board drag is not external-action approval')
     names = delegation.action_names([action])
     if len(names) != 1 or not names <= delegation.KNOWN_ACTIONS:
         raise OpError("INVALID", f"unknown action {action!r}")

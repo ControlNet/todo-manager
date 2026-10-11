@@ -557,6 +557,7 @@ def cmd_install(args: argparse.Namespace) -> int:
             return _fail("INVALID", f"--answer expects key=value, got {pair!r}")
         answers[key.strip()] = value.strip()
     from .install_flow import complete
+    from .notion.client import NotionError
     interactive = sys.stdin.isatty() and not (answers or args.yes or args.json)
     prompter = install.TerminalPrompter() if interactive else install.AnswerPrompter(
         answers, {'all'} if args.yes else set(), output=lambda _: None)
@@ -575,7 +576,7 @@ def cmd_install(args: argparse.Namespace) -> int:
             result['answer_with'] = shlex.join([*command, '--answer', f'{exc.key}=VALUE'])
         _print(result)
         return EXIT_NEEDS_INPUT
-    except (install.InstallError, config_file.ConfigEditError) as exc:
+    except (install.InstallError, config_file.ConfigEditError, NotionError) as exc:
         return _fail('INSTALL', str(exc))
     except (EOFError, KeyboardInterrupt):
         return EXIT_NEEDS_INPUT

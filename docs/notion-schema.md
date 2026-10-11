@@ -1,27 +1,21 @@
 # Notion structure and mapping
 
 Todo Manager keeps its own SQLite database as the source of truth. Notion is the place where
-you read and edit: a home page with seven sections, a **Projects** database and a **Tasks**
-database. `todo-manager notion plan` prints exactly what `notion setup` will create.
+you read and edit: a home page with eight sections, a **Projects** database and a **Tasks**
+database. `todo-manager install --json` previews the structure and upgrades before confirmation.
 
 Names below are shown in English and Simplified Chinese. The language is chosen once at
-`notion setup` (from `language` in `config.toml`) and stored in the local state, so changing
+installation (from `language` in `config.toml`) and stored in the local state, so changing
 the configured language later does not rename anything in Notion; option names of every
 supported language are understood when reading your edits.
 
 ## Setup
 
-Notion internal integrations cannot create top-level workspace pages, so either:
-
-- create an empty page yourself, share it with the integration and run
-  `todo-manager notion setup --home-page <page id> --yes` (the page is adopted: a freshness box
-  and the seven section headings are inserted at the top; existing content stays below), or
-- `todo-manager notion setup --parent <page id> --yes` to create a new "Todo Manager" page
-  under a page that is already shared with the integration.
-
-Re-running setup only creates what is missing. Property ids, data source ids, view ids, the
-bot user id and the structure language are recorded in the `meta` table, so renaming a
-column or a view in Notion does not break the sync.
+Create an empty top-level page and connect the Notion integration, then run
+`todo-manager install`. The installer selects/adopts that page, previews the changes,
+and creates missing databases and views after confirmation. Re-running install upgrades
+owned structure and preserves custom content. Property/data-source/view IDs and structure
+language are retained, so renaming a column does not break synchronization.
 
 ## Tasks
 
@@ -29,6 +23,7 @@ column or a view in Notion does not break the sync.
 |---|---|---|---|---|
 | `title` | title | you | Task | 任务 |
 | `status` | select | you | Status | 状态 |
+| `decision` | select | you | Decision | 决定 |
 | `next_actor` | select | you | Next by | 下一步由谁 |
 | `project_id` | relation → Projects | you | Project | 项目 |
 | `next_step` | text | you | Next step | 下一步 |
@@ -109,10 +104,11 @@ Archived / 归档. The task relation adds a back-relation column "Tasks" / "任�
 
 | Section (en / zh-CN) | Linked view | Filter |
 |---|---|---|
+| 📋 All open tasks / 全部未完成任务 | table | every task except done/cancelled |
 | ⭐ Focus / 精选待办 | table | open (to do, in progress), next by me, not snoozed, and focus or due within a week |
 | 📁 Active projects / 活跃项目 | table | project status active |
 | ⏳ Waiting on others / 等待别人 | table | waiting, not snoozed; sorted by follow-up date |
-| 🤔 To decide / 需要决定 | list | status to decide |
+| 🤔 To decide / 需要决定 | board by decision | status to decide or a recorded decision |
 | 🤖 Agent queue / working / Agent 排队／处理中 | board by agent work | any agent work state |
 | ✅ To review / answer / 待我验收／待我补充 | table | status to review, or agent work needs my answer / to review / delivered |
 | 🕘 Recently done and notable changes / 最近完成与重要变化 | table | edited in the last week and closed, or with a change note |
@@ -164,3 +160,26 @@ by other people are information, not instructions.
 - Agent/program writes carry the version they were based on; a field you changed after that
   version is never overwritten. A task you closed is never reopened automatically; genuinely
   new responsibility becomes a linked follow-up task.
+
+## Decision-board update (schema 11)
+
+Setup and upgrades use `todo-manager install`; the older `notion setup/plan` commands in the
+historical description above are no longer public CLI entry points. The homepage now also
+contains **All open tasks / 全部未完成任务**, without focus or due-date filtering.
+
+**Decisions / 需要决定** is a board grouped by editable **Decision / 决定**:
+Pending / 待决定, Agree / 同意, Decline / 不同意, Assign to Agent / 交给 Agent.
+Cards expose the title, next step/background, due date and project. All four options remain
+visible even if empty. Cards with a recorded decision remain in the board when business status
+changes, so the selection does not disappear after processing. The all-open view excludes
+completed/cancelled tasks independently.
+
+The board records user intent; Hermes interprets the concrete consequence in the feedback
+round. It does not send RSVPs or other external messages just because a card was moved. A
+new choice supersedes unprocessed prior choices, including already claimed feedback, while
+committed operation retries still return their original result. Existing evidence, pages,
+comments, history and Kanban associations are retained.
+
+Pending creation requests also receive a new feedback identity when their decision changes;
+the original body completeness requirement remains in force. Cancelling a task in the same
+edit as assigning Agent takes precedence and does not create a delegation request.
