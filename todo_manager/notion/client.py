@@ -15,7 +15,7 @@ import time
 from typing import Any, Callable, Iterator
 
 from .. import config
-from ..net import HttpError, HttpTimeout, RateLimiter, request_json
+from ..net import HttpError, HttpTimeout, RateLimiter, multipart, request_json
 
 API = "https://api.notion.com/v1"
 DEFAULT_VERSION = "2026-03-11"
@@ -246,6 +246,19 @@ class NotionClient:
         if position:
             body["position"] = position
         return self.patch(f"/blocks/{block_id}/children", body)["results"]
+
+    def upload_file(self, filename: str, content_type: str, data: bytes) -> str:
+        """Upload one file (single part, up to 20 MB and the workspace's own limit); returns the
+        file upload id, to be attached within an hour. A lost response leaves an unattached
+        upload behind, which Notion archives: a retry uploads again."""
+        created = self.post("/file_uploads", {"filename": filename, "content_type": content_type})
+        self.request("POST", f"/file_uploads/{created['id']}/send",
+                     body=multipart({"file": (filename, content_type, data)}))
+        return created["id"]
+
+    def max_upload_bytes(self) -> int:
+        limits = ((self.me().get("bot") or {}).get("workspace_limits") or {})
+        return int(limits.get("max_file_upload_size_in_bytes") or 5 * 1024 * 1024)
 
     def update_block(self, block_id: str, body: dict[str, Any]) -> dict[str, Any]:
         return self.patch(f"/blocks/{block_id}", body)

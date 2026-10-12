@@ -140,6 +140,10 @@ def render(sections: dict[str, Any], marker: str = MARKER, lang: str | None = No
                      + (t("body.when", when=escape(delivery["when"])) if delivery.get("when") else ""))
         if delivery.get("summary"):
             lines.append("\t" + prose(delivery["summary"].strip()))
+        if delivery.get("page_url"):   # the full delivery and its files are on the version's own page
+            lines.append("\t" + _link(t("body.open_delivery", seq=delivery["seq"]), delivery["page_url"]))
+            lines.append("</callout>")
+            return "\n".join(lines)
         body = (delivery.get("body") or "").strip()
         if body and body != (delivery.get("summary") or "").strip():
             clipped = body[:MAX_DELIVERY_CHARS]

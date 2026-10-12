@@ -245,5 +245,14 @@
   "label.agent_progress.working": "处理中",
   "sync.agent_board_closed": "在 Agent 进展看板上选择了「{choice}」",
   "dlg.board_accept": "用户在 Agent 进展看板上验收通过",
-  "dlg.board_take_over": "用户在 Agent 进展看板上把任务设为自己的待办：停止工作"
+  "dlg.board_take_over": "用户在 Agent 进展看板上把任务设为自己的待办：停止工作",
+  "body.open_delivery": "打开交付 v{seq}：完整内容、预览和文件",
+  "dlv.notes": "交付说明",
+  "dlv.page_title": "交付 v{seq} · {when}",
+  "dlv.previews": "PDF 与图片",
+  "dlv.server_only": "仅保存在服务器上",
+  "dlv.text_cut": "（内容过长，只显示前 {n} 个字符；完整文件在服务器 {path}）",
+  "dlv.why.missing": "（文件缺失）",
+  "dlv.why.too_large": "（超过 Notion 上传上限，未上传）",
+  "dlv.why.too_long": "（文字过长，未放进本页）"
 }

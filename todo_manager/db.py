@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -619,6 +619,15 @@ ALTER TABLE delegations ADD COLUMN handled_at TEXT;
 """,
     14: """
 ALTER TABLE projects ADD COLUMN icon TEXT;
+""",
+    15: """
+CREATE TABLE delivery_pages (
+  delivery_id TEXT PRIMARY KEY REFERENCES deliveries(id),
+  page_id TEXT,
+  url TEXT,
+  created_at TEXT NOT NULL,
+  done_at TEXT
+);
 """,
 }
 

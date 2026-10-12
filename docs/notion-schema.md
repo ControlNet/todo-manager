@@ -163,6 +163,19 @@ If you delete the callout, it is re-inserted at the top. Only the visible text c
 Notion turning a bare URL or domain into a link is not one, and neither is changing only where a
 link inside the callout points.
 
+## Delivery pages
+
+Each delivered version of agent work gets its own page under the task page, "交付 v1 · 10-12 17:28"
+/ "Delivery v1 · …" (📦), so it can be read in Notion without access to the server. In order:
+the delivery summary and the agent's notes; under "PDF 与图片" / "PDFs and images" the PDFs and
+images, uploaded and shown inline (Word, PowerPoint, Excel and CSV as downloadable files); each
+text file (`.md` as formatted text, `.txt` and `.eml` in a copyable box); and "仅保存在服务器上"
+/ "Kept on the server only": the agent's own records (JSON, archives, patches), missing files,
+and files over the workspace upload limit (5 MB on a free workspace). The agent box on the task
+page shows the latest summary and links to the version's page. Pages are created by the
+`push_delivery` outbox op (state in `delivery_pages`, schema 15); existing deliveries get theirs
+on the next sync.
+
 ## Comments
 
 Your comments on task pages are feedback: supplements, answers to agent questions, revision

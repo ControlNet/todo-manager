@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any
 
 
@@ -25,6 +26,27 @@ class HttpError(Exception):
 
 class HttpTimeout(Exception):
     """Request sent but no response: outcome unknown for non-idempotent calls."""
+
+
+class RawBody:
+    """A request body sent as given (e.g. multipart/form-data), not as JSON."""
+
+    def __init__(self, data: bytes, content_type: str):
+        self.data = data
+        self.content_type = content_type
+
+
+def multipart(fields: dict[str, tuple[str, str, bytes]]) -> RawBody:
+    """``fields``: name -> (filename, content type, bytes)."""
+    boundary = f"todo-manager-{uuid.uuid4().hex}"
+    parts: list[bytes] = []
+    for name, (filename, content_type, data) in fields.items():
+        quoted = filename.replace("\\", "_").replace('"', "_").replace("\r", "_").replace("\n", "_")
+        parts += [f"--{boundary}\r\n".encode(),
+                  f'Content-Disposition: form-data; name="{name}"; filename="{quoted}"\r\n'.encode(),
+                  f"Content-Type: {content_type}\r\n\r\n".encode(), data, b"\r\n"]
+    parts.append(f"--{boundary}--\r\n".encode())
+    return RawBody(b"".join(parts), f"multipart/form-data; boundary={boundary}")
 
 
 class RateLimiter:
@@ -51,7 +73,10 @@ def request_json(method: str, url: str, *, headers: dict[str, str] | None = None
     all_headers = {"Accept": "application/json", "User-Agent": "todo-manager/0.1"}
     if headers:
         all_headers.update(headers)
-    if body is not None:
+    if isinstance(body, RawBody):
+        data = body.data
+        all_headers["Content-Type"] = body.content_type
+    elif body is not None:
         data = json.dumps(body).encode("utf-8")
         all_headers["Content-Type"] = "application/json"
     attempt = 0

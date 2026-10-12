@@ -59,6 +59,12 @@ def project_push(conn: sqlite3.Connection, project_id: str) -> str | None:
     return _push(conn, 'project', project_id)
 
 
+def delivery_push(conn: sqlite3.Connection, delivery_id: str, task_id: str) -> str | None:
+    """The page of one delivered version under its task page (``notion.delivery_pages``)."""
+    return outbox.enqueue(conn, target="notion", op="push_delivery", entity_type="task", entity_id=task_id,
+                          dedupe_key=f"delivery:{delivery_id}", payload={"delivery_id": delivery_id})
+
+
 def task_comment(conn: sqlite3.Connection, task_id: str, key: str, text: str, discussion_id: str | None = None) -> None:
     """A short bot comment on the task page. ``key`` identifies the logical comment once."""
     outbox.enqueue(conn, target="notion", op="comment", entity_type="task", entity_id=task_id,

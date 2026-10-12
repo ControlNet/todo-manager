@@ -245,5 +245,14 @@
   "label.agent_progress.working": "In progress",
   "sync.agent_board_closed": "Chosen on the Agent progress board: {choice}",
   "dlg.board_accept": "Accepted by the user on the Agent progress board",
-  "dlg.board_take_over": "The user took the task over on the Agent progress board: stop working"
+  "dlg.board_take_over": "The user took the task over on the Agent progress board: stop working",
+  "body.open_delivery": "Open delivery v{seq}: full text, previews and files",
+  "dlv.notes": "Delivery notes",
+  "dlv.page_title": "Delivery v{seq} · {when}",
+  "dlv.previews": "PDFs and images",
+  "dlv.server_only": "Kept on the server only",
+  "dlv.text_cut": "(Too long: the first {n} characters; the full file is on the server at {path})",
+  "dlv.why.missing": "(file missing)",
+  "dlv.why.too_large": "(over the Notion upload limit, not uploaded)",
+  "dlv.why.too_long": "(text too long for this page)"
 }

@@ -63,6 +63,8 @@ class FakeNotion:
         # Imitate Notion creating a board with its own grouping (the Status select, empty groups
         # hidden) instead of the requested one, as it did on 2026-10-12; a PATCH applies it.
         self.default_grouping: dict[str, Any] | None = None
+        self.uploads: dict[str, dict[str, Any]] = {}   # file upload id -> {filename, content_type, data, status}
+        self.max_upload_bytes: int | None = None        # bot workspace limit (None: not reported)
         self.people: list[dict[str, Any]] = [{"object": "user", "id": USER_ID, "type": "person", "name": "Me"}]
         self._ids = itertools.count(1)
 
@@ -267,8 +269,24 @@ class FakeNotion:
     def _dispatch(self, method: str, path: str, params: dict[str, Any], body: Any) -> Any:
         parts = path.strip("/").split("/")
         if parts == ["users", "me"]:
-            return {"object": "user", "id": BOT_ID, "type": "bot", "name": "Fake bot",
-                    "bot": {"workspace_name": "Test"}}
+            bot: dict[str, Any] = {"workspace_name": "Test"}
+            if self.max_upload_bytes is not None:
+                bot["workspace_limits"] = {"max_file_upload_size_in_bytes": self.max_upload_bytes}
+            return {"object": "user", "id": BOT_ID, "type": "bot", "name": "Fake bot", "bot": bot}
+        if parts == ["file_uploads"] and method == "POST":
+            uid = self._id("upload")
+            self.uploads[uid] = {"id": uid, "filename": body["filename"], "content_type": body["content_type"],
+                                 "status": "pending"}
+            return {"object": "file_upload", **copy.deepcopy(self.uploads[uid])}
+        if parts[0] == "file_uploads" and len(parts) == 3 and parts[2] == "send" and method == "POST":
+            upload = self.uploads[parts[1]]
+            data = body.data
+            if self.max_upload_bytes is not None and len(data) > self.max_upload_bytes + 1024:
+                raise HttpError(400, "file too large", body={"code": "validation_error"})
+            if b"Content-Type: " + upload["content_type"].encode() not in data:
+                raise HttpError(400, "content type mismatch", body={"code": "validation_error"})
+            upload.update(status="uploaded", data=data)
+            return {"object": "file_upload", **{k: v for k, v in upload.items() if k != "data"}}
         if parts == ["users"]:
             return {"results": copy.deepcopy(self.people) + [{"object": "user", "id": BOT_ID, "type": "bot",
                                                               "name": "Fake bot"}],
@@ -297,6 +315,15 @@ class FakeNotion:
             return {"object": "data_source", "id": ds["id"], "properties": copy.deepcopy(ds["properties"])}
         if parts == ["pages"] and method == "POST":
             page = self._new_page(body["parent"], body.get("properties", {}), body.get("markdown", ""), BOT_ID)
+            if body["parent"].get("type") == "page_id":
+                title = "".join(t["text"]["content"] for t in (body.get("properties", {}).get("title") or {}).get("title", []))
+                self.blocks.setdefault(body["parent"]["page_id"], []).append(
+                    {"object": "block", "id": page["id"], "type": "child_page", "child_page": {"title": title}})
+                # A child page's top-level blocks, roughly as Notion parses its Markdown.
+                self.blocks[page["id"]] = [
+                    self.block(f"heading_{len(m.group(1))}", m.group(2)) if m else self.block("paragraph", line)
+                    for line in (body.get("markdown") or "").splitlines() if line.strip()
+                    for m in [re.match(r"(#{1,3}) (.*)", line)]]
             if body.get("icon"):
                 page["icon"] = copy.deepcopy(body["icon"])
             if self.autolink:
@@ -341,6 +368,13 @@ class FakeNotion:
         if parts[0] == "blocks" and len(parts) == 3 and parts[2] == "children" and method == "PATCH":
             new = [self.block(c["type"], self.text(c) if "rich_text" in c[c["type"]] else "")
                    for c in body["children"]]
+            for block, child in zip(new, body["children"]):
+                upload = (child[child["type"]].get("file_upload") or {}).get("id")
+                if upload:
+                    if (self.uploads.get(upload) or {}).get("status") != "uploaded":
+                        raise HttpError(400, "file upload not uploaded", body={"code": "validation_error"})
+                    self.uploads[upload]["status"] = "attached"
+                    block[child["type"]] = copy.deepcopy(child[child["type"]])
             position = body.get("position") or {"type": "end"}
             if position["type"] == "after_block" and "id" not in (position.get("after_block") or {}):
                 # The real API: append-children positions are {type, after_block: {id}}, unlike views.

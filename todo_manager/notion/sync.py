@@ -52,7 +52,7 @@ from typing import Any
 from .. import clock, delegation, effects, feedback, health, i18n, ids, outbox, project_icons, store
 from ..config import Config
 from ..db import dumps, get_meta, loads, set_meta, tx
-from . import body, schema
+from . import body, delivery_pages, schema
 from .client import NotionClient, NotionError, NotionUncertain, plain_text
 
 TRASH_REASON = "sync.trash_reason"    # catalog keys
@@ -257,6 +257,7 @@ class NotionSync:
         if latest:
             sections["delivery"] = {"seq": latest["seq"], "summary": latest["summary"], "body": latest["body"],
                                     "artifacts": loads(latest["artifacts"], []), "card": latest["card"],
+                                    "page_url": delivery_pages.page_url(self.conn, latest["id"]),
                                     "when": clock.local_dt(tz, clock.parse(latest["received_at"])).strftime("%Y-%m-%d %H:%M")}
         return sections
 
@@ -1295,6 +1296,14 @@ class NotionSync:
             if row is None or row["last_seen_props"] != {**row["last_seen_props"], **target} or stale_body:
                 if effects.task_push(self.conn, t["id"]):
                     count += 1
+        # Each delivered version gets its page once the task page exists.
+        for d in self.conn.execute(
+                "SELECT v.id, g.task_id FROM deliveries v JOIN delegations g ON g.id=v.delegation_id"
+                " JOIN notion_pages n ON n.entity_type='task' AND n.entity_id=g.task_id AND n.trashed=0"
+                " WHERE v.kind='result' AND NOT EXISTS (SELECT 1 FROM delivery_pages p WHERE p.delivery_id=v.id"
+                " AND p.done_at IS NOT NULL) ORDER BY v.received_at").fetchall():
+            if effects.delivery_push(self.conn, d["id"], d["task_id"]):
+                count += 1
         for p in store.list_projects(self.conn, ("active", "paused", "done", "archived")):
             row = self.entity_row("project", p["id"])
             if row and row["trashed"]:
@@ -1307,7 +1316,15 @@ class NotionSync:
 
     def handlers(self) -> dict[tuple[str, str], Any]:
         return {("notion", "push_task"): self.push_task, ("notion", "push_project"): self.push_project,
-                ("notion", "comment"): self.post_comment}
+                ("notion", "comment"): self.post_comment, ("notion", "push_delivery"): self.push_delivery}
+
+    def push_delivery(self, item: dict[str, Any], reconcile: bool) -> Any:
+        return delivery_pages.push(self, item["payload"]["delivery_id"])
+
+    def max_upload_bytes(self) -> int:
+        if not hasattr(self, "_max_upload"):
+            self._max_upload = self.client.max_upload_bytes()
+        return self._max_upload
 
 
 def _select_raw_present(page: dict[str, Any], pmap: schema.PropertyMap, field: str) -> bool:
