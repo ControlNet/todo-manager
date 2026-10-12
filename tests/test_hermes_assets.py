@@ -55,3 +55,20 @@ class ScheduledRunAuthorityTests(unittest.TestCase):
         for name in ("workspace/AGENTS.md", "workspace/AGENTS.zh-CN.md"):
             self.assertIn("PREFERENCES.md", flat(name))
 
+
+
+class TaskRoutingTests(unittest.TestCase):
+    """The user decides who does a task: only in-person or offline work starts as a todo; the rest
+    is offered on the decision board, saying what an agent would deliver (user's choice, 2026-10-12)."""
+
+    def test_intake_offers_work_on_the_decision_board_unless_it_is_in_person(self):
+        text = flat("cron/intake.md")
+        self.assertIn("in person or offline", text)
+        self.assertIn("Agent can:", text)
+        self.assertIn("never ask the user whether something was done", text.lower())
+
+    def test_feedback_reads_agree_and_decline_on_an_offered_card(self):
+        text = flat("cron/feedback.md")
+        self.assertIn("Agent can:", text)
+        self.assertIn("Agree: the user does it", text)
+        self.assertIn("Decline: not needed", text)
