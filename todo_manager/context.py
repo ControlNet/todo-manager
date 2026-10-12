@@ -230,6 +230,12 @@ def intake(conn: sqlite3.Connection, cfg: Config, run_id: str, *, followups: lis
         out.append(f"- ... {len(projects) - MAX_PROJECTS} more: `todo-manager project list`")
     if not projects:
         out.append("(none yet)")
+    loose = conn.execute(f"SELECT count(*) FROM tasks WHERE project_id IS NULL"
+                         f" AND status IN ({','.join('?' * len(store.OPEN_STATUSES))})", store.OPEN_STATUSES).fetchone()[0]
+    if loose:
+        out.append(f"Open tasks without a project: {loose}. A task that belongs with others to one ongoing piece of work"
+                   f" goes into its project (create it when missing), with those others:"
+                   f" `todo-manager task update <task> --run {run_id} --based-on <version> --set project_id=<project>`")
 
     passed = set(due_passed or [])
     if followups:

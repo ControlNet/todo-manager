@@ -217,6 +217,20 @@ class DuePassedTests(Base):
         self.assertIn("due_passed:1", self.gate())
 
 
+class ProjectGroupingTests(Base):
+    def test_the_run_is_told_how_many_open_tasks_have_no_project(self):
+        pid = store.create_project(self.conn, "Example Workshop 2026", origin="cli", actor="human")
+        store.create_task(self.conn, "上传海报", origin="intake", project_id=pid)
+        store.create_task(self.conn, "录制五分钟报告", origin="intake")
+        store.create_task(self.conn, "设置海报 topic", origin="intake", status="decision")
+        store.create_task(self.conn, "已完成的事", origin="intake", status="done")
+        self.add_items(mail("m1", "t1", "Please send the poster thumbnail"))
+        clock.advance(minutes=61)
+        out = self.gate()
+        self.assertIn("Open tasks without a project: 2", out)
+        self.assertIn("--set project_id=", out)
+
+
 class AmbiguityTests(Base):
     """An unclear item that could cost the user becomes a decision with one question. How many
     questions a run may ask is the user's convention (AGENTS.md), not a check in code."""

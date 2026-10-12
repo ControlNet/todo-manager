@@ -145,6 +145,10 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
   the stored material), not when the PR is merged.
   GitHub notification emails read through Gmail do not say who opened the PR, so such an email
   still reaches the model (which can ignore it as `automated_notice`).
+- Projects are created and filled by the intake run, by judgement: when a new or updated task and
+  at least two related open tasks belong to one ongoing piece of work the user owns. The run is
+  told how many open tasks have no project. Tasks with no new material are grouped only when a
+  related item arrives, or by hand (`task update <task> --set project_id=<project>`).
 - Blacklist semantics: `slack.exclude` filters **discovery only**; a conversation listed
   explicitly in `slack.conversations` is read even if it is also excluded. A discovered
   conversation that leaves the list (blacklisted, left, or its kind turned off while discovery

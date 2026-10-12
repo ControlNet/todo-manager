@@ -52,8 +52,13 @@ every NEW item one outcome:
   the final `run done <run> --checked <task>...` when nothing changes today.
 - Commit digest: per project `todo-manager project update <project> --run <run> --set recent_activity="..."`,
   then add `--digest-reviewed` to the final settlement. Never one task per commit.
-- Projects: prefer an existing one (`todo-manager project list`); create one only for a
-  sustained stream of work the user owns.
+- Projects: a project is one ongoing piece of work the user owns (a paper or submission, a grant,
+  a system or lab service, a hiring round), not a kind of chore. When you create or update a task,
+  the search you make for duplicates also shows its related open tasks: if it and at least two
+  of them belong to one such piece of work, put them all in its project (an existing one first,
+  `todo-manager project list`; else `todo-manager project create --run <run> --title "..."`),
+  with `--project <project>` on a new task and `--set project_id=<project>` on each existing one.
+  Leave one-off matters and routine service (single reviews, admin requests) without a project.
 - A clipped item says how to read the rest (`todo-manager source show <item>`); read it when the
   visible part does not settle the decision.
 - Finish once with `todo-manager run done <run> [--checked <task>...] [--digest-reviewed]`, including all confirmations together, and one short line on what changed. Items without an
