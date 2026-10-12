@@ -982,11 +982,18 @@ class NotionSync:
             for r in rows:
                 targets.setdefault(r["page_id"], {**dict(r), "reason": reason})
 
+        # Read every run: agent work, a recent conversation, a page the user edited (also when our
+        # write-back came after it: the user's edit is their feedback on the task), or an open
+        # task that is new or has a change the user was told about. Our own writes are not
+        # activity: a bulk push would otherwise make every page hot for two days (one request per
+        # page per run).
         add(self.conn.execute(
             f"SELECT p.page_id, p.entity_type, p.entity_id FROM notion_pages p JOIN tasks t ON t.id=p.entity_id"
             f" WHERE p.entity_type='task' AND p.trashed=0 AND (t.id IN (SELECT task_id FROM delegations WHERE status IN"
-            f" ({active})) OR t.updated_at>=? OR p.last_edited_time>=? OR p.last_comment_at>=?)",
-            (hot_since, hot_since, talk_since)).fetchall(), "hot")
+            f" ({active})) OR p.last_comment_at>=? OR (p.last_edited_time>=? AND p.last_edited_by IS NOT ?)"
+            f" OR t.id IN (SELECT scope_id FROM feedback WHERE scope_type='task' AND author_is_user=1"
+            f" AND received_at>=?) OR (t.status IN ({open_}) AND (t.created_at>=? OR t.change_note_at>=?)))",
+            (talk_since, hot_since, self.state.bot_user_id, hot_since, hot_since, hot_since)).fetchall(), "hot")
         if self.state.home_page_id:
             targets.setdefault(self.state.home_page_id, {"page_id": self.state.home_page_id, "entity_type": "home",
                                                          "entity_id": None, "reason": "home"})

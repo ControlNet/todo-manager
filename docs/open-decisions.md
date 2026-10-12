@@ -16,7 +16,7 @@ when you ask it in chat, e.g. "wait an hour of Slack silence before analysing" s
 | `github.quiet_minutes` / `min_wake_interval_minutes` | 10 / 60 | Same shape as email |
 | `commits.digest_time` | 21:00 local | Daily commit digest (project progress only) |
 | `commits.max_attempts_per_day` | 2 | Model attempts for one day's digest |
-| `notion.cold_comment_poll_minutes` | 60 | Comment polling interval for open tasks without recent activity (active pages: every run) |
+| `notion.cold_comment_poll_minutes` | 60 | Comment polling interval for open tasks without recent activity (active pages: every run; our own writes are not activity) |
 | `notion.cold_comment_pages_per_run` | 30 | Round-robin budget of cold pages per run |
 | `notion.history_poll_hours` | 24 | Sweep of recently closed pages for late comments |
 | `wake.max_context_chars` / `max_evidence_chars` / `max_items_per_run` | 60000 / 40000 / 60 | Whole rendered intake context / new evidence in it / new messages per run; the rest waits for the next run. The gate renders the context before waking and gives back conversations until it fits. Batches are taken round-robin across sources, so an email backlog cannot crowd out chat; a conversation larger than one run is split into segments in message order (each gets at most an even share per waiting source; a later segment waits for the earlier one). When more than one run's worth is waiting, the email/GitHub wake interval is skipped so a backlog drains every 5 minutes |
