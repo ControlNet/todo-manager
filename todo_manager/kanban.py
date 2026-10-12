@@ -83,8 +83,10 @@ class Kanban(Protocol):
     def find(self, idem_key: str, marker: str) -> list[dict[str, Any]]: ...
     def create(self, *, title: str, body: str, idem_key: str, assignee: str | None, tenant: str,
                workspace: str | None = None, max_retries: int | None = None, notify: dict | None = None,
-               skills: list[str] | None = None) -> str: ...
+               skills: list[str] | None = None, start_after: str | None = None) -> str: ...
     def owned(self, card_id: str) -> list[str]: ...
+    def schedule(self, card_id: str, until: str) -> str: ...
+    def release_schedule(self, card_id: str) -> str: ...
     def notify(self, card_id: str, route: dict, release: bool = False) -> dict: ...
     def snapshot(self, card_id: str, after_event: int = 0, after_comment: int = 0) -> dict[str, Any]: ...
     def comment(self, card_id: str, body: str, author: str = "todo-manager") -> dict[str, Any]: ...
@@ -156,11 +158,20 @@ class BridgeKanban:
 
     def create(self, *, title: str, body: str, idem_key: str, assignee: str | None, tenant: str,
                workspace: str | None = None, max_retries: int | None = None, notify: dict | None = None,
-               skills: list[str] | None = None) -> str:
+               skills: list[str] | None = None, start_after: str | None = None) -> str:
+        """``start_after``: create the card parked in ``scheduled`` (never dispatchable in between)."""
         kind, _, path = (workspace or "").partition(":")
         return self.call("create", title=title, body=body, idem_key=idem_key, assignee=assignee, tenant=tenant,
                          created_by="todo-manager", workspace_kind=kind or None, workspace_path=path or None,
-                         max_retries=max_retries, notify=notify, skills=skills)
+                         max_retries=max_retries, notify=notify, skills=skills, start_after=start_after)
+
+    def schedule(self, card_id: str, until: str) -> str:
+        """Park a card that never ran (only our staging) until ``until``; returns its status."""
+        return self.call("schedule", task_id=card_id, until=until)
+
+    def release_schedule(self, card_id: str) -> str:
+        """Let a parked card (scheduled, or still staged) be dispatched; returns its status."""
+        return self.call("release_schedule", task_id=card_id)
 
     def owned(self, card_id: str) -> list[str]:
         return self.call("owned", mutating=False, task_id=card_id)
@@ -227,6 +238,9 @@ class FakeKanban:
         self.fail_next: dict[str, Exception] = {}
         self.lose_response: set[str] = set()
         self.terminate_ok = True  # outcome of terminating a running worker on archive
+        # A create with ``start_after`` stops after its staging block, before the park
+        # (stands in for a bridge process killed between the two).
+        self.interrupt_schedule = False
         # action -> callable run after the transition's check and before its state function:
         # stands in for a dashboard action interleaving there (the race ``transition_raced`` reports).
         # "comment": run right before a comment is stored (e.g. the worker submits meanwhile).
@@ -261,7 +275,7 @@ class FakeKanban:
 
     def create(self, *, title: str, body: str, idem_key: str, assignee: str | None, tenant: str,
                workspace: str | None = None, max_retries: int | None = None, notify: dict | None = None,
-               skills: list[str] | None = None) -> str:
+               skills: list[str] | None = None, start_after: str | None = None) -> str:
         if not self.profile_valid(assignee):
             raise KanbanError('assignee is not a dispatchable Hermes profile', code='NO_PROFILE')
         self._maybe_fail("create")
@@ -274,12 +288,18 @@ class FakeKanban:
                            "assignee": assignee, "tenant": tenant, "skills": skills, "workspace": workspace, "block_kind": None, "block_recurrences": 0,
                            "max_retries": max_retries, "consecutive_failures": 0}
         self._event(cid, "created")
-        if notify:
+        if notify or start_after:
             self.cards[cid].update(status="blocked", staged=True)
+        if notify:
             try:
-                self.notify(cid, notify, release=True)
+                self.notify(cid, notify, release=not start_after)
             except KanbanError as exc:
                 raise KanbanError(str(exc), uncertain=True) from exc
+        if start_after:
+            if self.interrupt_schedule:
+                self.interrupt_schedule = False
+                raise KanbanError("bridge timeout during create", uncertain=True)
+            self.schedule(cid, start_after)
         if "create" in self.lose_response:
             self.lose_response.discard("create")
             raise KanbanError("bridge timeout during create", uncertain=True)
@@ -292,6 +312,20 @@ class FakeKanban:
             if more <= owned:
                 return sorted(owned - {card_id})
             owned |= more
+
+    def schedule(self, card_id: str, until: str) -> str:
+        card = self.cards[card_id]
+        if card.pop("staged", False):
+            card["status"] = "scheduled"
+            self._event(card_id, "scheduled", {"reason": f"SCHEDULED_UNTIL={until}"})
+        return card["status"]
+
+    def release_schedule(self, card_id: str) -> str:
+        card = self.cards[card_id]
+        if card["status"] == "scheduled" or card.pop("staged", False):
+            card["status"] = "ready"
+            self._event(card_id, "unblocked")
+        return card["status"]
 
     def notify(self, card_id: str, route: dict, release: bool = False) -> dict:
         self._maybe_fail("notify")

@@ -1,7 +1,7 @@
 ---
 name: todo-manager
 description: "The user's todos, tasks, projects, follow-ups and delegated agent work (Notion Todo Manager + Hermes Kanban), kept by the `todo-manager` command. Use it in the Todo Manager cron runs and whenever the user talks about their todos, reminders, delegated work, their Todo preferences (what becomes a task, what to ignore, when to ask), or how this automation should behave."
-version: 3.3.0
+version: 3.4.0
 author: todo-manager
 license: AGPL-3.0-only
 metadata:
@@ -44,7 +44,7 @@ Every woken intake and feedback run is given the file as written.
 - Mutate: `task create --title "..." --evidence <item>:origin`, `task update <id> --based-on <version> --set <field>=<value>`, `task update <id> --evidence <item>`.
 - Intake: `source dismiss <item> --outcome informational --reason "..."`, `source defer <item> --reason "..."`, append `--run <id>`. Settle unchanged follow-ups/digest together with `run done <id> --checked <task> --digest-reviewed`.
 - Feedback: `feedback resolve <id> --outcome applied|clarify|ignored --reply "..."`; `feedback show <id>` reads full text.
-- Delegate: `delegate create --task <id> --brief "goal, background, constraints and delivery requirements" --allow read,analyze,draft`; append `--feedback <id>` or direct request context. The required --allow field must reflect explicit authority; read,analyze,draft permits no external action.
+- Delegate: `delegate create --task <id> --brief "goal, background, constraints and delivery requirements" --allow read,analyze,draft`; append `--feedback <id>` or direct request context; a later start the user asked for is `--start-after "YYYY-MM-DD HH:MM"` (local time), never waiting written into the brief. The required --allow field must reflect explicit authority; read,analyze,draft permits no external action.
 - Message: `delegate message <id> --kind supplement|revision|pause|resume|cancel|accept --body "..."`.
 - Answer: `delegate answer <id> --body "..." [--question <delivery-id>]`; explicit one-use approval uses `--approve <action>[:<scope>]`. Version approval uses `delegate approve <id> --delivery <delivery> --action <action>`.
 - Full material: `source show <item>`, `feedback show <id>`; stored material containing words, also what was

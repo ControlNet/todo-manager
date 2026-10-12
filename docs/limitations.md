@@ -188,6 +188,9 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
   after root completion. An intentionally separate concurrent delegation requires
   `delegate create --parallel`. Cancelling a Task stops proven owned descendants through
   native archive calls and keeps unconfirmed termination visible.
+- A later start (`delegate create --start-after`) is honoured by the feedback gate, so the work
+  starts within one gate interval (about 5 minutes) after the time, and only while that cron
+  job runs. A pause before the time holds the start; a resume lets the time apply again.
 - One user, one machine, one SQLite database. There is no multi-user or multi-host mode.
 - Hermes `review_dispatch` and `auto_decompose` remain native orchestration settings.
   Todo Manager neither disables them nor blocks all submission while they are on. Native

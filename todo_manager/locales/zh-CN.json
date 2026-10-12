@@ -22,6 +22,8 @@
   "dlg.approval_void": "⚠️ 对交付 {delivery} 的 {action} 批准已失效（{reason}）；如仍需要，请对最新版本重新批准。",
   "dlg.approval_void_answer": "⚠️ 你在回答问题 #{seq} 时给出的 {action} 批准已失效（{reason}）；如仍需要，请在下次回答时重新批准。",
   "dlg.assigned": "委派给 Agent：{title}",
+  "dlg.assigned_later": "委派给 Agent：{title}（{when} 后开始）",
+  "dlg.started_later": "已到约定时间，Agent 开始：{title}",
   "dlg.cancel_unconfirmed": "⚠️ “{title}”已取消，但无法确认 worker 进程已经停止（{detail}），请检查。",
   "dlg.cancel_voided": "取消「{title}」：以下排队中的消息未执行：{items}",
   "dlg.cancelled": "Agent 委派已取消",

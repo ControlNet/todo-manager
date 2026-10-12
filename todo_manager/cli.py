@@ -461,7 +461,8 @@ def cmd_delegate(args: argparse.Namespace) -> int:
                                        context_text=None, constraints=None,
                                        deliverable=None, done_criteria=None,
                                        allowed=args.allow.split(",") if args.allow else None,
-                                       parallel=args.parallel, submit=not args.no_submit)
+                                       parallel=args.parallel, submit=not args.no_submit,
+                                       start_after=args.start_after)
         if args.action == "message":
             return ops.delegate_message(conn, cfg, ctx, args.id, kind=args.kind, body=args.body,
                                         delivery=args.delivery)
@@ -759,6 +760,8 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--parallel", action="store_true",
                    help="genuinely separate work next to the task's active agent work (default: refused)")
     x.add_argument("--no-submit", action="store_true", help="leave the card to the next sync")
+    x.add_argument("--start-after", help="the user asked for a later start: 'YYYY-MM-DD HH:MM' (workspace time zone)"
+                                         " or ISO with offset; the card waits parked until then")
     _add_ctx(x)
     x = ds.add_parser("message")
     x.add_argument("id")

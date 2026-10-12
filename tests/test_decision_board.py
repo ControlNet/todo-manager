@@ -349,7 +349,7 @@ class DecisionSchemaMigrationTests(__import__('unittest').TestCase):
             db.migrate(conn)
             self.assertEqual(export.integrity_problems(conn), [])
             conn.close()
-            copies = list((Path(tmp)/'backups').glob('pre-schema-v11-from-v10-*.sqlite'))
+            copies = list((Path(tmp)/'backups').glob(f'pre-schema-v{db.SCHEMA_VERSION}-from-v10-*.sqlite'))
             self.assertEqual(len(copies), 1)
             restored = sqlite3.connect(copies[0]);
             self.assertEqual(restored.execute("select value from meta where key='schema_version'").fetchone()[0], '10')

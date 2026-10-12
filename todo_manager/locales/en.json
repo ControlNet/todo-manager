@@ -22,6 +22,8 @@
   "dlg.approval_void": "⚠️ Approval of {action} for delivery {delivery} is void ({reason}); approve the latest version again if still wanted.",
   "dlg.approval_void_answer": "⚠️ Approval of {action} given with your answer to question #{seq} is void ({reason}); give it again with your next answer if still wanted.",
   "dlg.assigned": "Delegated to Agent: {title}",
+  "dlg.assigned_later": "Delegated to Agent: {title} (starts after {when})",
+  "dlg.started_later": "Agent starts now, as asked: {title}",
   "dlg.cancel_unconfirmed": "⚠️ \"{title}\" is cancelled, but the worker process could not be confirmed as stopped ({detail}); please check it.",
   "dlg.cancel_voided": "Cancelling {title}: these queued messages were not carried out: {items}",
   "dlg.cancelled": "Agent work cancelled",

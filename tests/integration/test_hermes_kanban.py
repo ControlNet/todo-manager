@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from todo_manager import delegation, gate_feedback, kanban, store
+from todo_manager import clock, delegation, gate_feedback, kanban, store
 from todo_manager.kanban import BridgeKanban, KanbanError
 from tests.helpers import WorkspaceCase
 
@@ -97,6 +97,37 @@ class HermesKanbanIntegration(WorkspaceCase):
         self.assertNotIn(card, self.sim("dispatch_dry")["spawned"])
         self.tick()
         self.assertEqual(delegation.get(self.conn, did)["status"], "blocked", "waits for the user's retry/cancel")
+
+    def test_a_later_start_parks_the_card_in_the_create_and_the_gate_lets_it_go(self):
+        # Synthetic route (no channel client): only the subscription row is written.
+        route = {"platform": "matrix", "chat_id": "synthetic-no-client", "notifier_profile": "default"}
+        for notify in (None, route):
+            with self.subTest(notify=bool(notify)):
+                card = self.kb.create(title="later", body="b", idem_key=f"tm-later-{bool(notify)}", assignee="default",
+                                      tenant="todo-manager", notify=notify, start_after="2026-10-05T06:00:00.000Z")
+                self.assertEqual(self.sim("status", task_id=card)["status"], "scheduled")
+                self.sim("recompute")
+                self.assertNotIn(card, self.sim("dispatch_dry")["spawned"])
+                self.assertEqual(self.kb.schedule(card, "2026-10-05T06:00:00.000Z"), "scheduled", "idempotent")
+                self.assertEqual(self.kb.release_schedule(card), "ready")
+                self.assertTrue(self.sim("claim", task_id=card))
+                self.assertTrue(self.sim("block", task_id=card, reason="A or B?", kind="needs_input"))
+                self.assertEqual(self.kb.schedule(card, "2026-10-05T06:00:00.000Z"), "blocked", "a worker block stays")
+                self.assertEqual(self.kb.release_schedule(card), "blocked", "and is not lifted")
+
+    def test_a_delegation_with_a_later_start_runs_only_after_it(self):
+        did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草回复", goal="Draft only",
+                                start_after="2026-10-05T06:00:00.000Z")
+        self.tick()
+        card = delegation.get(self.conn, did)["card_id"]
+        delegation.start_due(self.conn, self.cfg, self.kb)
+        self.assertEqual(self.sim("status", task_id=card)["status"], "scheduled")
+        self.assertEqual(delegation.get(self.conn, did)["status"], "queued")
+        clock.advance(hours=7)
+        delegation.start_due(self.conn, self.cfg, self.kb)
+        self.tick()
+        self.assertEqual(self.sim("status", task_id=card)["status"], "ready")
+        self.assertIsNone(delegation.get(self.conn, did)["start_after"])
 
     def test_full_draft_cycle_against_real_kanban(self):
         did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草回复", goal="Draft only",

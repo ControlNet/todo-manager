@@ -111,6 +111,10 @@ source context. The brief carries goal, background, constraints and delivery req
 The title defaults to the Task title. Associations, action authorization, question/delivery
 versions and the machine protocol remain structured; workers do not inherit feedback chat.
 `--parallel` retains the explicit independent-work exception; `--no-submit` queues locally.
+`--start-after "YYYY-MM-DD HH:MM"` (workspace time zone, or ISO with an offset) is for a user who
+asked for a later start: the card is created parked in Hermes' `scheduled` state, inside the same
+bridge call, so no dispatcher tick sees it ready; the feedback gate lets it go once the time has
+passed (no model run). A time already passed starts it at once.
 Message/answer/approve remain separate operations. Existing root/child question binding,
 unknown-action recovery and cancellation ownership rules are unchanged.
 

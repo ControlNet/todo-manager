@@ -33,6 +33,9 @@ agent work and recent thread.
   on the user's request only: add `--feedback <feedback id>` or `--request <id> --said "..."`
   (commands with `--run` refuse agent work). The card is created at once; Hermes schedules and
   runs it.
+- The user wants it done later ("after 5pm", "tomorrow morning"): add
+  `--start-after "YYYY-MM-DD HH:MM"` (the user's local time). The card waits parked and starts by
+  itself then. Never put the waiting into the brief.
 - Explicitly specify the authorized actions, normally `read,analyze,draft`. External actions (`send_email`,
   `comment_github`, `push_branch`, `open_pr`, `merge_pr`, `close_issue`, `edit_notion_doc`,
   `post_public`) only when the user said so for this work.

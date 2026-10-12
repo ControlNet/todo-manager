@@ -57,6 +57,17 @@ class ScheduledRunAuthorityTests(unittest.TestCase):
 
 
 
+class LaterStartTests(unittest.TestCase):
+    """"Do it after 5pm": the start time is passed to the card, not written into the brief
+    (an agent that reads it only learns to wait while it already runs; 2026-10-12)."""
+
+    def test_the_runs_pass_a_later_start_instead_of_writing_it_into_the_brief(self):
+        for name in ("cron/feedback.md", "skill/SKILL.md"):
+            text = flat(name)
+            self.assertIn('--start-after "YYYY-MM-DD HH:MM"', text, name)
+            self.assertIn("brief", text[text.index("--start-after"):], name)
+
+
 class TaskRoutingTests(unittest.TestCase):
     """The user decides who does a task: only in-person or offline work starts as a todo; the rest
     is offered on the decision board, saying what an agent would deliver (user's choice, 2026-10-12)."""

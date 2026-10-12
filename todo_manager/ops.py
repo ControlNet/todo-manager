@@ -23,8 +23,9 @@ import hashlib
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from . import batching, clock, delegation, effects, feedback, gate_intake, i18n, prefs, runs, store
 from .config import Config
@@ -787,7 +788,9 @@ def _board_choice(ctx: Ctx) -> bool:
 def delegate_create(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, *, task_id: str, title: str, goal: str,
                     context_text: str | None = None, constraints: str | None = None, deliverable: str | None = None,
                     done_criteria: str | None = None, allowed: list[str] | None = None,
-                    parallel: bool = False, submit: bool = True) -> dict[str, Any]:
+                    parallel: bool = False, submit: bool = True, start_after: str | None = None) -> dict[str, Any]:
+    """``start_after``: when the user asked for the work to start later (ISO, or local
+    ``YYYY-MM-DD HH:MM`` in the workspace time zone)."""
     _delegation_ctx(ctx)
     if _board_choice(ctx) and delegation.external_actions(allowed or []):
         raise OpError('INVALID', 'a decision-board drag does not authorize external actions; request explicit approval')
@@ -795,6 +798,8 @@ def delegate_create(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, *, task_id:
         raise OpError("INVALID", "a task title and nonempty delegation brief are required")
     args = {"task": task_id, "title": title, "goal": goal, "context": context_text, "constraints": constraints,
             "deliverable": deliverable, "done": done_criteria, "allowed": allowed, "parallel": parallel}
+    if start_after:
+        start_after = args["start_after"] = start_time(cfg, start_after)
     key = _key(ctx, "delegate create", args)
 
     def apply() -> dict[str, Any]:
@@ -802,7 +807,7 @@ def delegate_create(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, *, task_id:
             did = delegation.create(conn, cfg, task_id=task_id, title=title, goal=goal, context=context_text,
                                     constraints=constraints, deliverable=deliverable, done_criteria=done_criteria,
                                     allowed_actions=allowed, feedback_id=ctx.fb["id"] if ctx.fb else None,
-                                    actor="human", op_key=key, parallel=parallel)
+                                    actor="human", op_key=key, parallel=parallel, start_after=start_after)
         except delegation.DelegationError as exc:
             raise OpError("INVALID", str(exc)) from None
         return {"delegation": did}
@@ -811,6 +816,17 @@ def delegate_create(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, *, task_id:
     if submit and not result.get("duplicate"):
         result["card"] = _submit_now(conn, cfg, result["delegation"])
     return result
+
+
+def start_time(cfg: Config, text: str) -> str:
+    """UTC ISO for ``--start-after``: an ISO time with its offset, or a local date and time."""
+    try:
+        value = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+    except ValueError:
+        raise OpError("INVALID", f"--start-after {text!r}: give a date and time, e.g. 2026-10-12 17:00") from None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=ZoneInfo(cfg.tz))
+    return clock.iso(value)
 
 
 def _replied_delivery(fb: dict[str, Any] | None, delegation_id: str, kind: str, explicit: str | None) -> str | None:

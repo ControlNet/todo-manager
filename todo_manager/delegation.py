@@ -153,8 +153,9 @@ def card_body(d: dict[str, Any], task: dict[str, Any], notion_url: str | None, e
 def create(conn: sqlite3.Connection, cfg: Config, *, task_id: str, title: str, goal: str, context: str | None = None,
            constraints: str | None = None, deliverable: str | None = None, done_criteria: str | None = None,
            allowed_actions: list[str] | None = None, feedback_id: str | None = None, actor: str = "human",
-           op_key: str | None = None, parallel: bool = False) -> str:
-    """``op_key`` (feedback id + op index) identifies the request: applying the same op again
+           op_key: str | None = None, parallel: bool = False, start_after: str | None = None) -> str:
+    """``start_after`` (UTC ISO): the user asked for the work to start later; a time already
+    passed starts it at once. ``op_key`` (feedback id + op index) identifies the request: applying the same op again
     returns the same delegation, another op of the same feedback creates its own. One active
     delegation per Task unless ``parallel`` (genuinely separate work): checked here, in the
     transaction that inserts the row, so every entry point and concurrent writers are covered."""
@@ -169,6 +170,8 @@ def create(conn: sqlite3.Connection, cfg: Config, *, task_id: str, title: str, g
     unknown = action_names(allowed) - KNOWN_ACTIONS
     if unknown:
         raise DelegationError(f"unknown actions {sorted(unknown)}; known: {sorted(KNOWN_ACTIONS)}")
+    when = clock.parse(start_after) if start_after else None
+    start_after = clock.iso(when) if when and when > clock.now() else None
     did = ids.new_id("delegation")
     now = clock.iso()
     with tx(conn):
@@ -190,6 +193,7 @@ def create(conn: sqlite3.Connection, cfg: Config, *, task_id: str, title: str, g
             (did, task_id, title.strip(), goal.strip(), context, constraints, deliverable, done_criteria,
              dumps(allowed), cfg.get("kanban.assignee") or None, cfg.get("kanban.board", "todo-manager"),
              ids.delegation_idempotency_key(did), feedback_id, task["version"], now, now, op_key))
+        conn.execute("UPDATE delegations SET start_after=? WHERE id=?", (start_after, did))
         try:
             route = notify_route(cfg)
         except KanbanError as exc:
@@ -206,8 +210,11 @@ def create(conn: sqlite3.Connection, cfg: Config, *, task_id: str, title: str, g
             "INSERT INTO delegation_messages(id, delegation_id, kind, feedback_id, body, requirement_version, status,"
             " created_at, sent_at) VALUES (?,?,?,?,?,1,'sent',?,?)",
             (ids.new_id("event"), did, "requirement", feedback_id, goal.strip(), now, now))
-        _next_actor(conn, did, "agent", i18n.t("dlg.assigned", title=title.strip()), actor=actor,
-                    cause=feedback_id or did, initial=True)
+        note = (i18n.t("dlg.assigned_later", title=title.strip(), when=_local_time(cfg, start_after)) if start_after
+                else i18n.t("dlg.assigned", title=title.strip()))
+        _next_actor(conn, did, "agent", note, actor=actor, cause=feedback_id or did, initial=True)
+        if start_after:
+            _task_note(conn, task_id, note, feedback_id or did)   # also when the next actor did not change
         # A next actor the user sets AFTER this point is never changed by agent work.
         conn.execute("UPDATE delegations SET base_task_version=(SELECT version FROM tasks WHERE id=?) WHERE id=?",
                      (task_id, did))
@@ -241,6 +248,27 @@ def _next_actor(conn: sqlite3.Connection, delegation_id: str, to: str, note: str
     if "change_note" in result.applied:
         conn.execute("UPDATE tasks SET change_note_at=? WHERE id=?", (clock.iso(), task["id"]))
     effects.task_push(conn, task["id"])
+
+
+def _task_note(conn: sqlite3.Connection, task_id: str, note: str, cause: str) -> None:
+    task = store.get_task(conn, task_id)
+    if task is None or task["status"] in store.CLOSED_STATUSES:
+        return
+    result = store.update_task(conn, task_id, {"change_note": note}, actor="program", origin="kanban", cause_ref=cause,
+                               based_on_version=task["version"], override_human=True)
+    if result.applied:
+        conn.execute("UPDATE tasks SET change_note_at=? WHERE id=?", (clock.iso(), task_id))
+        effects.task_push(conn, task_id)
+
+
+def _local_time(cfg: Config, value: str) -> str:
+    return clock.local_dt(cfg.tz, clock.parse(value)).strftime("%m-%d %H:%M")
+
+
+def waiting_start(d: dict[str, Any]) -> bool:
+    """The user asked for this work to start later, and that time has not come."""
+    when = clock.parse(d.get("start_after"))
+    return when is not None and clock.now() < when
 
 
 def _set(conn: sqlite3.Connection, delegation_id: str, **fields: Any) -> None:
@@ -382,7 +410,11 @@ def route_for(conn: sqlite3.Connection, cfg: Config, d: dict) -> dict | None:
 def may_release_staging(conn: sqlite3.Connection, d: dict[str, Any]) -> bool:
     """Every recovery release obeys the same local execution barriers."""
     current = get(conn, d['id'])
-    return not held(conn) and not current['pause_requested'] and not cancel_pending(conn, current)
+    return _may_run(conn, current) and not current.get('start_after')
+
+
+def _may_run(conn: sqlite3.Connection, d: dict[str, Any]) -> bool:
+    return not held(conn) and not d['pause_requested'] and not cancel_pending(conn, d)
 
 
 def repair_notification(conn: sqlite3.Connection, cfg: Config, kb: Kanban,
@@ -450,6 +482,11 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str 
                 info = repair_notification(conn, cfg, kb, d, card['id'], release=True)
                 if info:
                     card['status'] = info['status']
+                if d["start_after"] and card["status"] == "blocked":
+                    try:   # left staged by an interrupted create: park it (start_due releases it)
+                        card["status"] = kb.schedule(card["id"], d["start_after"])
+                    except KanbanError as exc:
+                        _failed(stats, "errors", f"park failed: {exc}")
                 with tx(conn):
                     # Our pause has not reached this card yet: a block on it is the worker's.
                     status = "cancelled" if card["status"] == "archived" else _status_from_card(card["status"], d)
@@ -488,17 +525,20 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str 
             notes = conn.execute("SELECT notes_text FROM notion_pages WHERE entity_type='task' AND entity_id=?",
                                  (task["id"],)).fetchone()
             body = card_body(d, task, _notion_url(conn, task), extra, notes["notes_text"] if notes else None)
-            if not may_release_staging(conn, d):
+            if not _may_run(conn, get(conn, d['id'])):
                 stats['held'] += 1
                 continue
+            later = waiting_start(d)
             with tx(conn):
-                _set(conn, d["id"], status="reconcile", submit_attempts=d["submit_attempts"] + 1)
+                _set(conn, d["id"], status="reconcile", submit_attempts=d["submit_attempts"] + 1,
+                     start_after=d["start_after"] if later else None)
             try:
                 card_id = kb.create(title=f"{d['title']} [{d['id']}]", body=body, idem_key=d["idem_key"],
                                     assignee=d.get("assignee"), tenant="todo-manager",
                                     workspace=cfg.get("kanban.workspace") or None,
                                     max_retries=card_retries(cfg, d), notify=route_for(conn, cfg, d),
-                                    skills=cfg.get("kanban.skills") or None)
+                                    skills=cfg.get("kanban.skills") or None,
+                                    start_after=d["start_after"] if later else None)
             except KanbanError as exc:
                 with tx(conn):
                     _set(conn, d["id"], status="reconcile" if exc.uncertain else "pending_submit",
@@ -506,13 +546,44 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str 
                 _failed(stats, "errors", f"create failed: {exc}")
                 continue
             with tx(conn):
-                _set(conn, d["id"], card_id=card_id, card_status="ready", status="queued", last_error=None)
+                _set(conn, d["id"], card_id=card_id, card_status="scheduled" if later else "ready", status="queued",
+                     last_error=None)
                 # Supplements are in the card body; a pause/resume pair before submission is spent.
                 # Position 0: in the card body, read by every run of the card.
                 conn.execute("UPDATE delegation_messages SET status='sent', sent_at=?, card_event_id=0 WHERE"
                              " delegation_id=? AND kind IN ('supplement','pause','resume') AND status='pending'",
                              (clock.iso(), d["id"]))
             stats["submitted"] += 1
+    return stats
+
+
+def start_due(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, Any]:
+    """Cards parked until a start time the user gave: let each go once its time has passed
+    (once: ``start_after`` is cleared), unless paused, cancelled or held; keep one that is not
+    parked yet (an interrupted create) parked. No model and no worker run before the time."""
+    stats: dict[str, Any] = {"started": 0, "parked": 0, "waiting": 0, "errors": 0}
+    rows = conn.execute("SELECT id FROM delegations WHERE start_after IS NOT NULL AND card_id IS NOT NULL"
+                        " AND status NOT IN ('ended','cancelled','quarantined') ORDER BY start_after").fetchall()
+    for row in rows:
+        d = get(conn, row["id"])
+        due = not waiting_start(d)
+        if not _may_run(conn, d) or (not due and d["card_status"] == "scheduled"):
+            stats["waiting"] += 1
+            continue
+        try:
+            status = kb.release_schedule(d["card_id"]) if due else kb.schedule(d["card_id"], d["start_after"])
+        except KanbanError as exc:
+            with tx(conn):
+                _set(conn, d["id"], last_error=f"{'start' if due else 'park'} failed: {exc}")
+            _failed(stats, "errors", f"{'start' if due else 'park'} failed: {exc}")
+            continue
+        with tx(conn):
+            if due:
+                _set(conn, d["id"], start_after=None, card_status=status)
+                _task_note(conn, d["task_id"], i18n.t("dlg.started_later", title=d["title"]), d["id"])
+            else:
+                _set(conn, d["id"], card_status=status, status=_status_from_card(status, d))
+        stats["started" if due else "parked"] += 1
     return stats
 
 

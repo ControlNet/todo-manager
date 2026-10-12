@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -610,6 +610,9 @@ ALTER TABLE delegation_children ADD COLUMN attention TEXT;
 """,
     11: """
 ALTER TABLE tasks ADD COLUMN decision TEXT CHECK (decision IN ('pending','agree','decline','agent'));
+""",
+    12: """
+ALTER TABLE delegations ADD COLUMN start_after TEXT;
 """,
 }
 

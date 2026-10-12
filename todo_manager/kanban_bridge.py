@@ -93,6 +93,21 @@ def owned_cards(kb, conn, root):
         owned |= more
 
 
+def is_staged(kb, conn, tid):
+    """Our card that never ran: still in the creation staging block (``initial_status``)."""
+    task = kb.get_task(conn, tid)
+    return (task.status == "blocked" and task.created_by == "todo-manager"
+            and all(e.kind == "created" or (e.kind == "blocked" and (e.payload or {}).get("reason") == "initial_status")
+                    for e in kb.list_events(conn, tid)))
+
+
+def park(kb, conn, tid, until):
+    """``scheduled`` until ``until`` (Hermes' own convention for the reason); only a staged card."""
+    if is_staged(kb, conn, tid):
+        kb.schedule_task(conn, tid, reason=f"SCHEDULED_UNTIL={until} (todo-manager starts it then)")
+    return kb.get_task(conn, tid).status
+
+
 def ensure_notify(kb, conn, tid, route, release=False):
     from hermes_cli.kanban_db_notify import add_notify_sub, list_notify_subs
     existing = list_notify_subs(conn, tid)
@@ -100,9 +115,7 @@ def ensure_notify(kb, conn, tid, route, release=False):
                 and (s.get("thread_id") or "") == (route.get("thread_id") or "") for s in existing)
     events = kb.list_events(conn, tid)
     # Only release our initial staging block; never lift a worker/human block on recovery.
-    staged = (kb.get_task(conn, tid).status == "blocked" and kb.get_task(conn, tid).created_by == "todo-manager"
-              and all(e.kind == "created" or (e.kind == "blocked" and (e.payload or {}).get("reason") == "initial_status")
-                      for e in events))
+    staged = is_staged(kb, conn, tid)
     if not found:
         add_notify_sub(conn, task_id=tid, delivery_mode="notify", **route)
     if release and staged:
@@ -218,10 +231,19 @@ def main() -> None:
                 idempotency_key=req["idem_key"], workspace_kind=req.get("workspace_kind"),
                 workspace_path=req.get("workspace_path"), skills=req.get("skills"),
                 max_runtime_seconds=req.get("max_runtime_seconds"), max_retries=req.get("max_retries"),
-                initial_status="blocked" if req.get("notify") else "running", board=board)
+                initial_status="blocked" if req.get("notify") or req.get("start_after") else "running", board=board)
             if req.get("notify"):
-                ensure_notify(kb, conn, tid, req["notify"], release=True)
+                ensure_notify(kb, conn, tid, req["notify"], release=not req.get("start_after"))
+            if req.get("start_after"):
+                park(kb, conn, tid, req["start_after"])
             return _out({"ok": True, "result": tid})
+        if op == "schedule":
+            return _out({"ok": True, "result": park(kb, conn, req["task_id"], req["until"])})
+        if op == "release_schedule":
+            tid = req["task_id"]
+            if kb.get_task(conn, tid).status == "scheduled" or is_staged(kb, conn, tid):
+                kb.unblock_task(conn, tid)
+            return _out({"ok": True, "result": kb.get_task(conn, tid).status})
         if op == "snapshot":
             task = kb.get_task(conn, req["task_id"])
             if task is None:

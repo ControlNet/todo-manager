@@ -4,8 +4,9 @@ Deterministic steps, each isolated so one failing system does not stall the othe
 
 1. Notion: pull the user's property/page edits (projects, then tasks) and poll comments.
 2. Kanban: send queued messages (answers, supplements, pauses), create the cards of new
-   delegations, read card events (questions, deliveries, failures). The cards themselves run
-   in Hermes whether or not this job runs; their results are read when it runs again.
+   delegations, let parked cards go once the start time the user gave has passed, read card
+   events (questions, deliveries, failures). The cards themselves run in Hermes whether or not
+   this job runs; their results are read when it runs again.
 3. Dirty scan + outbox: push local changes to Notion, post bot comments.
 4. Home page freshness callout (rewritten only when its content changes).
 5. Claim the feedback that needs interpretation and print it as the run's context
@@ -35,6 +36,7 @@ SOURCE_SCOPES = ("gmail", "slack", "github", "commit", "notion", "kanban")
 # ``comments``) since a partly failed pass does not raise.
 CHANNELS = {"claims": ("gate", "claims"),
             "kanban_messages": ("kanban", "messages"), "kanban_submit": ("kanban", "submit"),
+            "kanban_start": ("kanban", "start"),
             "kanban_cards": ("kanban", "cards"), "dirty": ("notion", "dirty"),
             "outbox": ("gate", "outbox"), "home": ("notion", "home")}
 
@@ -117,6 +119,7 @@ def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None,
     if kanban is not None:
         step("kanban_messages", lambda: delegation.send_messages(conn, cfg, kanban))
         step("kanban_submit", lambda: delegation.submit_pending(conn, cfg, kanban))
+        step("kanban_start", lambda: delegation.start_due(conn, cfg, kanban))
         step("kanban_cards", lambda: delegation.sync_cards(conn, cfg, kanban))
         step("kanban_settings", lambda: delegation.observe_settings(conn, kanban))
     handlers: dict[tuple[str, str], Any] = {}
