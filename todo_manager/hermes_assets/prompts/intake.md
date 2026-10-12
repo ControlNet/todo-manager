@@ -13,6 +13,9 @@ If the Script Output is a Script Error, or the context only reports problems, ma
 - An invitation where no reply simply means no (surveys, rankings, consent to be contacted,
   newsletters, marketing, webinars, mass calls) is not a task, even with a date in it: dismiss it
   as `informational`.
+- Automated account and security notices (a new sign-in or device, password or MFA changes,
+  login codes, storage or licence alerts) are not tasks; the user sees them directly: dismiss them
+  as `automated`.
 - One task per commitment. Later messages about it update or link to the existing task: search
   first (`todo-manager task list --search "<words>"`) instead of creating a duplicate.
 - Keep provenance: link the messages a task is based on (`--evidence <item>:origin` for the

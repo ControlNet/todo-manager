@@ -88,3 +88,8 @@ class OptionalInvitationTests(unittest.TestCase):
         text = flat("cron/intake.md")
         self.assertIn("A recurring meeting", text)
         self.assertIn("nor is one occurrence of it", text)
+
+    def test_automated_account_and_security_notices_are_not_tasks(self):
+        text = flat("cron/intake.md")
+        self.assertIn("new sign-in or device", text)
+        self.assertIn("the user sees them directly", text)
