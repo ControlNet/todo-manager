@@ -28,8 +28,14 @@ def keep_artifacts(home: Path, delivery_id: str, paths: list[str]) -> list[dict[
     kept: list[dict[str, Any]] = []
     folder = Path("deliveries") / delivery_id
     used: set[str] = set()
+    seen_paths: set[Path] = set()
+    seen_digests: set[str] = set()
     for source in paths:
         src = Path(source).expanduser()
+        # Hermes lists a card's files in the run's metadata and again as attachments: keep each once.
+        if src.resolve() in seen_paths:
+            continue
+        seen_paths.add(src.resolve())
         try:
             if not src.is_file():
                 raise OSError("not a file")
@@ -51,9 +57,13 @@ def keep_artifacts(home: Path, delivery_id: str, paths: list[str]) -> list[dict[
         try:
             shutil.copyfile(src, tmp)
             digest, size = sha256_file(tmp), tmp.stat().st_size
+            if digest in seen_digests:      # the same bytes from another place
+                used.discard(name)
+                continue
             tmp.replace(final)
         finally:
             tmp.unlink(missing_ok=True)
+        seen_digests.add(digest)
         kept.append({"path": str(folder / name), "sha256": digest, "size": size, "source": source})
     return kept
 
