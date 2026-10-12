@@ -108,6 +108,13 @@ Source: Email / 邮件, Slack, GitHub (issues, PRs and the commit digest), Notio
 Project status: `active` Active / 进行中, `paused` Paused / 暂停, `done` Done / 完成, `archived`
 Archived / 归档. The task relation adds a back-relation column "Tasks" / "任务" to Projects.
 
+Each project page has an icon, so a project is easy to spot: Notion shows it next to the
+project's name in every task view. A new project gets a built-in Notion icon in a colour no
+other project uses (`project create --set icon=<name>:<color>`, choices from `project icons`).
+The page icon is yours to change: an icon, colour, emoji or image you pick in Notion is kept and
+never written over. Stored in `projects.icon` (schema 14) as `name:color`, an emoji,
+`custom_emoji:<id>`, `external:<url>`, or `file` (an uploaded image, not written back).
+
 ## Home page
 
 | Section (en / zh-CN) | Linked view | Filter |

@@ -131,6 +131,10 @@ class FakeNotion:
         return view
 
     # ------------------------------------------------------------------ test controls
+    def user_set_icon(self, page_id: str, icon: dict[str, Any] | None, author: str = USER_ID) -> None:
+        self.pages[page_id]["icon"] = copy.deepcopy(icon)
+        self._touch(self.pages[page_id], author)
+
     def user_edit(self, page_id: str, *, author: str = USER_ID, **props_by_name: Any) -> None:
         page = self.pages[page_id]
         ds = self.data_sources[page["parent"]["data_source_id"]]
@@ -293,6 +297,8 @@ class FakeNotion:
             return {"object": "data_source", "id": ds["id"], "properties": copy.deepcopy(ds["properties"])}
         if parts == ["pages"] and method == "POST":
             page = self._new_page(body["parent"], body.get("properties", {}), body.get("markdown", ""), BOT_ID)
+            if body.get("icon"):
+                page["icon"] = copy.deepcopy(body["icon"])
             if self.autolink:
                 self.markdown[page["id"]] = autolinked(self.markdown[page["id"]])
             return self._page_view(page)
@@ -311,6 +317,8 @@ class FakeNotion:
                     self._set_props(page, ds, body["properties"])
                 if "in_trash" in body:
                     page["in_trash"] = body["in_trash"]
+                if "icon" in body:
+                    page["icon"] = copy.deepcopy(body["icon"])
                 self._touch(page, BOT_ID)
             return self._page_view(page)
         if parts == ["comments"] and method == "GET":

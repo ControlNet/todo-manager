@@ -269,6 +269,9 @@ def cmd_project(args: argparse.Namespace) -> int:
     if args.action == "list":
         _print(store.list_projects(conn, args.status.split(",") if args.status else None))
         return 0
+    if args.action == "icons":
+        _print(ops.project_icon_choices(conn))
+        return 0
     if args.action == "show":
         p = store.get_project(conn, args.id)
         if p is None:
@@ -668,10 +671,11 @@ def build_parser() -> argparse.ArgumentParser:
     x = ps.add_parser("show")
     x.add_argument("id")
     x.add_argument("--history", action="store_true")
+    ps.add_parser("icons", help="icon names and colours for --set icon=<name>:<color>, and the colours in use")
     x = ps.add_parser("create")
     x.add_argument("--title", required=True)
     x.add_argument("--repo", action="append")
-    x.add_argument("--set", action="append", metavar="FIELD=VALUE", help="domain, goal, next_step, status")
+    x.add_argument("--set", action="append", metavar="FIELD=VALUE", help="domain, goal, next_step, status, icon")
     _evidence(x, "context")
     x.add_argument("--reason")
     _add_ctx(x)

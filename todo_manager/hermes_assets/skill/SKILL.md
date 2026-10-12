@@ -1,7 +1,7 @@
 ---
 name: todo-manager
 description: "The user's todos, tasks, projects, follow-ups and delegated agent work (Notion Todo Manager + Hermes Kanban), kept by the `todo-manager` command. Use it in the Todo Manager cron runs and whenever the user talks about their todos, reminders, delegated work, their Todo preferences (what becomes a task, what to ignore, when to ask), or how this automation should behave."
-version: 3.5.0
+version: 3.6.0
 author: todo-manager
 license: AGPL-3.0-only
 metadata:

@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from . import batching, clock, delegation, effects, feedback, gate_intake, i18n, prefs, runs, store
+from . import batching, clock, delegation, effects, feedback, gate_intake, i18n, prefs, project_icons, runs, store
 from .config import Config
 from .db import dumps, get_meta, loads, tx
 from .notion import body as notion_body
@@ -464,9 +464,11 @@ def project_create(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, *, title: st
     evidence = evidence or []
     if not (title or "").strip():
         raise OpError("INVALID", "--title is required")
-    unknown = set(fields) - {"domain", "goal", "next_step", "status"}
+    unknown = set(fields) - {"domain", "goal", "next_step", "status", "icon"}
     if unknown:
-        raise OpError("INVALID", f"unknown fields {sorted(unknown)} for a new project (domain, goal, next_step, status)")
+        raise OpError("INVALID", f"unknown fields {sorted(unknown)} for a new project (domain, goal, next_step, status,"
+                                 " icon)")
+    fields = _checked_icon(fields)
     args = {"title": title, "fields": fields, "repos": repos, "evidence": evidence}
 
     def apply() -> dict[str, Any]:
@@ -482,6 +484,26 @@ def project_create(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, *, title: st
     return perform(conn, ctx, "project create", args, apply)
 
 
+def _checked_icon(fields: dict[str, Any]) -> dict[str, Any]:
+    if "icon" not in fields:
+        return fields
+    try:
+        return {**fields, "icon": project_icons.check(fields["icon"])}
+    except ValueError as exc:
+        raise OpError("INVALID", str(exc)) from None
+
+
+def project_icon_choices(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Icon names and colours for a new project, with the colours active projects already use."""
+    in_use: dict[str, list[str]] = {}
+    for p in store.list_projects(conn):
+        name, sep, color = (project_icons.normalize(p.get("icon")) or "").partition(":")
+        if sep and color in project_icons.COLORS:
+            in_use.setdefault(color, []).append(p["title"])
+    return {"names": list(project_icons.NAMES), "colors": list(project_icons.COLORS), "in_use": in_use,
+            "free_colors": [c for c in project_icons.COLORS if c not in in_use]}
+
+
 def project_update(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, project_id: str, *, changes: dict[str, Any],
                    based_on: int | None = None, repos_add: list[str] | None = None,
                    repos_remove: list[str] | None = None, evidence: list[tuple[str, str]] | None = None,
@@ -492,6 +514,7 @@ def project_update(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, project_id: 
     unknown = set(changes) - set(store.PROJECT_FIELDS)
     if unknown:
         raise OpError("INVALID", f"unknown project fields {sorted(unknown)}; fields: {', '.join(store.PROJECT_FIELDS)}")
+    changes = _checked_icon(changes)
     args = {"project": project_id, "changes": changes, "based_on": based_on, "repos_add": repos_add or [],
             "repos_remove": repos_remove or [], "evidence": evidence}
 

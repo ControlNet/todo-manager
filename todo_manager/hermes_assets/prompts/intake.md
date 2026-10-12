@@ -78,8 +78,10 @@ every NEW item one outcome:
   a system or lab service, a hiring round), not a kind of chore. When you create or update a task,
   the search you make for duplicates also shows its related open tasks: if it and at least two
   of them belong to one such piece of work, put them all in its project (an existing one first,
-  `todo-manager project list`; else `todo-manager project create --run <run> --title "..."`),
+  `todo-manager project list`; else `todo-manager project create --run <run> --title "..." --set icon=<name>:<color>`),
   with `--project <project>` on a new task and `--set project_id=<project>` on each existing one.
+  A new project's icon: from `todo-manager project icons`, a name that fits the work and the
+  first of `free_colors` (no other project's colour).
   Leave one-off matters and routine service (single reviews, admin requests) without a project.
 - A clipped item says how to read the rest (`todo-manager source show <item>`); read it when the
   visible part does not settle the decision.

@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from .. import clock, delegation, effects, feedback, health, i18n, ids, outbox, store
+from .. import clock, delegation, effects, feedback, health, i18n, ids, outbox, project_icons, store
 from ..config import Config
 from ..db import dumps, get_meta, loads, set_meta, tx
 from . import body, schema
@@ -427,8 +427,11 @@ class NotionSync:
         if row["trashed"]:
             self._page_restored(kind, row, page)
         seen = row["last_seen_props"]
-        current = schema.comparable(kind, values)
-        changed = {f: current.get(f) for f in schema.editable_fields(kind) if current.get(f) != seen.get(f)}
+        current = {**schema.comparable(kind, values), **_page_icon(kind, page)}
+        if kind == "project" and "icon" not in seen:
+            seen = self._adopt_icon(row, current["icon"], seen)
+        editable = _editable(kind)
+        changed = {f: current.get(f) for f in editable if current.get(f) != seen.get(f)}
         # Unmappable values (e.g. an unknown status option) are reported, not imported.
         for f in list(changed):
             if current.get(f) is None and any(p.field == f for p in schema.PROPS[kind] if p.type == "select") \
@@ -443,8 +446,7 @@ class NotionSync:
         still_pending = {f: v for f, v in pending.items() if f not in echo and current.get(f) == seen.get(f)}
         if not changed:
             with tx(self.conn):
-                self._seen(page["id"], {**seen, **{k: v for k, v in current.items() if k not in schema.editable_fields(kind)}},
-                           page)
+                self._seen(page["id"], {**seen, **{k: v for k, v in current.items() if k not in editable}}, page)
                 self._set_pending(page["id"], still_pending, row["pending_write"].get("version"))
             return "unchanged"
         editor = (page.get("last_edited_by") or {}).get("id")
@@ -457,6 +459,15 @@ class NotionSync:
         with tx(self.conn):
             self._set_pending(page["id"], still_pending, row["pending_write"].get("version"))
         return "edited" if self.is_user(editor) else "evidence"
+
+    def _adopt_icon(self, row: dict[str, Any], icon: str | None, seen: dict[str, Any]) -> dict[str, Any]:
+        """First read since project icons are synced: an icon already on the page is the user's."""
+        with tx(self.conn):
+            if icon and not store.get_project(self.conn, row["entity_id"]).get("icon"):
+                store.update_project(self.conn, row["entity_id"], {"icon": icon}, actor="human", origin="notion")
+            seen = {**seen, "icon": icon}
+            self._seen(row["page_id"], seen)
+        return seen
 
     def _unverified_edit(self, kind: str, row: dict[str, Any], page: dict[str, Any], changed: dict[str, Any],
                          seen: dict[str, Any], current: dict[str, Any], editor: str | None) -> None:
@@ -794,7 +805,7 @@ class NotionSync:
                 matches.sort(key=lambda p: p.get("created_time") or "")
             page = matches[0]
             values, _ = schema.parse_page(kind, page, self.pmap(kind))
-            self._link(kind, entity["id"], page, schema.comparable(kind, values))
+            self._link(kind, entity["id"], page, {**schema.comparable(kind, values), **_page_icon(kind, page)})
             return self.entity_row(kind, entity["id"])
         if reconcile and self.conn.execute(
                 "SELECT 1 FROM outbox WHERE op=? AND entity_id=? AND status='uncertain'"
@@ -805,14 +816,15 @@ class NotionSync:
         props = schema.render_properties(kind, values, self.pmap(kind))
         markdown = self.render_body(entity) if kind == "task" else None
         parent = {"type": "data_source_id", "data_source_id": self.data_source(kind)}
+        icon = project_icons.render(entity.get("icon")) if kind == "project" else None
         try:
-            page = self.client.create_page(parent, props, markdown=markdown)
+            page = self.client.create_page(parent, props, markdown=markdown, icon=icon)
         except NotionUncertain as exc:
             if exc.committed_id:
                 page = self.client.retrieve_page(exc.committed_id)
             else:
                 raise outbox.Uncertain(str(exc)) from None
-        self._link(kind, entity["id"], page, schema.comparable(kind, values))
+        self._link(kind, entity["id"], page, {**schema.comparable(kind, values), **_page_icon(kind, page)})
         if markdown:
             # The visible-text fingerprint of what we sent identifies our region until the next read.
             self._store_region(page["id"], markdown, markdown)
@@ -841,16 +853,21 @@ class NotionSync:
         entity = store.get_task(self.conn, entity_id) if kind == "task" else store.get_project(self.conn, entity_id)
         values = self.task_values(entity) if kind == "task" else self.project_values(entity)
         target = schema.comparable(kind, values)
-        on_page = schema.comparable(kind, schema.parse_page(kind, page, self.pmap(kind))[0])
+        on_page = {**schema.comparable(kind, schema.parse_page(kind, page, self.pmap(kind))[0]), **_page_icon(kind, page)}
+        if kind == "project":
+            target["icon"] = project_icons.normalize(entity.get("icon"))
+            if not project_icons.writable(target["icon"]):
+                target["icon"] = on_page["icon"]     # an uploaded image: what the page has
         diff = {f for f in target if target[f] != on_page.get(f)}
         result: dict[str, Any] = {"props": sorted(diff)}
         if diff:
-            props = schema.render_properties(kind, values, self.pmap(kind), only=diff)
+            props = schema.render_properties(kind, values, self.pmap(kind), only=diff - {"icon"})
+            extra = {"icon": project_icons.render(target["icon"])} if "icon" in diff else {}
             with tx(self.conn):
                 # Expected values, kept until the write is confirmed (response or a later read).
                 self._set_pending(row["page_id"], {f: target[f] for f in diff}, entity["version"])
             try:
-                page = self.client.update_page(row["page_id"], props)
+                page = self.client.update_page(row["page_id"], props or None, **extra)
             except NotionUncertain as exc:
                 raise outbox.Uncertain(str(exc)) from None   # a retry re-reads and re-diffs: idempotent
             except NotionError:
@@ -1321,3 +1338,12 @@ def _cursor_error(conn: sqlite3.Connection, scope: str, error: str) -> None:
 
 def new_setup_marker() -> str:
     return ids.new_id("run")
+
+
+def _editable(kind: str) -> list[str]:
+    """Fields the user may change in Notion; a project's page icon is one."""
+    return schema.editable_fields(kind) + (["icon"] if kind == "project" else [])
+
+
+def _page_icon(kind: str, page: dict[str, Any]) -> dict[str, Any]:
+    return {"icon": project_icons.from_page(page.get("icon"))} if kind == "project" else {}

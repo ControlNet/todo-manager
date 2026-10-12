@@ -16,7 +16,7 @@ export [--verify]
 restore FILE_OR_BUNDLE [--yes]
 uninstall [--dry-run] [--yes]
 task list|show|create|update
-project list|show|create|update
+project list|show|icons|create|update
 source show|search|dismiss|defer
 feedback list|show|record|resolve
 delegate list|show|create|message|answer|approve

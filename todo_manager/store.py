@@ -31,7 +31,7 @@ TASK_FIELDS = (
     "focus", "focus_reason", "change_note", "decision",
 )
 PROJECT_FIELDS = (
-    "title", "domain", "status", "goal", "next_step", "blockers", "recent_activity",
+    "title", "domain", "status", "goal", "next_step", "blockers", "recent_activity", "icon",
 )
 ACTORS = ("human", "agent", "program")
 
@@ -95,16 +95,16 @@ def create_project(conn: sqlite3.Connection, title: str, *, origin: str, actor: 
                    cause_ref: str | None = None, domain: str | None = None,
                    goal: str | None = None, next_step: str | None = None,
                    repos: Iterable[str] = (), project_id: str | None = None,
-                   notion_page_id: str | None = None, status: str = "active") -> str:
+                   notion_page_id: str | None = None, status: str = "active", icon: str | None = None) -> str:
     pid = project_id or ids.new_id("project")
     now = _now()
     repos = sorted(set(repos))
-    meta = {f: {"by": actor, "v": 1} for f in ("title", "domain", "goal", "next_step", "status", "repos")}
+    meta = {f: {"by": actor, "v": 1} for f in ("title", "domain", "goal", "next_step", "status", "repos", "icon")}
     with tx(conn):
         conn.execute(
-            "INSERT INTO projects(id, title, domain, status, goal, next_step, origin, notion_page_id,"
-            " field_meta, version, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,1,?,?)",
-            (pid, title.strip(), domain, status, goal, next_step, origin, notion_page_id,
+            "INSERT INTO projects(id, title, domain, status, goal, next_step, icon, origin, notion_page_id,"
+            " field_meta, version, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?)",
+            (pid, title.strip(), domain, status, goal, next_step, icon, origin, notion_page_id,
              dumps(meta), now, now))
         for repo in repos:
             conn.execute("INSERT OR IGNORE INTO project_repos(project_id, repo) VALUES (?,?)", (pid, repo))
