@@ -4,7 +4,7 @@
   read, safe while gates and applies run), then writes from that copy only: human-readable
   Markdown (tasks/, projects/, views/, and rules/ for the rules of a pre-8 workspace),
   ``data.json`` (every table, including the board linkage) and ``workspace/`` (config.toml
-  without secrets, the managed AGENTS.md and rules-archive.md, the run context
+  without secrets, the managed AGENTS.md, rules-archive.md, the user's PREFERENCES.md, the run context
   ``runs/<id>`` of the runs in the snapshot, the delivery files the snapshot's deliveries refer
   to) into ``exports/<stamp>/``;
   ``manifest.json`` lists every file with its SHA-256, every table with its row hash, kept
@@ -42,7 +42,7 @@ from .files import sha256_file
 from .notion.schema import label as option_label
 
 EXPORT_FORMAT = "todo-manager-export/2"
-WORKSPACE_FILES = ("config.toml", prefs.AGENTS, prefs.ARCHIVE)
+WORKSPACE_FILES = ("config.toml", prefs.AGENTS, prefs.ARCHIVE, prefs.PREFERENCES)
 SECRET_KEY = re.compile(r"(token|secret|password|passwd|api_?key|private_?key|credential)", re.I)
 SAFE_KEYS = {"token_env", "token_file"}   # names of where a secret lives, not the secret
 
@@ -485,7 +485,7 @@ def backup(conn: sqlite3.Connection, cfg: Config, keep: int | None = None, prefi
 
 
 def files_of(backup_path: Path) -> Path:
-    """The workspace files (config.toml, AGENTS.md, rules-archive.md) kept with a backup."""
+    """The workspace files (config.toml, AGENTS.md, rules-archive.md, PREFERENCES.md) kept with a backup."""
     return backup_path.with_name(backup_path.stem + ".files")
 
 

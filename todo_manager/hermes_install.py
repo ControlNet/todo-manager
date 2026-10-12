@@ -512,7 +512,7 @@ class Installer:
 
 
 def kept_after_uninstall(cfg: config.Config, active_delegations: int) -> list[str]:
-    out = [f"kept: the workspace {cfg.home} (database, config.toml, AGENTS.md, rules-archive.md, exports, backups),"
+    out = [f"kept: the workspace {cfg.home} (database, config.toml, AGENTS.md, rules-archive.md, PREFERENCES.md, exports, backups),"
            " the Notion pages and the Hermes board",
            "not touched: Hermes' USER.md, MEMORY.md, SOUL.md and other skills",
            "to take the data elsewhere: `todo-manager export`; to delete it, remove the workspace directory yourself"]

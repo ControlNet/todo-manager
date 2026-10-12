@@ -30,7 +30,7 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
   feedback classification has not been measured. The current small-command interface enforces input validity, identity and versioned
   writes. Items without an outcome remain pending; there is no full-run coverage contract,
   fixed ignore taxonomy or semantic classifier in Python. Relevance and priorities depend
-  on the prompts and native user preferences.
+  on the prompts, the workspace `PREFERENCES.md` and native user preferences.
 - **Source adapters are verified for fetching, not for judgement.** Gmail, Slack and GitHub are
   covered by recorded-shape tests (`tests/test_sources.py`, fake HTTP) and have been run read-only
   against real accounts (fetch, batching, name resolution, DM discovery and polling cadence,

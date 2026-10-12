@@ -367,6 +367,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "last_runs": {entry: [{k: r[k] for k in ("id", "started_at", "status", "wake_reasons")}
                               for r in runs.recent(conn, entry, 3)] for entry in ("intake", "feedback")},
         "conventions": {"file": str(prefs.agents_path(cfg.home)),
+                        "preferences_file": str(prefs.preferences_path(cfg.home)),
                         "problems": prefs.problems(cfg.home)},
         "installation": installation,
         "problems": list(dict.fromkeys(problems + installation['problems'])),

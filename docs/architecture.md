@@ -49,27 +49,33 @@ independent of cron schedules. Waiting on a person or a future retry does not by
 
 | Surface | Owner | Actual loading and scope | Upgrade |
 |---|---|---|---|
+| Workspace `PREFERENCES.md` | User | Read afresh by both gates and printed into every woken intake/feedback context (first 8000 characters; refused cron phrases withheld) | Never written by the installer; edited directly by the user or by Hermes on the user's words |
 | Dedicated Todo workspace `AGENTS.md` | Project | Hermes project discovery when cron has workdir; higher-priority HERMES.md / AGENTS.override.md may shadow it | Back up, then replace a known owned file |
 | `hermes_assets/prompts/intake.md` | Project | Source template; installer copies text into native cron `prompt` | Native cron edit, not a runtime file loader |
 | `hermes_assets/prompts/feedback.md` | Project | Same, including delegation and interaction workflow | Native cron edit; no delegation.md |
 | `skills/productivity/todo-manager/SKILL.md` | Project | Native cron skills, command reference and constraints | Back up and replace when ownership is known |
-| `<profile home>/memories/USER.md` | User/Hermes | Native profile preference snapshot at session start; shared by both cron sessions in that profile | Never managed by this installer |
+| `<profile home>/memories/USER.md` | User/Hermes | Native profile preference snapshot at session start; shared by every session in that profile; not used for Todo conventions | Never managed by this installer |
 | `<profile home>/memories/MEMORY.md` | Hermes/user | Native factual memory, enabled independently | Never managed |
 | `<profile home>/SOUL.md` | User/Hermes | Native identity, separate from project discovery | Never managed |
 | Cron schedule, deliver, failure_deliver, workdir, skills, model, provider, reasoning_effort, paused state | User | Native cron definition | Existing values preserved even when matching an old default |
 
-The workspace contains no substitute USER.md, MEMORY.md or SOUL.md. Short lasting preferences
-use the native memory tool's `user` target. Explicit user corrections in chat are handled in
-that chat; no Matrix history scan is scheduled. Feedback may act on an authenticated user's
-explicit preference request, respecting capacity, enable flags and write approval. A staged
-write is not a completed import. Workflow-specific preferences name their scope explicitly;
-USER.md is not a per-cron access-control boundary. Writes do not alter a running worker's
-frozen memory snapshot. Task changes go through card messages.
+Todo conventions (what becomes a task, what to ignore, when to ask, how to delegate) live in
+the workspace `PREFERENCES.md`, the user's own file with scope headings (General, Intake,
+Feedback, Delegation). The skill tells a chat session to edit it directly on the user's words
+instead of using the memory tool, so the profile-wide USER.md capacity is not spent on Todo
+rules and nothing in Hermes is migrated or changed. Feedback may edit it on a feedback item
+written by the user; intake never does. Each woken run reads it again, so an edit applies from
+the next run without a command. A running agent card does not see it: requirements for running
+work go through card messages. The workspace contains no substitute MEMORY.md or SOUL.md, and
+other personal preferences stay in native memory under its capacity, enable flags and write
+approval. Explicit user corrections in chat are handled in that chat; no Matrix history scan is
+scheduled.
 
 Cron agents skip background memory/skill review in this version. Explicit memory tool calls
 are a separate path. Todo Manager does not increase memory limits, evict entries or replicate
-profile memory. Old rules and revisions remain in the database/archive for audit, without a
-runtime DSL, preference parser or approval gate. `prefs.file_hash`, `_rules_check`, `--rules`
+profile memory. Old rules and revisions remain in the database/archive for audit. The
+preferences file is free text given to the model as written: there is no runtime DSL,
+preference parser or approval gate. `prefs.file_hash`, `_rules_check`, `--rules`
 and gate `rules_hash` writes have been removed. The old SQL column remains for historical
 exports. Task versions, human field ownership, request idempotency and approval versions remain.
 

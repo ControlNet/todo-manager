@@ -144,6 +144,17 @@ class CliTests(CliCase):
         safety = Path(json.loads(out)["safety_backup"])
         self.assertEqual((safety.with_name(safety.stem + ".files") / "AGENTS.md").read_text(), "# Replaced by mistake\n")
 
+    def test_a_backup_keeps_the_preferences_file_and_a_restore_brings_it_back(self):
+        preferences = self.home / "PREFERENCES.md"
+        preferences.write_text("## Intake\n- Review invitations become tasks only once I accept.\n")
+        kept = preferences.read_text()
+        backup = self.safety_backup()
+        preferences.write_text("# Replaced by mistake\n")
+        code, out = self.tm("restore", str(backup), "--yes", "--json")
+        self.assertEqual(code, 0, out)
+        self.assertIn("PREFERENCES.md", json.loads(out)["files_restored"])
+        self.assertEqual(preferences.read_text(), kept)
+
     def test_export_imports_into_a_new_directory(self):
         _, out = self.tm("task", "create", "--human", "--title", "Moving task")
         tid = json.loads(out)["task"]

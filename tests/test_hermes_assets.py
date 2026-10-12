@@ -40,3 +40,18 @@ class ScheduledRunAuthorityTests(unittest.TestCase):
             self.assertIn("todo-manager config set <key> <value>", text)
             self.assertIn("state/", text)
             self.assertNotIn("My Todo conventions", text)
+
+    def test_todo_preferences_are_edited_in_the_workspace_file(self):
+        skill = flat("skill/SKILL.md")
+        self.assertIn("PREFERENCES.md", skill.split("## Command reference")[0], "named before the commands")
+        self.assertIn("edit it directly", skill)
+        self.assertIn("not the memory tool", skill)
+        for scope in ("## General", "## Intake", "## Feedback", "## Delegation"):
+            self.assertIn(scope, skill)
+        self.assertIn("preferences", hermes_install.asset("skill/SKILL.md").split("---")[1].lower(),
+                      "the skill description makes a chat about preferences load it")
+        self.assertIn("PREFERENCES.md", flat("cron/feedback.md"))
+        self.assertIn("not AGENTS.md, PREFERENCES.md, config.toml", flat("cron/intake.md"))
+        for name in ("workspace/AGENTS.md", "workspace/AGENTS.zh-CN.md"):
+            self.assertIn("PREFERENCES.md", flat(name))
+

@@ -67,8 +67,10 @@ hermes cron list                                      # find the two native job 
 ```
 
 A scheduled run does not change framework files or native cron settings. Authenticated user
-feedback may change allowed source settings or explicitly request native USER.md memory updates.
-Memory capacity, enable flags and write approval apply; running sessions retain their snapshots.
+feedback may change allowed source settings or the workspace `PREFERENCES.md` (Todo conventions;
+used from the next run). Edit that file yourself or ask Hermes in chat; `todo-manager status`
+shows its path as `preferences_file`, and health reports it when it is longer than the 8000
+characters a run sees or contains phrases Hermes refuses in a cron prompt.
 
 ## Daily checks
 
@@ -145,7 +147,7 @@ todo-manager uninstall --yes
 Removed: the two cron jobs (`hermes cron remove`), the gate scripts, the launcher, and the
 skill only when it is unchanged since install (a skill you or Hermes changed is kept; remove it
 in Hermes if you no longer want it). Kept: the workspace (database, `config.toml`, `AGENTS.md`,
-`rules-archive.md`, exports, backups), the Notion pages and the Hermes board. Hermes' `USER.md`,
+`rules-archive.md`, `PREFERENCES.md`, exports, backups), the Notion pages and the Hermes board. Hermes' `USER.md`,
 `MEMORY.md`, `SOUL.md` and other skills are never touched. Close open delegations first
 (`todo-manager delegate cancel <id>`), otherwise Hermes keeps working on their cards. To delete
 the data as well, remove the workspace directory yourself after exporting. `install` again
@@ -259,7 +261,7 @@ Keys that no longer have an effect (`status --details` names them while `config.
 |---|---|
 | `kanban.max_running` | Hermes schedules agent work; its dispatcher limits apply (`hermes config get kanban.max_in_progress`) |
 | `wake.over_budget`, `feedback.over_budget` | an over-budget context is clipped with pointers and the run goes ahead |
-| `wake.max_questions_per_run` | when to ask is a scoped preference in native USER.md |
+| `wake.max_questions_per_run` | when to ask is a preference in the workspace `PREFERENCES.md` |
 
 ## Migrating an older Notion todo system
 

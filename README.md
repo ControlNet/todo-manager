@@ -15,7 +15,8 @@ sync, the durable link between a task and its agent cards, and install/upgrade/e
   thread has gone quiet. Every new item ends up either linked to a task or dismissed with a
   reason; nothing is dropped silently, and there is no "please triage" inbox.
 - **Your conventions, in your words.** What counts as your responsibility, what to ignore, when
-  to ask: native `<profile home>/memories/USER.md`, maintained by Hermes on your explicit request. Settings such as
+  to ask: `PREFERENCES.md` in the workspace, written by you or by Hermes when you ask in chat
+  or in a Notion comment, and given to every run as written. Settings such as
   "wait an hour of Slack silence" are `config.toml` values (`todo-manager config set`).
 - **Your edits win.** Changes you make in Notion properties are imported as yours; agent
   judgements based on older versions never overwrite them, and tasks you closed are never
