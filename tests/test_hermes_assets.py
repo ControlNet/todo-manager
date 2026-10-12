@@ -83,3 +83,8 @@ class OptionalInvitationTests(unittest.TestCase):
         text = flat("cron/intake.md")
         self.assertIn("no reply simply means no", text)
         self.assertIn("surveys, rankings", text)
+
+    def test_recurring_meetings_are_not_tasks(self):
+        text = flat("cron/intake.md")
+        self.assertIn("A recurring meeting", text)
+        self.assertIn("nor is one occurrence of it", text)

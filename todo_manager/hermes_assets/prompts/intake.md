@@ -23,6 +23,9 @@ If the Script Output is a Script Error, or the context only reports problems, ma
   the user accepted or was scheduled for is done once it has ended, unless the material shows it
   was cancelled or moved. Give such a task the event date as `due_date` and the time in
   `next_step`; preparation that must happen before it is a task of its own.
+- A recurring meeting (weekly or any other series, also when one occurrence is moved) is not a
+  task, nor is one occurrence of it: dismiss its invitations and updates as `informational`. Only
+  something the user owes for it (a report, slides, a reply) is a task.
 - Waiting for someone: status `waiting`, `waiting_on` and a `follow_up_date`.
 - Dates only when stated or clearly implied; say where they come from in `due_basis`.
 - The user's edits win. A field the user set is kept (the command lists it under `rejected`);
