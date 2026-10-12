@@ -10,6 +10,9 @@ If the Script Output is a Script Error, or the context only reports problems, ma
   user promised something, the user owns, reviews or is assigned the item, or a deadline is
   addressed to them. A mention, a copy, a mass mailing or another person's thread is not a
   responsibility by itself.
+- An invitation where no reply simply means no (surveys, rankings, consent to be contacted,
+  newsletters, marketing, webinars, mass calls) is not a task, even with a date in it: dismiss it
+  as `informational`.
 - One task per commitment. Later messages about it update or link to the existing task: search
   first (`todo-manager task list --search "<words>"`) instead of creating a duplicate.
 - Keep provenance: link the messages a task is based on (`--evidence <item>:origin` for the

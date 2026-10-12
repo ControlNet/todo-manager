@@ -73,3 +73,13 @@ class TaskRoutingTests(unittest.TestCase):
             for choice in ("Cancel", "Done", "My to-do", "Assign to Agent"):
                 self.assertIn(choice, text, name)
         self.assertIn("take effect without a run", flat("cron/feedback.md"))
+
+
+class OptionalInvitationTests(unittest.TestCase):
+    """A survey, ranking, marketing or opt-in request where no reply simply means no is not a task,
+    even with a date in it (a ranking-survey consent request became a decision, 2026-10-12)."""
+
+    def test_intake_dismisses_optional_invitations(self):
+        text = flat("cron/intake.md")
+        self.assertIn("no reply simply means no", text)
+        self.assertIn("surveys, rankings", text)
