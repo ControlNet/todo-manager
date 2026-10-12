@@ -248,8 +248,9 @@ is a configuration choice, not proof of worker readiness; existing health checks
 `install` now upgrades an existing project-owned Decisions list into a four-column board:
 Pending, Agree, Decline, Assign to Agent. Notion cannot change a view's layout type through
 PATCH, so installation creates a board as the first tab of the same database container and
-preserves the old list. It also adds All open tasks to the home page. Existing custom decision
-filters/layouts stop migration for review rather than being overwritten.
+preserves the old list. It also adds All open tasks, with its heading, after the Decisions
+board. Existing custom decision filters/layouts stop migration for review rather than being
+overwritten.
 
 The editable Decision select is separate from Task status. Agree/Decline queue version-bound
 feedback for Hermes; neither completes a task automatically or approves external actions.

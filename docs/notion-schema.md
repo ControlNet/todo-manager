@@ -104,11 +104,11 @@ Archived / 归档. The task relation adds a back-relation column "Tasks" / "任�
 
 | Section (en / zh-CN) | Linked view | Filter |
 |---|---|---|
-| 📋 All open tasks / 全部未完成任务 | table | every task except done/cancelled |
 | ⭐ Focus / 精选待办 | table | open (to do, in progress), next by me, not snoozed, and focus or due within a week |
+| 🤔 To decide / 需要决定 | board by decision | status to decide or a recorded decision |
+| 📋 All open tasks / 全部未完成任务 | table | every task except done/cancelled |
 | 📁 Active projects / 活跃项目 | table | project status active |
 | ⏳ Waiting on others / 等待别人 | table | waiting, not snoozed; sorted by follow-up date |
-| 🤔 To decide / 需要决定 | board by decision | status to decide or a recorded decision |
 | 🤖 Agent queue / working / Agent 排队／处理中 | board by agent work | any agent work state |
 | ✅ To review / answer / 待我验收／待我补充 | table | status to review, or agent work needs my answer / to review / delivered |
 | 🕘 Recently done and notable changes / 最近完成与重要变化 | table | edited in the last week and closed, or with a change note |
@@ -119,6 +119,12 @@ problems (stale sources, given-up writes, quarantined agent work, failed feedbac
 hour of the last check. It is rewritten only when its content changes; logs never go to Notion.
 
 `todo-manager export` writes the same sections, computed locally, to `views/home.md`.
+
+Each section's heading is its title. Every linked view also shows the source database title
+("Tasks" / "任务") above it; the Notion API cannot hide it, so hide it in Notion itself (the
+view's `···` menu, "Hide database title"). The API cannot move existing blocks either: the order
+above applies to new home pages, and an existing page is reordered by dragging. Neither changes
+synchronization, which follows view IDs, not block positions.
 
 Views made by an earlier version (before the "Agent work" states above) are updated by
 `todo-manager install`, after your confirmation, only while their filter is still the one Todo

@@ -34,6 +34,7 @@ class FakeNotion:
         self.markdown: dict[str, str] = {}
         self.comments: list[dict[str, Any]] = []
         self.views: dict[str, dict[str, Any]] = {}
+        self.blocks: dict[str, list[dict[str, Any]]] = {}   # page id -> top-level blocks, in order
         self.calls: list[tuple[str, str]] = []
         self.fail_next: dict[tuple[str, str], Exception] = {}
         self.precise_times = False   # True: page edit times keep their seconds (default: rounded to the minute)
@@ -45,6 +46,27 @@ class FakeNotion:
     # ------------------------------------------------------------------ helpers
     def _id(self, prefix: str) -> str:
         return f"{prefix}-{next(self._ids):04d}-{uuid.uuid4().hex[:8]}"
+
+    def block(self, kind: str, text: str = "", id: str | None = None) -> dict[str, Any]:
+        """A top-level page block; ``child_database`` blocks share their database's id."""
+        data = {"title": text} if kind == "child_database" else {
+            "rich_text": [{"type": "text", "text": {"content": text}, "plain_text": text}]}
+        return {"object": "block", "id": id or self._id("block"), "type": kind, kind: data}
+
+    @staticmethod
+    def text(block: dict[str, Any]) -> str:
+        return "".join(t.get("plain_text") or t.get("text", {}).get("content", "")
+                       for t in block[block["type"]].get("rich_text", []))
+
+    def _insert_blocks(self, page_id: str, new: list[dict[str, Any]], after: str | None, kind: str = "end") -> None:
+        blocks = self.blocks.setdefault(page_id, [])
+        if kind == "start":
+            at = 0
+        elif kind == "after_block":
+            at = next(i for i, b in enumerate(blocks) if b["id"] == after) + 1
+        else:
+            at = len(blocks)
+        blocks[at:at] = new
 
     def _touch(self, page: dict[str, Any], who: str) -> None:
         page["last_edited_time"] = clock.iso() if self.precise_times else _minute(clock.iso())
@@ -279,8 +301,17 @@ class FakeNotion:
             if body.get("discussion_id"):
                 page_id = next(c["parent"]["page_id"] for c in self.comments if c["discussion_id"] == body["discussion_id"])
             return copy.deepcopy(self._add_comment(page_id, body["markdown"], body.get("discussion_id"), BOT_ID))
+        if parts[0] == "blocks" and parts[2] == "children" and method == "PATCH":
+            new = [self.block(c["type"], self.text(c) if "rich_text" in c[c["type"]] else "")
+                   for c in body["children"]]
+            position = body.get("position") or {"type": "end"}
+            if position["type"] == "after_block" and "id" not in (position.get("after_block") or {}):
+                # The real API: append-children positions are {type, after_block: {id}}, unlike views.
+                raise HttpError(400, "body.position.after_block should be defined", body={"code": "validation_error"})
+            self._insert_blocks(parts[1], new, (position.get("after_block") or {}).get("id"), position["type"])
+            return {"results": copy.deepcopy(new), "has_more": False, "next_cursor": None}
         if parts[0] == "blocks" and parts[2] == "children":
-            return {"results": [], "has_more": False, "next_cursor": None}
+            return self._paged(copy.deepcopy(self.blocks.get(parts[1], [])), params)
         if parts == ["views"] and method == "GET":
             views = [v for v in self.views.values() if
                      (not params.get('data_source_id') or v.get('data_source_id') == params['data_source_id']) and
@@ -293,6 +324,10 @@ class FakeNotion:
             vid = self._id("view")
             self.views[vid] = {"object": "view", "id": vid, **body,
                                'parent': {'type': 'database_id', 'database_id': body.get('database_id') or self._id('linked-db')}}
+            if body.get('create_database') and body['create_database']['parent']['page_id'] in self.blocks:
+                self._insert_blocks(body['create_database']['parent']['page_id'],
+                                    [self.block('child_database', id=self.views[vid]['parent']['database_id'])],
+                                    (position or {}).get('block_id'), (position or {}).get('type', 'end'))
             return copy.deepcopy(self.views[vid])
         if parts[0] == "views" and len(parts) == 2 and method in ("GET", "PATCH"):
             if parts[1] not in self.views:

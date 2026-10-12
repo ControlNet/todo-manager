@@ -15,6 +15,13 @@ class DecisionBoardTests(NotionCase):
         self.assertIn('all', specs)
         self.assertFalse(specs['decision']['configuration']['group_by']['hide_empty_groups'])
 
+    def test_home_starts_with_focus_then_decisions_then_all_open_tasks(self):
+        headings = [line[3:] for line in setup.home_markdown('zh-CN').splitlines() if line.startswith('## ')]
+        self.assertEqual(headings[:3], ['⭐ 精选待办', '🤔 需要决定', '📋 全部未完成任务'])
+        self.assertEqual([s['key'] for s in setup.view_specs(self.sync.state.task_props.ids,
+                                                             self.sync.state.project_props.ids, 'zh-CN')],
+                         list(setup.SECTIONS))
+
     def test_drag_records_feedback_and_reversal_invalidates_old_context(self):
         tid = store.create_task(self.conn, 'Attend a meeting?', origin='cli', status='decision')
         self.push(tid)
@@ -215,6 +222,29 @@ class DecisionMigrationTests(NotionCase):
         self.assertEqual(len(self.fake.views), count + 1, 'only the all-open view remains to create')
         self.assertEqual(get_meta(self.conn, 'notion.decision_ui_version'), '1')
         self.assertEqual(len([v for v in self.fake.views.values() if v['name']=='需要决定' and v['type']=='board']), 1)
+
+
+    def test_all_open_tasks_get_their_heading_after_the_decision_board_once(self):
+        from todo_manager.notion import decision_migration
+        from todo_manager.notion.client import NotionUncertain
+        from todo_manager.db import get_meta, loads
+        views = self.old_ui()
+        home = get_meta(self.conn, 'notion.home_page_id')
+        container = lambda key: self.fake.views[views[key]]['parent']['database_id']
+        b = self.fake.block
+        self.fake.blocks[home] = [b('callout', 'freshness'), b('heading_2', '⭐ 精选待办'),
+                                  b('child_database', id=container('focus')), b('heading_2', '🤔 需要决定'),
+                                  b('child_database', id=container('decision')),
+                                  b('heading_2', '🤖 Agent 排队／处理中'), b('child_database', id=container('agent'))]
+        self.fake.lose_response.add(('PATCH', f'/blocks/{home}/children'))
+        with self.assertRaises(NotionUncertain):
+            decision_migration.apply(self.conn, self.client, self.tmp)
+        decision_migration.apply(self.conn, self.client, self.tmp)
+        all_open = self.fake.views[loads(get_meta(self.conn, 'notion.views'), {})['all']]['parent']['database_id']
+        order = [x['id'] if x['type'] == 'child_database' else self.fake.text(x) for x in self.fake.blocks[home]]
+        self.assertEqual(order[3:8], ['🤔 需要决定', container('decision'), '📋 全部未完成任务', all_open,
+                                      '🤖 Agent 排队／处理中'])
+        self.assertEqual(order.count('📋 全部未完成任务'), 1, 'a lost response is reconciled, not repeated')
 
 
 class DecisionSchemaMigrationTests(__import__('unittest').TestCase):

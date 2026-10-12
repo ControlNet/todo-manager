@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from urllib.parse import unquote
 
-from .. import clock
+from .. import clock, i18n
 from ..db import get_meta, loads, dumps
 from . import schema, setup
 from .client import NotionUncertain
@@ -47,7 +47,7 @@ def plan(conn, client):
             'lang': lang, 'home_blocks': client.block_children(home), 'changes': [
                 'Add the Decision select: Pending / Agree / Decline / Assign to Agent.',
                 'Add a draggable Decisions board as the first tab in the same database; retain the original list as a fallback.',
-                'Add All open tasks to the home page; retain existing views, comments and custom content.',
+                'Add All open tasks, with its heading, after the Decisions board on the home page; retain existing views, comments and custom content.',
                 'Initialize empty decisions on existing decision tasks as Pending; do not submit decisions or delegations.']}
 
 
@@ -104,8 +104,9 @@ def apply(conn, client, home: Path):
     if 'all' not in views:
         spec = specs['all']
         placement = {'parent': {'type': 'page_id', 'page_id': proposed['home']}}
-        if proposed['home_blocks']:
-            placement['position'] = {'type': 'after_block', 'block_id': proposed['home_blocks'][0]['id']}
+        heading = _all_heading(client, proposed, old, lang)
+        if heading:
+            placement['position'] = {'type': 'after_block', 'block_id': heading}
         view = _create_once(conn, client, 'all', {'data_source_id': ds_id}, {
             'create_database': placement,
             'data_source_id': ds_id, **{k:spec[k] for k in ('name','type','filter','sorts','configuration')}})
@@ -113,6 +114,32 @@ def apply(conn, client, home: Path):
         save_state(conn, views=views)
     save_state(conn, decision_ui_version='1')
     return str(backup)
+
+
+def _all_heading(client, proposed, decision, lang):
+    """The All open tasks heading after the decision board's block (else the first block); an
+    existing heading of that text is reused, so a lost response is never repeated."""
+    text = i18n.t('home.section.all', lang)
+    blocks = proposed['home_blocks']
+    found = [b for b in blocks if _heading_text(b) == text]
+    if found or not blocks:
+        return found[0]['id'] if found else None
+    board = _bare((decision.get('parent') or {}).get('database_id'))
+    after = next((b['id'] for b in blocks if _bare(b['id']) == board), blocks[0]['id'])
+    created = client.append_children(proposed['home'], [{'object': 'block', 'type': 'heading_2', 'heading_2': {
+        'rich_text': [{'type': 'text', 'text': {'content': text}}]}}], {'type': 'after_block', 'after_block': {'id': after}})
+    return next(b['id'] for b in created if _heading_text(b) == text)
+
+
+def _heading_text(block):
+    kind = block.get('type', '')
+    if not kind.startswith('heading_'):
+        return None
+    return ''.join(t.get('plain_text') or t.get('text', {}).get('content', '') for t in block[kind].get('rich_text', [])).strip()
+
+
+def _bare(block_id):
+    return (block_id or '').replace('-', '')
 
 
 def _create_once(conn, client, key, query, payload):

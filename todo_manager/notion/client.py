@@ -238,6 +238,15 @@ class NotionClient:
     def block_children(self, block_id: str) -> list[dict[str, Any]]:
         return list(self.paginate("GET", f"/blocks/{block_id}/children"))
 
+    def append_children(self, block_id: str, children: list[dict[str, Any]],
+                        position: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """New blocks. ``position``: ``{"type": "start"|"end"}`` or ``{"type": "after_block", "after_block":
+        {"id": ...}}`` (views use ``block_id`` instead); existing blocks cannot be moved."""
+        body: dict[str, Any] = {"children": children}
+        if position:
+            body["position"] = position
+        return self.patch(f"/blocks/{block_id}/children", body)["results"]
+
     def create_view(self, body: dict[str, Any]) -> dict[str, Any]:
         return self.post("/views", body)
 
