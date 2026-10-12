@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import string
 import tempfile
 import unittest
@@ -78,6 +79,7 @@ class CatalogTests(unittest.TestCase):
 class LanguageSelectionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="tm-i18n-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.addCleanup(lambda: i18n.set_language(i18n.DEFAULT))
 
     def test_config_language_and_environment_override(self):
@@ -158,6 +160,7 @@ class InitLanguageTests(unittest.TestCase):
     def test_init_writes_the_chosen_language(self):
         from todo_manager import cli
         tmp = Path(tempfile.mkdtemp(prefix="tm-init-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         self.addCleanup(lambda: i18n.set_language(i18n.DEFAULT))
         with mock.patch("sys.stdout"):
             from todo_manager.install import init_workspace
