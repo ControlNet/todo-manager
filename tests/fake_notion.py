@@ -60,6 +60,9 @@ class FakeNotion:
         self.truncate_markdown_at: int | None = None   # imitate the API cutting a large body (``truncated``)
         self.autolink = False   # True: store bare URLs and domains as links, as Notion does (see autolinked)
         self.lose_response: set[tuple[str, str]] = set()
+        # Imitate Notion creating a board with its own grouping (the Status select, empty groups
+        # hidden) instead of the requested one, as it did on 2026-10-12; a PATCH applies it.
+        self.default_grouping: dict[str, Any] | None = None
         self.people: list[dict[str, Any]] = [{"object": "user", "id": USER_ID, "type": "person", "name": "Me"}]
         self._ids = itertools.count(1)
 
@@ -362,8 +365,10 @@ class FakeNotion:
             if position and position.get('type') != 'after_block':
                 raise HttpError(400, 'linked database position must be after_block', body={'code':'validation_error'})
             vid = self._id("view")
-            self.views[vid] = {"object": "view", "id": vid, **body,
+            self.views[vid] = {"object": "view", "id": vid, **copy.deepcopy(body),
                                'parent': {'type': 'database_id', 'database_id': body.get('database_id') or self._id('linked-db')}}
+            if self.default_grouping is not None and body.get('type') == 'board':
+                self.views[vid]['configuration']['group_by'] = copy.deepcopy(self.default_grouping)
             if body.get('create_database') and body['create_database']['parent']['page_id'] in self.blocks:
                 self._insert_blocks(body['create_database']['parent']['page_id'],
                                     [self.block('child_database', id=self.views[vid]['parent']['database_id'])],

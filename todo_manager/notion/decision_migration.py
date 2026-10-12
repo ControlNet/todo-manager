@@ -211,16 +211,18 @@ def _create_once(conn, client, key, query, payload):
     if len(candidates) > 1:
         raise RuntimeError('Multiple migration views found; preserve them and inspect before retrying')
     if candidates:
-        return client.retrieve_view(candidates[0]['id'])
-    if prior['uncertain']:
+        view = client.retrieve_view(candidates[0]['id'])
+    elif prior['uncertain']:
         raise RuntimeError('Notion view creation outcome is unknown; retry installation for read-only reconciliation')
-    try:
-        return client.create_view(payload)
-    except NotionUncertain as exc:
-        save_state(conn, **{marker: {**prior, 'uncertain': True}})
-        if exc.committed_id:
-            return client.retrieve_view(exc.committed_id)
-        raise
+    else:
+        try:
+            view = client.create_view(payload)
+        except NotionUncertain as exc:
+            save_state(conn, **{marker: {**prior, 'uncertain': True}})
+            if not exc.committed_id:
+                raise
+            view = client.retrieve_view(exc.committed_id)
+    return setup.settle_grouping(client, view, payload.get('configuration'))
 
 
 def _ids(value):

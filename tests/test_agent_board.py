@@ -162,6 +162,21 @@ class ViewTests(NotionCase):
         self.assertEqual([o["name"] for o in self.fake.data_sources[self.tasks_ds]["properties"][PROP]["select"]["options"]],
                          ["等我回答", "待我验收", "已完成", "设为待办", "取消", "处理中"])
 
+    def test_a_board_notion_grouped_its_own_way_is_regrouped(self):
+        from tests.fake_notion import FakeNotion
+        from todo_manager.notion.client import NotionClient
+        fake = FakeNotion()
+        fake.default_grouping = {"type": "select", "property_id": "status", "hide_empty_groups": True}
+        client = NotionClient(transport=fake, min_interval=0)
+        self.conn.execute("DELETE FROM meta WHERE key LIKE 'notion.%'")
+        setup.apply(self.conn, client, fake._new_page({"type": "workspace"}, {}, "", "u")["id"])
+        views = loads(get_meta(self.conn, "notion.views"), {})
+        props = loads(get_meta(self.conn, "notion.props.task"), {})
+        for key, field in (("agent", "agent_progress"), ("decision", "decision")):
+            group = fake.views[views[key]]["configuration"]["group_by"]
+            self.assertEqual(group["property_id"], props[field], key)
+            self.assertFalse(group["hide_empty_groups"], key)
+
     def test_focus_is_the_users_own_work_only(self):
         self.assertNotIn(self.sync.state.task_props.ids["delegation"], json.dumps(self.specs()["focus"]["filter"]))
 
@@ -240,6 +255,16 @@ class MigrationTests(Board):
         before = len(self.writes())
         self.assertIsNone(agent_board_migration.plan(self.conn, self.client))
         self.assertEqual(len(self.writes()), before)
+
+    def test_the_new_board_is_regrouped_if_notion_ignored_the_grouping(self):
+        from todo_manager.notion import agent_board_migration
+        self.old_ui()
+        self.fake.default_grouping = {"type": "select", "property_id": "status", "hide_empty_groups": True}
+        agent_board_migration.apply(self.conn, self.client, self.tmp)
+        views = loads(get_meta(self.conn, "notion.views"), {})
+        group = self.fake.views[views["agent"]]["configuration"]["group_by"]
+        self.assertEqual(group["property_id"], loads(get_meta(self.conn, "notion.props.task"), {})["agent_progress"])
+        self.assertFalse(group["hide_empty_groups"])
 
     def test_install_asks_once_before_migrating(self):
         from todo_manager.install import Install, AnswerPrompter

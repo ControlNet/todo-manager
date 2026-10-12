@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 from typing import Any
+from urllib.parse import unquote
 
 from .. import clock, delegation, i18n
 from ..db import get_meta, loads
@@ -250,7 +251,7 @@ def apply(conn: sqlite3.Connection, client: NotionClient, parent_page_id: str | 
             req["filter"] = spec["filter"]
         if spec.get("sorts"):
             req["sorts"] = spec["sorts"]
-        view = client.create_view(req)
+        view = settle_grouping(client, client.create_view(req), spec["configuration"])
         views[spec["key"]] = view["id"]
         save_state(conn, views=views)
     done["views"] = views
@@ -259,6 +260,17 @@ def apply(conn: sqlite3.Connection, client: NotionClient, parent_page_id: str | 
     if not get_meta(conn, "notion.setup_at"):
         save_state(conn, setup_at=clock.iso())
     return done
+
+
+def settle_grouping(client: NotionClient, view: dict[str, Any], configuration: dict[str, Any]) -> dict[str, Any]:
+    """Notion may create a board grouped its own way (by Status, empty groups hidden: the Agent
+    board on 2026-10-12, showing one column); set the requested grouping when the view lacks it."""
+    want = (configuration or {}).get("group_by")
+    have = (view.get("configuration") or {}).get("group_by") or {}
+    if not want or (unquote(have.get("property_id") or "") == unquote(want["property_id"])
+                    and have.get("hide_empty_groups") == want.get("hide_empty_groups")):
+        return view
+    return client.update_view(view["id"], {"configuration": configuration})
 
 
 def _headings(client: NotionClient, page_id: str) -> dict[str, str]:
