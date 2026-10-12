@@ -92,4 +92,6 @@ class OptionalInvitationTests(unittest.TestCase):
     def test_automated_account_and_security_notices_are_not_tasks(self):
         text = flat("cron/intake.md")
         self.assertIn("new sign-in or device", text)
+        self.assertIn("third-party app or OAuth access granted", text)
+        self.assertIn("GitHub, Google", text)
         self.assertIn("the user sees them directly", text)
