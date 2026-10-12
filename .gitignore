@@ -9,3 +9,4 @@ __pycache__/
 /exports/
 /backups/
 /PREFERENCES.md
+/.test-durations.json

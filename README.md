@@ -50,7 +50,7 @@ integration to it (··· → Connections). Then:
 
 ```bash
 git clone https://github.com/ControlNet/todo-manager.git ~/src/todo-manager && cd ~/src/todo-manager
-python3 -m unittest discover -s tests -t .      # expect OK
+python3 -B -m tests.run --all                   # parallel, under a minute; expect OK (Hermes tests skip without Hermes)
 ./bin/todo-manager install
 ```
 

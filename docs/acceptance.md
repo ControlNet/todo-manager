@@ -12,7 +12,8 @@ Legend for the evidence column:
 - **not yet verified** – depends on model judgement or real accounts; needs the real-sample
   evaluation described at the end.
 
-Run everything: `python3 -B -m unittest discover -s tests -t .`.
+Run everything in parallel: `python3 -B -m tests.run --all` (`python3 -B -m tests.run` for the unit
+tests only); `python3 -B -m unittest discover -s tests -t .` is the sequential reference run.
 
 The current [F01–F05 freshness and recovery report](freshness-reliability-2026-10-06.md) records
 feedback revision, project-intent protection, transitive backoff and Gmail request-cost evidence.

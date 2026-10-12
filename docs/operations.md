@@ -14,7 +14,7 @@ cannot create a top-level page itself.
 ```bash
 git clone <repository url> ~/src/todo-manager
 cd ~/src/todo-manager
-python3 -m unittest discover -s tests -t .        # expect "OK" (Hermes integration tests skip without Hermes)
+python3 -B -m tests.run --all                     # parallel; expect "OK" (Hermes integration tests skip without Hermes)
 ./bin/todo-manager install                        # asks only what it cannot infer; every outside change needs a yes
 ```
 
