@@ -186,43 +186,60 @@ def commit_digest_check(conn: sqlite3.Connection, cfg: Config, adapters: list[An
     return {"day": day, "item_ids": item_ids}, info
 
 
-def due_followups(conn: sqlite3.Connection, cfg: Config) -> list[str]:
-    """Open tasks whose follow-up date has come. One check per (task, follow-up date): it is
-    claimed by a run and done when that run updates the task or reports it checked; a run that
-    ends without either (``run done``) or never reports back (lease) leaves it due again, for a
-    bounded number of attempts, then it is marked failed (reported by health). A new follow-up
-    date is a new check."""
+DUE_CHECK = "due:"   # followup_checks.due of a passed-due-date check: "due:YYYY-MM-DD"
+
+
+def due_checks(conn: sqlite3.Connection, cfg: Config) -> list[tuple[str, str, str]]:
+    """(task, check key, kind) of open tasks to look at again: a follow-up date that has come
+    (``followup``), or a due date that has passed (``due``: a task done outside the sources, a
+    meeting held or a form uploaded, is otherwise never seen again). One check per (task, date):
+    it is claimed by a run and done when that run updates the task or reports it checked; a run
+    that ends without either (``run done``) or never reports back (lease) leaves it due again, for
+    a bounded number of attempts, then it is marked failed (reported by health). A new date is a
+    new check. A task offered for its follow-up is offered for its due date at a later run."""
     today = clock.local_date(cfg.tz).isoformat()
     cutoff = clock.iso(clock.now() - timedelta(minutes=STALE_CLAIM_MINUTES))
     rows = conn.execute(
-        "SELECT t.id, substr(t.follow_up_date,1,10) AS due, f.state, f.claimed_at, f.attempts FROM tasks t"
-        " LEFT JOIN followup_checks f ON f.task_id=t.id AND f.due=substr(t.follow_up_date,1,10)"
+        "SELECT t.id, substr(t.follow_up_date,1,10) AS due, 'followup' AS kind, f.state, f.claimed_at, f.attempts"
+        " FROM tasks t LEFT JOIN followup_checks f ON f.task_id=t.id AND f.due=substr(t.follow_up_date,1,10)"
         " WHERE t.status IN ('todo','in_progress','waiting') AND t.follow_up_date IS NOT NULL"
-        " AND substr(t.follow_up_date,1,10) <= ? AND (t.snooze_until IS NULL OR substr(t.snooze_until,1,10) <= ?)",
-        (today, today)).fetchall()
-    due = []
+        " AND substr(t.follow_up_date,1,10) <= ? AND (t.snooze_until IS NULL OR substr(t.snooze_until,1,10) <= ?)"
+        " UNION ALL"
+        " SELECT t.id, ? || substr(t.due_date,1,10), 'due', f.state, f.claimed_at, f.attempts"
+        " FROM tasks t LEFT JOIN followup_checks f ON f.task_id=t.id AND f.due=? || substr(t.due_date,1,10)"
+        " WHERE t.status IN ('todo','in_progress','waiting','decision') AND t.due_date IS NOT NULL"
+        " AND substr(t.due_date,1,10) < ? AND (t.snooze_until IS NULL OR substr(t.snooze_until,1,10) <= ?)",
+        (today, today, DUE_CHECK, DUE_CHECK, today, today)).fetchall()
+    due: dict[str, tuple[str, str, str]] = {}
     for r in rows:
+        if r["id"] in due:
+            continue
         if r["state"] is None:
-            due.append(r["id"])
+            due[r["id"]] = (r["id"], r["due"], r["kind"])
         elif r["state"] == "claimed" and (r["claimed_at"] or "") < cutoff:
             if r["attempts"] < FOLLOWUP_ATTEMPTS:
-                due.append(r["id"])
+                due[r["id"]] = (r["id"], r["due"], r["kind"])
             else:
                 with tx(conn):
                     conn.execute("UPDATE followup_checks SET state='failed', updated_at=? WHERE task_id=? AND due=?",
                                  (clock.iso(), r["id"], r["due"]))
-    return due
+    return list(due.values())
 
 
-def claim_followups(conn: sqlite3.Connection, run_id: str, task_ids: list[str]) -> None:
+def due_followups(conn: sqlite3.Connection, cfg: Config) -> list[str]:
+    """Tasks of ``due_checks``."""
+    return [task for task, _, _ in due_checks(conn, cfg)]
+
+
+def claim_followups(conn: sqlite3.Connection, run_id: str, checks: list[tuple[str, str, str]]) -> None:
     now = clock.iso()
-    for tid in task_ids:
+    for tid, key, _ in checks:
         conn.execute(
             "INSERT INTO followup_checks(task_id, due, state, run_id, attempts, claimed_at, updated_at)"
-            " SELECT id, substr(follow_up_date,1,10), 'claimed', ?, 1, ?, ? FROM tasks WHERE id=?"
+            " VALUES (?, ?, 'claimed', ?, 1, ?, ?)"
             " ON CONFLICT(task_id, due) DO UPDATE SET state='claimed', run_id=excluded.run_id,"
             " attempts=followup_checks.attempts+1, claimed_at=excluded.claimed_at, updated_at=excluded.updated_at",
-            (run_id, now, now, tid))
+            (tid, key, run_id, now, now))
 
 
 def problems_due(conn: sqlite3.Connection, cfg: Config, entry: str, sources: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -257,16 +274,20 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[
         digest, digest_info = commit_digest_check(conn, cfg, commit_adapters)
         if digest_info:
             summary["digest"] = digest_info
-        followups = due_followups(conn, cfg)
+        checks = due_checks(conn, cfg)
+        followups = [task for task, _, _ in checks]
+        passed = [task for task, _, kind in checks if kind == "due"]
         extra = []
         if digest:
             extra.append(f"commit_digest:{len(digest['item_ids'])}")
-        if followups:
-            extra.append(f"followups_due:{len(followups)}")
+        if len(followups) > len(passed):
+            extra.append(f"followups_due:{len(followups) - len(passed)}")
+        if passed:
+            extra.append(f"due_passed:{len(passed)}")
 
         def render(reasons: list[str], problems: list[dict[str, Any]]) -> str:
             return context.intake(conn, cfg, run_id, followups=followups, digest=digest, problems=problems,
-                                  reasons=reasons)
+                                  reasons=reasons, due_passed=passed)
 
         base_chars = 0
         if extra or conn.execute("SELECT 1 FROM batches WHERE state='mature' LIMIT 1").fetchone():
@@ -288,7 +309,7 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[
         claimed = batching.claim(conn, plan.batch_ids, run_id)
         now = clock.iso()
         with tx(conn):
-            claim_followups(conn, run_id, followups)
+            claim_followups(conn, run_id, checks)
             if digest:
                 conn.execute(
                     "INSERT INTO daily_jobs(job, day, state, attempts, run_id, updated_at) VALUES"

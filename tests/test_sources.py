@@ -11,6 +11,7 @@ import json
 from todo_manager import clock, gate_intake, store
 from todo_manager.net import HttpError
 from todo_manager.sources.base import (FetchResult, Item, SourceError, get_cursor, item_body, persist_fetch,
+                                       search_items,
                                       record_fetch_error)
 from todo_manager.sources.github import CommitSource, GitHubNotificationSource, GitHubRepoSource
 from todo_manager.sources.gmail import GmailSource
@@ -178,6 +179,27 @@ class GitHubNotificationTests(WorkspaceCase):
         persist_fetch(self.conn, "github", FetchResult(scope="notifications", items=[merged("n3")], cursor="c"))
         self.assertEqual(self.conn.execute("SELECT state FROM source_items WHERE external_id='n3'").fetchone()[0],
                          "processed", "a closed task is not reopened by more news")
+
+    def test_my_merged_pr_wakes_for_an_open_task_that_names_it_from_another_channel(self):
+        def merged(ext, repo="acme-lab/acme-lab.github.io", number=13):
+            key = f"github:{repo}#{number}"
+            return Item(source="github", account=repo, external_id=ext, conversation_key=key, thread_key=key,
+                        occurred_at=clock.iso(), author="me-gh", author_is_me=True, body="merged",
+                        route="if_open_task")
+
+        def state(ext):
+            return self.conn.execute("SELECT state FROM source_items WHERE external_id=?", (ext,)).fetchone()[0]
+
+        store.create_task(self.conn, "确认 Alex Doe 已在 ACME-LAB 网站上线", origin="intake",
+                          next_step="确认 PR #13 已合并、网页已发布")   # its evidence is a Slack chat
+        store.create_task(self.conn, "Review the loader", origin="intake",
+                          summary="See https://github.com/octo/repo/pull/7 for the change")
+        items = [merged("n1"), merged("n2", number=14), merged("n3", number=130), merged("n4", repo="octo/other"),
+                 merged("n5", repo="octo/repo", number=7)]
+        persist_fetch(self.conn, "github", FetchResult(scope="notifications", items=items, cursor="c"))
+        self.assertEqual([state(f"n{n}") for n in range(1, 6)],
+                         ["batched", "processed", "processed", "processed", "batched"],
+                         "only the PRs an open task names (number and repository, or the link) reach the model")
 
     def test_bot_activity_is_context_only(self):
         pr = {"user": {"login": "dependabot[bot]", "type": "Bot"}, "state": "open", "merged": False, "body": "bump"}
@@ -604,3 +626,23 @@ class GitHubFetchFailureTests(WorkspaceCase):
         [item] = [i for i in self.source.fetch(None).items if i.kind == "notification"]
         self.assertIn("thread unavailable (HTTP 410", item.body)
         self.assertIn("Can you review this today?", item.body, "what could be read is kept")
+
+
+class SourceSearchTests(WorkspaceCase):
+    def test_every_word_must_match_and_stored_context_is_included(self):
+        from tests.helpers import mail
+        self.add_items(mail("m1", "t1", "We received the camera-ready of #42", subject="Workshop X #42", minutes=-30),
+                       mail("m2", "t2", "camera-ready reminder", subject="Other workshop", minutes=-20),
+                       mail("m3", "t3", "I uploaded the camera-ready", me=True, subject="Re: Workshop X #42",
+                            minutes=-10))
+        key = "github:acme-lab/acme-lab.github.io#13"
+        persist_fetch(self.conn, "github", FetchResult(scope="notifications", cursor="c", items=[Item(
+            source="github", account="acme-lab/acme-lab.github.io", external_id="pr13", conversation_key=key,
+            thread_key=key, occurred_at=clock.iso(), author="me-gh", author_is_me=True, title="Add Alex Doe",
+            body="merged", route="context")]))
+        found = lambda *words, **kw: [r["id"] for r in search_items(self.conn, " ".join(words), **kw)]
+        self.assertEqual(found("camera-ready", "#42"), [self.item_id("m3"), self.item_id("m1")], "newest first")
+        self.assertEqual(found("CAMERA-READY", "#42", mine=True), [self.item_id("m3")])
+        self.assertEqual(found("alex", "merged"), [self.item_id("pr13")], "context-only material is searchable")
+        self.assertEqual(found("camera-ready", limit=1), [self.item_id("m3")])
+        self.assertEqual(found("50%_off"), [], "LIKE wildcards are literal")

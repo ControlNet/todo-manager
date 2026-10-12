@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Callable
 
-from . import batching, clock, delegation, effects, feedback, i18n, prefs, runs, store
+from . import batching, clock, delegation, effects, feedback, gate_intake, i18n, prefs, runs, store
 from .config import Config
 from .db import dumps, get_meta, loads, tx
 from .notion import body as notion_body
@@ -1025,8 +1025,9 @@ def _run_done(conn: sqlite3.Connection, cfg: Config, run_id: str, note: str | No
             if claim is None or claim['state'] not in ('claimed', 'done'):
                 raise OpError('STALE_RUN', f'{task_id} is not a follow-up owned by this run')
             task = store.get_task(conn, task_id)
-            if claim['state'] == 'claimed' and (task.get('follow_up_date') or '')[:10] != claim['due']:
-                raise OpError('STALE_RUN', f'{task_id} follow-up date changed after this claim')
+            current = {(task.get('follow_up_date') or '')[:10], gate_intake.DUE_CHECK + (task.get('due_date') or '')[:10]}
+            if claim['state'] == 'claimed' and claim['due'] not in current:
+                raise OpError('STALE_RUN', f'{task_id} follow-up or due date changed after this claim')
             followup_checked(conn, cfg, ctx, task_id)
         if digest_reviewed:
             digest_done(conn, cfg, ctx)

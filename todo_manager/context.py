@@ -204,7 +204,8 @@ def _conversation_tasks(conn: sqlite3.Connection, conversation_key: str) -> list
 
 
 def intake(conn: sqlite3.Connection, cfg: Config, run_id: str, *, followups: list[str],
-           digest: dict[str, Any] | None, problems: list[dict[str, Any]], reasons: list[str]) -> str:
+           digest: dict[str, Any] | None, problems: list[dict[str, Any]], reasons: list[str],
+           due_passed: list[str] | None = None) -> str:
     out = header(cfg, "intake", run_id)
     out.append(f"Why this run: {', '.join(reasons) or '-'}")
     ident = cfg.section("identity")
@@ -230,12 +231,14 @@ def intake(conn: sqlite3.Connection, cfg: Config, run_id: str, *, followups: lis
     if not projects:
         out.append("(none yet)")
 
+    passed = set(due_passed or [])
     if followups:
-        out.append("\n## Follow-ups due today (update the task, or `run done --checked` when nothing changes)")
+        out.append("\n## Follow-ups due today and passed due dates (is it done? update the task, or"
+                   " `run done --checked` when nothing changes)")
         for tid in followups:
             task = store.get_task(conn, tid)
             if task:
-                out.append("- " + task_line(task, titles))
+                out.append("- " + ("(due date passed) " if tid in passed else "") + task_line(task, titles))
 
     batches = run_batches(conn, run_id)
     items = run_items(conn, run_id)
@@ -252,6 +255,8 @@ def intake(conn: sqlite3.Connection, cfg: Config, run_id: str, *, followups: lis
             f"- no task: `todo-manager source dismiss <item>... --run {run_id} --outcome <outcome> --reason \"...\"`;"
             f" later: `todo-manager source defer <item>... --run {run_id} --reason \"...\"`"]
     if followups:
+        out.append("- evidence it was done (the user's own reply, a confirmation, a merged PR), also among material"
+                   " kept as context: `todo-manager source search \"<words>\" [--mine]`")
         out.append(f"- follow-up unchanged: collect its task ID for `run done {run_id} --checked <task>...` at final settlement")
     if digest:
         out.append(f"- digest: `todo-manager project update <project> --run {run_id} --set recent_activity=...`,"

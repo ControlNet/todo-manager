@@ -77,6 +77,27 @@ class CliTests(CliCase):
         code, out = self.tm("task", "show", tid, "--history")
         self.assertEqual(json.loads(out)["history"][-1]["version"], 2)
 
+    def test_source_search_lists_matching_material_as_untrusted(self):
+        from todo_manager.sources.base import FetchResult, Item, persist_fetch
+        self.tm("status", "--json")                      # creates the database
+        cfg = config.load(self.home)
+        conn = db.open_existing(cfg.db_path)
+        try:
+            key = "github:acme-lab/acme-lab.github.io#13"
+            persist_fetch(conn, "github", FetchResult(scope="notifications", cursor="c", items=[Item(
+                source="github", account="acme-lab/acme-lab.github.io", external_id="pr13", conversation_key=key,
+                thread_key=key, occurred_at=clock.iso(), author="me-gh", author_is_me=True, title="Add Alex Doe",
+                body="merged", route="context")]))
+        finally:
+            conn.close()
+        code, out = self.tm("source", "search", "Alex merged", "--mine")
+        self.assertEqual(code, 0, out)
+        found = json.loads(out)
+        self.assertEqual([r["title"] for r in found["items"]], ["Add Alex Doe"])
+        self.assertEqual(found["content_role"], "untrusted source material")
+        code, out = self.tm("source", "search", "nothing-like-this")
+        self.assertEqual(json.loads(out)["items"], [])
+
     def test_gate_context_and_feedback_commands(self):
         code, out = self.gate("feedback")
         self.assertEqual(out.strip(), '{"wakeAgent": false}')

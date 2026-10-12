@@ -45,8 +45,11 @@ every NEW item one outcome:
   `handled_elsewhere`; add `--label <name>` when a convention names one.
 - Needs information that is not there yet:
   `todo-manager source defer <item>... --run <run> --reason "..." [--until YYYY-MM-DD]`.
-- Due follow-up: update the task (new `follow_up_date`, `next_step` or status), or
-  collect its ID for the final `run done <run> --checked <task>...` when nothing changes today.
+- Due follow-up or passed due date: first look for evidence it is done, in its material and with
+  `todo-manager source search "<words>" [--mine]` (the user's own replies, confirmations, merged
+  PRs, also material kept as context). Done: close it with that evidence (`--evidence <item>:completion`).
+  Otherwise update the task (new `follow_up_date`, `next_step` or status), or collect its ID for
+  the final `run done <run> --checked <task>...` when nothing changes today.
 - Commit digest: per project `todo-manager project update <project> --run <run> --set recent_activity="..."`,
   then add `--digest-reviewed` to the final settlement. Never one task per commit.
 - Projects: prefer an existing one (`todo-manager project list`); create one only for a

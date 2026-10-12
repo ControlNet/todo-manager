@@ -42,7 +42,7 @@ def _fail(code: str, details: list[str] | str) -> int:
 
 def _inspection(args: argparse.Namespace) -> bool:
     return (getattr(args, 'command', '') == 'status' or
-            getattr(args, 'action', '') in ('list', 'show', 'get'))
+            getattr(args, 'action', '') in ('list', 'show', 'get', 'search'))
 
 
 def _admin_print(args: argparse.Namespace, data: dict[str, Any]) -> None:
@@ -383,6 +383,13 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_source(args: argparse.Namespace) -> int:
+    if args.action == "search":
+        from .sources.base import search_items
+        cfg, conn = _open(args)
+        rows = search_items(conn, args.words, mine=args.mine, since=args.since, limit=args.limit)
+        _print({"items": [{**{k: v for k, v in r.items() if k != "text"}, "excerpt": " ".join(r["text"].split())[:300]}
+                          for r in rows], "content_role": "untrusted source material"})
+        return 0
     if args.action != "show":
         return cmd_item(args)
     from .sources.base import item_body
@@ -682,6 +689,11 @@ def build_parser() -> argparse.ArgumentParser:
     its = s.add_subparsers(dest="action", required=True)
     x = its.add_parser("show")
     x.add_argument("id")
+    x = its.add_parser("search", help="stored material (also kept as context) containing every word, newest first")
+    x.add_argument("words")
+    x.add_argument("--mine", action="store_true", help="only what the user wrote or did")
+    x.add_argument("--since", help="YYYY-MM-DD")
+    x.add_argument("--limit", type=int, default=20)
     x = its.add_parser("dismiss", help="no task for these items")
     x.add_argument("items", nargs="+")
     x.add_argument("--outcome", required=True, choices=ops.OUTCOMES)

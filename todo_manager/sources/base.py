@@ -14,6 +14,7 @@ Fetch checkpoint vs. processed checkpoint:
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable
@@ -188,12 +189,39 @@ def _copy_of_github_event(conn: sqlite3.Connection, item: Item) -> bool:
 
 
 def _open_task_matter(conn: sqlite3.Connection, item: Item) -> bool:
-    """Is this item's matter (thread key, else conversation) evidence of a task that is still open?"""
+    """Is this item's matter (thread key, else conversation) evidence of a task that is still open,
+    or a GitHub PR/issue an open task names (a task from a chat that waits for that PR)?"""
     key = item.thread_key or item.conversation_key
-    return conn.execute(
-        "SELECT 1 FROM evidence_links e JOIN source_items s ON s.id=e.source_item_id"
-        " JOIN tasks t ON t.id=e.entity_id WHERE e.entity_type='task' AND t.status NOT IN ('done','cancelled')"
-        " AND (s.thread_key=? OR s.conversation_key=?) LIMIT 1", (key, key)).fetchone() is not None
+    if conn.execute(
+            "SELECT 1 FROM evidence_links e JOIN source_items s ON s.id=e.source_item_id"
+            " JOIN tasks t ON t.id=e.entity_id WHERE e.entity_type='task' AND t.status NOT IN ('done','cancelled')"
+            " AND (s.thread_key=? OR s.conversation_key=?) LIMIT 1", (key, key)).fetchone() is not None:
+        return True
+    return _open_task_names(conn, item.conversation_key)
+
+
+_GITHUB_MATTER = re.compile(r"^github:([^/\s]+)/([^#\s]+)#(\d+)$")
+
+
+def _open_task_names(conn: sqlite3.Connection, matter: str) -> bool:
+    """An open task's text names this GitHub matter: its link, ``owner/repo#N``, or ``#N`` together
+    with the repository or owner name."""
+    m = _GITHUB_MATTER.match(matter or "")
+    if not m:
+        return False
+    owner, repo, number = (g.lower() for g in m.groups())
+    link = re.compile(rf"github\.com/{re.escape(owner)}/{re.escape(repo)}/(?:pull|issues)/{number}(?!\d)")
+    ref = re.compile(rf"#{number}(?!\d)")
+    names = {owner, repo, repo.split(".")[0]}
+    for row in conn.execute(
+            "SELECT lower(title || ' ' || COALESCE(next_step,'') || ' ' || COALESCE(done_criteria,'') || ' '"
+            " || COALESCE(summary,'')) FROM tasks WHERE status NOT IN ('done','cancelled')"
+            " AND (title || COALESCE(next_step,'') || COALESCE(done_criteria,'') || COALESCE(summary,'')) LIKE ?",
+            (f"%{number}%",)):
+        text = row[0]
+        if link.search(text) or (ref.search(text) and any(n in text for n in names)):
+            return True
+    return False
 
 
 def _insert_item(conn: sqlite3.Connection, item: Item, now: str) -> str | None:
@@ -253,6 +281,28 @@ def quote(text: str) -> str:
 def item_body(conn: sqlite3.Connection, item_id: str) -> str:
     row = conn.execute("SELECT body FROM source_bodies WHERE item_id=?", (item_id,)).fetchone()
     return row["body"] if row else ""
+
+
+def search_items(conn: sqlite3.Connection, words: str, *, mine: bool = False, since: str | None = None,
+                 limit: int = 20) -> list[dict[str, Any]]:
+    """Stored source items (also those kept as context only) whose title or text contains every
+    word, newest first: evidence a task was done, e.g. the user's own reply or a merged PR."""
+    sql = ("SELECT s.id, s.source, s.occurred_at, s.author, s.author_is_me, s.title, s.url, s.state,"
+           " COALESCE(b.body, s.excerpt, '') AS text FROM source_items s LEFT JOIN source_bodies b ON b.item_id=s.id"
+           " WHERE s.state != 'superseded'")
+    params: list[Any] = []
+    for term in words.split():
+        like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        sql += (" AND (COALESCE(s.title,'') LIKE ? ESCAPE '\\' OR COALESCE(b.body, s.excerpt, '') LIKE ? ESCAPE '\\'"
+                " OR COALESCE(s.author,'') LIKE ? ESCAPE '\\')")
+        params += [like] * 3
+    if mine:
+        sql += " AND s.author_is_me=1"
+    if since:
+        sql += " AND s.occurred_at >= ?"
+        params.append(since)
+    sql += " ORDER BY s.occurred_at DESC LIMIT ?"
+    return [dict(r) for r in conn.execute(sql, (*params, limit))]
 
 
 def items_for_batch(conn: sqlite3.Connection, batch_id: str) -> list[dict[str, Any]]:

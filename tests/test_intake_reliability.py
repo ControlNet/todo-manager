@@ -165,6 +165,58 @@ class FollowupTests(Base):
         self.assertIn("followups_due:1", self.gate())
 
 
+class DuePassedTests(Base):
+    """A task done outside the sources (a meeting held, a form uploaded) is looked at once more when
+    its due date has passed, with the stored material searchable for the evidence."""
+
+    def setUp(self):
+        super().setUp()
+        from datetime import date
+        today = clock.local_date(self.cfg.tz).toordinal()
+        self.yesterday = date.fromordinal(today - 1).isoformat()
+        self.task = store.create_task(self.conn, "提交 camera-ready", origin="cli", actor="human",
+                                      due_date=self.yesterday)
+
+    def test_a_passed_due_date_is_checked_once(self):
+        out = self.gate()
+        self.assertIn("due_passed:1", out)
+        self.assertIn(self.task, out)
+        self.assertIn("todo-manager source search", out)
+        run_id = run_id_of(out)
+        report = ops.run_done(self.conn, self.cfg, run_id, checked=[self.task])
+        self.assertNotIn("followups_not_checked", report)
+        clock.advance(minutes=100)
+        self.assertFalse(wake_of(self.gate()))
+
+    def test_closing_it_in_the_run_settles_the_check(self):
+        run_id = run_id_of(self.gate())
+        task = store.get_task(self.conn, self.task)
+        report = ops.task_update(self.conn, self.cfg, self.ctx(run_id), self.task, based_on=task["version"],
+                                 changes={"status": "done"})
+        self.assertEqual(report["followup"], "checked")
+        ops.run_done(self.conn, self.cfg, run_id)
+        clock.advance(minutes=100)
+        self.assertFalse(wake_of(self.gate()))
+
+    def test_decisions_are_checked_and_a_due_date_today_is_not(self):
+        from datetime import date
+        store.update_task(self.conn, self.task, {"status": "decision"}, actor="human", origin="cli")
+        today = clock.local_date(self.cfg.tz).isoformat()
+        store.create_task(self.conn, "今天交", origin="cli", actor="human", due_date=today)
+        self.assertIn("due_passed:1", self.gate())
+
+    def test_a_task_with_a_follow_up_and_a_passed_due_date_is_offered_once_per_run(self):
+        store.update_task(self.conn, self.task, {"follow_up_date": clock.local_date(self.cfg.tz).isoformat(),
+                                                 "status": "waiting", "waiting_on": "Bob"},
+                          actor="human", origin="cli")
+        out = self.gate()
+        self.assertIn("followups_due:1", out)
+        self.assertNotIn("due_passed", out, "the follow-up first; the due date at a later run")
+        ops.run_done(self.conn, self.cfg, run_id_of(out), checked=[self.task])
+        clock.advance(minutes=10)
+        self.assertIn("due_passed:1", self.gate())
+
+
 class AmbiguityTests(Base):
     """An unclear item that could cost the user becomes a decision with one question. How many
     questions a run may ask is the user's convention (AGENTS.md), not a check in code."""

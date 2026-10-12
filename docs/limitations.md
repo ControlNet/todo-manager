@@ -140,6 +140,9 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
   and the last 3 comments before the window): a request made before the window is shown to the
   model but never turned into a todo by itself.
 - The "own PR merged/closed is news only for an open task" rule applies to the GitHub API sources.
+  A task names a PR by its link, `owner/repo#N`, or `#N` together with the repository or owner
+  name; a task that names it differently is found when its due date has passed (the run searches
+  the stored material), not when the PR is merged.
   GitHub notification emails read through Gmail do not say who opened the PR, so such an email
   still reaches the model (which can ignore it as `automated_notice`).
 - Blacklist semantics: `slack.exclude` filters **discovery only**; a conversation listed

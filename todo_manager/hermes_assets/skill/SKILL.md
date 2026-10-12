@@ -1,7 +1,7 @@
 ---
 name: todo-manager
 description: "The user's todos, tasks, projects, follow-ups and delegated agent work (Notion Todo Manager + Hermes Kanban), kept by the `todo-manager` command. Use it in the Todo Manager cron runs and whenever the user talks about their todos, reminders, delegated work, their Todo preferences (what becomes a task, what to ignore, when to ask), or how this automation should behave."
-version: 3.1.0
+version: 3.2.0
 author: todo-manager
 license: AGPL-3.0-only
 metadata:
@@ -47,7 +47,8 @@ Every woken intake and feedback run is given the file as written.
 - Delegate: `delegate create --task <id> --brief "goal, background, constraints and delivery requirements" --allow read,analyze,draft`; append `--feedback <id>` or direct request context. The required --allow field must reflect explicit authority; read,analyze,draft permits no external action.
 - Message: `delegate message <id> --kind supplement|revision|pause|resume|cancel|accept --body "..."`.
 - Answer: `delegate answer <id> --body "..." [--question <delivery-id>]`; explicit one-use approval uses `--approve <action>[:<scope>]`. Version approval uses `delegate approve <id> --delivery <delivery> --action <action>`.
-- Full material: `source show <item>`, `feedback show <id>`. Keep evidence links and task versions; human edits win.
+- Full material: `source show <item>`, `feedback show <id>`; stored material containing words, also what was
+  kept as context only (the user's own replies, confirmations, merged PRs): `source search "<words>" [--mine]`. Keep evidence links and task versions; human edits win.
 - Finish: `run done <run>`. Diagnostics: `status --details`, `task show <id> --history`, `project show <id> --history`, `run show <run>`.
 
 ## Chat requests

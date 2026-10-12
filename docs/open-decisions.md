@@ -31,7 +31,7 @@ when you ask it in chat, e.g. "wait an hour of Slack silence before analysing" s
 |---|---|---|
 | `slack.quiet_minutes` | 30 | A Slack conversation matures only after 30 quiet minutes (change it freely; no floor) |
 | `slack.active_hours` / `slack.quiet_poll_minutes` | 168 / 30 | A Slack conversation with a human (non-bot) message in the last 7 days is read every run; quieter ones about every 30 minutes (staggered), so all DMs and channels stay within Slack's rate limits. A new message in a long-quiet conversation is seen within ~30 minutes, before the 30 quiet minutes of batching |
-| GitHub: your own PR merged/closed | context unless an open task is about it | A merge/close of a PR you opened (with no newer comment by someone else) wakes the model only when that PR is evidence of an open task, so the task gets updated |
+| GitHub: your own PR merged/closed | context unless an open task is about it | A merge/close of a PR you opened (with no newer comment by someone else) wakes the model only when that PR is evidence of an open task, or an open task names it (its link, `owner/repo#N`, or `#N` with the repository or owner name; e.g. a task from a chat that waits for the PR), so the task gets updated |
 
 ## Decisions that belong to the user
 
