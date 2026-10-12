@@ -144,7 +144,7 @@ def view_rows(conn: sqlite3.Connection, cfg: Config) -> dict[str, list[dict[str,
         return not t.get("snooze_until") or t["snooze_until"][:10] <= today
 
     labels = {t["id"]: delegation.task_label(conn, t["id"]) for t in open_}
-    return {
+    rows = {
         "all": open_,
         "focus": [t for t in open_ if t["status"] in ("todo", "in_progress") and t["next_actor"] == "me"
                     and awake(t) and (labels[t["id"]] in delegation.NEEDS_USER_LABELS or t["focus"] or (t.get("due_date") and t["due_date"][:10] <= week))],
@@ -156,6 +156,8 @@ def view_rows(conn: sqlite3.Connection, cfg: Config) -> dict[str, list[dict[str,
             "SELECT * FROM tasks WHERE updated_at >= ? AND (status IN ('done','cancelled') OR change_note IS NOT NULL)"
             " ORDER BY updated_at DESC", (since,))],
     }
+    order = ("decision", "review", "agent", "focus", "projects", "waiting", "all", "recent")   # notion.setup.SECTIONS
+    return {k: rows[k] for k in order if k in rows}
 
 
 def integrity_problems(conn: sqlite3.Connection) -> list[str]:

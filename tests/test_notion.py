@@ -93,7 +93,7 @@ class ViewUpgradeTests(NotionCase):
         mine = {"property": "x", "select": {"equals": "我的筛选"}}
         self.fake.views[self.views["review"]]["filter"] = mine
         updates, notes = setup.view_upgrades(self.conn, self.client)
-        self.assertEqual([u["key"] for u in updates], ["focus", "agent"])
+        self.assertEqual([u["key"] for u in updates], ["agent", "focus"])
         self.assertEqual(len(notes), 1)
         self.assertIn("待我验收", notes[0])
         self.assertIn("已交付", notes[0], "says what to add")
@@ -105,7 +105,7 @@ class ViewUpgradeTests(NotionCase):
     def test_a_removed_view_is_reported_not_recreated(self):
         del self.fake.views[self.views["agent"]]
         updates, notes = setup.view_upgrades(self.conn, self.client)
-        self.assertEqual([u["key"] for u in updates], ["focus", "review"])
+        self.assertEqual([u["key"] for u in updates], ["review", "focus"])
         self.assertTrue(any("未找到" in n for n in notes), notes)
 
     def test_a_fresh_setup_has_the_current_views(self):

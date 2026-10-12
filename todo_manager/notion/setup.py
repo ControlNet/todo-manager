@@ -19,7 +19,7 @@ from . import body, schema
 from .client import NotionClient, NotionError
 from .sync import HOME_MARKER, save_state
 
-SECTIONS = ("focus", "decision", "all", "projects", "waiting", "agent", "review", "recent")
+SECTIONS = ("decision", "review", "agent", "focus", "projects", "waiting", "all", "recent")   # the user's order
 # 2: card events no longer set a Task to "review": "Agent work" shows every state and "To
 # review" also lists agent work waiting for the user (question, delivery).
 # 3: actionable agent work is visible in focus without a focus flag or near deadline.
@@ -46,7 +46,7 @@ def view_specs(p: dict[str, str], q: dict[str, str], lang: str | None = None) ->
                 "name": i18n.t(f"view.{key}", lang), "type": kind, **rest}
 
     needs_user = [schema.label("delegation", v, lang) for v in delegation.NEEDS_USER_LABELS]
-    return [
+    specs = [
         # Worth pushing now: focus, or due within a week / overdue; snoozed tasks are hidden.
         spec("focus", "task", "table",
              filter={"and": [{"property": p["status"], "select": {"equals": task("todo", "in_progress")}},
@@ -99,6 +99,7 @@ def view_specs(p: dict[str, str], q: dict[str, str], lang: str | None = None) ->
              sorts=[{"property": p["updated"], "direction": "descending"}],
              configuration={"type": "table", "properties": cols(p, ["title", "status", "change_note", "project_id"])}),
     ]
+    return sorted(specs, key=lambda s: SECTIONS.index(s["key"]))
 
 
 def _earlier_filters(p: dict[str, str], lang: str | None) -> dict[str, dict[str, Any]]:

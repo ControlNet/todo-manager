@@ -104,13 +104,13 @@ Archived / 归档. The task relation adds a back-relation column "Tasks" / "任�
 
 | Section (en / zh-CN) | Linked view | Filter |
 |---|---|---|
-| ⭐ Focus / 精选待办 | table | open (to do, in progress), next by me, not snoozed, and focus or due within a week |
 | 🤔 To decide / 需要决定 | board by decision | status to decide or a recorded decision |
-| 📋 All open tasks / 全部未完成任务 | table | every task except done/cancelled |
+| ✅ To review / answer / 待我验收／待我补充 | table | status to review, or agent work needs my answer / to review / delivered |
+| 🤖 Agent queue / working / Agent 排队／处理中 | board by agent work | any agent work state |
+| ⭐ Focus / 精选待办 | table | open (to do, in progress), next by me, not snoozed, and focus or due within a week |
 | 📁 Active projects / 活跃项目 | table | project status active |
 | ⏳ Waiting on others / 等待别人 | table | waiting, not snoozed; sorted by follow-up date |
-| 🤖 Agent queue / working / Agent 排队／处理中 | board by agent work | any agent work state |
-| ✅ To review / answer / 待我验收／待我补充 | table | status to review, or agent work needs my answer / to review / delivered |
+| 📋 All open tasks / 全部未完成任务 | table | every task except done/cancelled |
 | 🕘 Recently done and notable changes / 最近完成与重要变化 | table | edited in the last week and closed, or with a change note |
 
 At the top, a small **data freshness** callout ("Data freshness (maintained by Todo Manager)" /

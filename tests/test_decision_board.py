@@ -15,9 +15,10 @@ class DecisionBoardTests(NotionCase):
         self.assertIn('all', specs)
         self.assertFalse(specs['decision']['configuration']['group_by']['hide_empty_groups'])
 
-    def test_home_starts_with_focus_then_decisions_then_all_open_tasks(self):
+    def test_home_order_is_the_users(self):
         headings = [line[3:] for line in setup.home_markdown('zh-CN').splitlines() if line.startswith('## ')]
-        self.assertEqual(headings[:3], ['⭐ 精选待办', '🤔 需要决定', '📋 全部未完成任务'])
+        self.assertEqual(headings, ['🤔 需要决定', '✅ 待我验收／待我补充', '🤖 Agent 排队／处理中', '⭐ 精选待办',
+                                    '📁 活跃项目', '⏳ 等待别人', '📋 全部未完成任务', '🕘 最近完成与重要变化'])
         self.assertEqual([s['key'] for s in setup.view_specs(self.sync.state.task_props.ids,
                                                              self.sync.state.project_props.ids, 'zh-CN')],
                          list(setup.SECTIONS))
