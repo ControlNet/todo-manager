@@ -224,14 +224,19 @@ class NotionSync:
             sections["due_basis"] = task["due_basis"]
         if task.get("focus") and task.get("focus_reason"):
             sections["focus_reason"] = task["focus_reason"]
-        sources = []
+        # One line per link (a mail thread's messages share one), with its latest message.
+        latest: dict[Any, dict[str, Any]] = {}
         for ev in store.evidence_for(self.conn, "task", task["id"]):
             if ev["role"] == "context":
                 continue
             when = ev.get("occurred_at")
             day = clock.local_dt(tz, clock.parse(when)).strftime("%Y-%m-%d") if when else ""
-            sources.append({"title": ev.get("title") or (ev.get("excerpt") or "")[:80], "url": ev.get("url"),
-                            "when": day, "source": schema.label("source", ev["source"], self.state.language)})
+            title = ev.get("title") or (ev.get("excerpt") or "")[:80]
+            key = ev.get("url") or (ev["source"], title)
+            latest.pop(key, None)
+            latest[key] = {"title": title, "url": ev.get("url"), "when": day,
+                           "source": schema.label("source", ev["source"], self.state.language)}
+        sources = list(latest.values())
         sections["sources"] = sources[-12:] if len(sources) > 12 else sources
         dels = delegation.for_task(self.conn, task["id"])
         status_names = i18n.prefixed("label.delegation", self.state.language)
@@ -368,7 +373,7 @@ class NotionSync:
             # kept exactly as written; a change is not a request by itself and wakes nothing.
             notes_fp = body.content_fingerprint(notes) if notes else ""
             revision = row["notes_revision"] + (1 if row["notes_hash"] is not None and notes_fp != row["notes_hash"]
-                                                else 0)
+                                                and not body.same_content(notes, row["notes_hash"]) else 0)
             self.conn.execute("UPDATE notion_pages SET body_read_at=?, notes_hash=?, notes_text=?, notes_revision=?"
                               " WHERE page_id=?", (None if doc.get("truncated") else clock.iso(), notes_fp, notes, revision, row["page_id"]))
         return found
@@ -383,12 +388,12 @@ class NotionSync:
         previous = loads(pending['payload'], {}) if pending else {}
         incomplete = previous.get('complete') is False or bool(previous.get('truncated'))
         completeness_changed = pending is not None and incomplete != truncated
-        if fp == (row["box_seen_hash"] or row["managed_hash"]) and not completeness_changed:
+        if body.same_content(region, row["box_seen_hash"] or row["managed_hash"]) and not completeness_changed:
             return []                                    # unchanged since the last read
         revision = row["box_revision"] + 1
         self.conn.execute("UPDATE notion_pages SET box_revision=?, box_seen_hash=? WHERE page_id=?",
                           (revision, fp, row["page_id"]))
-        if fp == row["managed_hash"]:
+        if body.same_content(region, row["managed_hash"]):
             older = [r["id"] for r in self.conn.execute(
                 "SELECT id FROM feedback WHERE origin='notion_page' AND source_id=? AND kind='body_edit'"
                 " AND status='pending'", (row["page_id"],))]
@@ -847,7 +852,7 @@ class NotionSync:
             if fp == body.content_fingerprint(rendered):
                 self._store_region(page_id, rendered, region)
                 return "already current"
-            if row["managed_hash"] and fp != row["managed_hash"]:
+            if row["managed_hash"] and not body.same_content(region, row["managed_hash"]):
                 editor = (self.client.retrieve_page(page_id).get('last_edited_by') or {}).get('id')
                 with tx(self.conn):
                     self._box_read(row, task, region, rendered, bool(doc.get("truncated")),

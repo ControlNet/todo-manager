@@ -135,7 +135,8 @@ Manager created; a view you changed or removed is left alone and `install` says 
 Each task page has ONE callout maintained by Todo Manager, marked "Current brief (maintained by
 Todo Manager; write your own notes outside this box)" / "当前说明（由 Todo Manager 维护；手写笔记请
 写在此框外）". It holds why the task is yours, done criteria, background, due-date basis, why it
-is in focus, sources (links), agent work and the latest delivery (collapsed). Everything outside
+is in focus, sources (one line per link, e.g. per mail thread, dated by its latest message), agent
+work and the latest delivery (collapsed). URLs in the text are written as links. Everything outside
 the callout is yours and never touched: your notes there are context. They are kept exactly as
 written and shown with the task to the agent (in the feedback run and in a new agent card); a
 change of them wakes nothing and is never an instruction by itself. To ask for something, write
@@ -144,7 +145,9 @@ a comment.
 The callout is replaced with a search-and-replace of the exact text read just before, so
 concurrent edits elsewhere survive. If you edit text inside the callout, the edit is held and
 handed to the model as feedback instead of being overwritten; afterwards the box is regenerated.
-If you delete the callout, it is re-inserted at the top.
+If you delete the callout, it is re-inserted at the top. Only the visible text counts as an edit:
+Notion turning a bare URL or domain into a link is not one, and neither is changing only where a
+link inside the callout points.
 
 ## Comments
 

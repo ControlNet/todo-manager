@@ -24,6 +24,9 @@ MAX_DELIVERY_CHARS = 15000
 
 
 _LEADING = re.compile(r"^(\s*)([#>+-]|\d+[.)])")
+# A bare http(s) URL in text: it ends at white space, markup characters or CJK text (U+2E80 on).
+_URL = re.compile(r"https?://[^\s<>\[\]{}\"'`|^\\\u2e80-\uffff]+")
+_MD_LINK = re.compile(r"(?<!\\)\[((?:\\.|[^\]\\])*)\]\(([^)\s]*)\)")
 
 
 def edit_unread(last_edited_time: str | None, last_edited_by: str | None, body_read_at: str | None,
@@ -52,13 +55,39 @@ def escape(text: str) -> str:
     return _LEADING.sub(lambda m: m.group(1) + "\\" + m.group(2), escape_inline(text), count=1)
 
 
+def _url_end(url: str) -> str:
+    """The URL without the sentence punctuation or unmatched bracket that follows it."""
+    while url and (url[-1] in ".,;:!?*_~" or (url[-1] == ")" and url.count(")") > url.count("("))):
+        url = url[:-1]
+    return url
+
+
+def prose_inline(text: str) -> str:
+    """Escape written text, with each bare http(s) URL as an explicit link: Notion would link
+    it itself up to the next white space, taking any CJK text after it into the link."""
+    out, pos = [], 0
+    for m in _URL.finditer(text):
+        url = _url_end(m.group(0))
+        if url.endswith("://") or len(url) >= 1900:
+            continue
+        out.append(escape_inline(text[pos:m.start()]))
+        out.append(f"[{escape_inline(url)}]({url.replace('(', '%28').replace(')', '%29')})")
+        pos = m.start() + len(url)
+    return "".join(out) + escape_inline(text[pos:])
+
+
+def prose(text: str) -> str:
+    """``prose_inline`` for text that starts a block (see ``escape``)."""
+    return _LEADING.sub(lambda m: m.group(1) + "\\" + m.group(2), prose_inline(text), count=1)
+
+
 def _para(text: str, depth: int = 1) -> list[str]:
     """Plain text -> paragraphs (blank-line separated), line breaks kept with <br>."""
     out = []
     for chunk in re.split(r"\n\s*\n", text.strip()):
         lines = [line.rstrip() for line in chunk.splitlines()]
         if lines:
-            out.append("\t" * depth + escape(lines[0]) + "".join("<br>" + escape_inline(x) for x in lines[1:]))
+            out.append("\t" * depth + prose(lines[0]) + "".join("<br>" + prose_inline(x) for x in lines[1:]))
     return out
 
 
@@ -85,7 +114,7 @@ def render(sections: dict[str, Any], marker: str = MARKER, lang: str | None = No
         value = sections.get(key)
         if value:
             lines.append(f"\t**{t('body.' + key)}**{sep}"
-                         + "<br>".join(escape_inline(v.rstrip()) for v in str(value).strip().splitlines()))
+                         + "<br>".join(prose_inline(v.rstrip()) for v in str(value).strip().splitlines()))
     if sections.get("summary"):
         lines.append(f"\t**{t('body.summary')}**")
         lines.extend(_para(str(sections["summary"])))
@@ -110,7 +139,7 @@ def render(sections: dict[str, Any], marker: str = MARKER, lang: str | None = No
         lines.append(f"\t**{t('body.latest_delivery', seq=delivery['seq'])}**"
                      + (t("body.when", when=escape(delivery["when"])) if delivery.get("when") else ""))
         if delivery.get("summary"):
-            lines.append("\t" + escape(delivery["summary"].strip()))
+            lines.append("\t" + prose(delivery["summary"].strip()))
         body = (delivery.get("body") or "").strip()
         if body and body != (delivery.get("summary") or "").strip():
             clipped = body[:MAX_DELIVERY_CHARS]
@@ -149,11 +178,38 @@ def _unescape(text: str) -> str:
     return re.sub(r"\\(.)", r"\1", text)
 
 
-def content_fingerprint(region: str) -> str:
-    """Hash of the visible text only, robust to markup re-rendering differences."""
-    text = _unescape(re.sub(r"<[^>]+>|\{[^}]*\}|[*_`~#>\-]", " ", region))
-    text = " ".join(text.split())
+def _visible(region: str, links: bool = True) -> str:
+    if links:
+        region = _MD_LINK.sub(r"\1", region)
+    return " ".join(_unescape(re.sub(r"<[^>]+>|\{[^}]*\}|[*_`~#>\-]", " ", region)).split())
+
+
+def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
+
+
+def content_fingerprint(region: str) -> str:
+    """Hash of the visible text only, robust to markup re-rendering differences. A link counts
+    by its text: Notion stores a bare URL or domain as a link on its own, and the response to
+    the write that sent it does not show that yet."""
+    return _hash(_visible(region))
+
+
+def _unlinked_url(m: re.Match) -> str:
+    text, href = _unescape(m.group(1)), m.group(2)
+    if text.startswith(("http://", "https://")) or href in (text, "http://" + text, "https://" + text):
+        return m.group(1)
+    return m.group(0)
+
+
+def same_content(region: str, fingerprint: str | None) -> bool:
+    """Whether ``region`` shows the content a stored ``fingerprint`` was taken of. Fingerprints
+    stored before links counted by their text (2026-10-12) are recognised too, including after
+    Notion turned that content's bare URLs or domains into links."""
+    if not fingerprint:
+        return False
+    return fingerprint in (content_fingerprint(region), _hash(_visible(region, links=False)),
+                           _hash(_visible(_MD_LINK.sub(_unlinked_url, region), links=False)))
 
 
 def extract(markdown: str, marker: str = MARKER) -> str | None:

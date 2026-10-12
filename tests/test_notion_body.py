@@ -7,9 +7,15 @@ meanwhile. The user's own notes are context: kept exactly as written
 new agent card; a change of the notes wakes nothing and is never an instruction by itself.
 """
 
+import hashlib
+import re
+import unittest
+
 from todo_manager import clock, delegation, feedback, store
 from todo_manager.kanban import FakeKanban
 from todo_manager.notion import body
+from tests.fake_notion import autolinked
+from tests.helpers import mail
 from tests.test_feedback import GateCase
 from tests.test_notion import NotionCase
 
@@ -117,3 +123,107 @@ class NotesAsContextTests(GateCase):
 
     def test_bot_marker_is_not_user_content(self):
         self.assertEqual(body.outside(self.fake.markdown[self.page]).strip(), "")
+
+
+def old_fingerprint(region: str) -> str:
+    """The box fingerprint before 2026-10-12, still stored by existing workspaces."""
+    text = re.sub(r"\\(.)", r"\1", re.sub(r"<[^>]+>|\{[^}]*\}|[*_`~#>\-]", " ", region))
+    return hashlib.sha256(" ".join(text.split()).encode("utf-8")).hexdigest()[:24]
+
+
+LINKY = "原帖 https://forum.example.edu/courses/1/discussion/2。通知正文已截断\n证书来自 certs.example.edu 的通知"
+
+
+class NotionLinkingTests(NotionCase):
+    """Notion stores bare URLs and domains as links; only later reads show it (FakeNotion.autolink).
+    Seen on the production workspace: each later push took our own box for a user's edit."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake.autolink = True
+        self.task = store.create_task(self.conn, "核对证书", origin="intake", summary=LINKY)
+        self.push(self.task)
+        self.page = self.page_of(self.task)
+
+    def kinds(self):
+        return [f["kind"] for f in feedback.pending(self.conn)]
+
+    def update_summary(self, task, summary):
+        store.update_task(self.conn, task, {"summary": summary}, actor="agent", origin="intake",
+                          based_on_version=store.get_task(self.conn, task)["version"])
+        self.push(task)
+
+    def remember_old_fingerprint(self, page, region):
+        self.conn.execute("UPDATE notion_pages SET managed_hash=?, box_seen_hash=? WHERE page_id=?",
+                          (old_fingerprint(region), old_fingerprint(region), page))
+
+    def test_our_box_read_back_with_links_is_not_a_box_edit(self):
+        self.update_summary(self.task, LINKY + "\n周三前部署")
+        self.assertEqual(self.kinds(), [])
+        self.assertIn("周三前部署", self.fake.markdown[self.page], "the box is updated, not held")
+        self.fake.user_set_markdown(self.page, self.fake.markdown[self.page] + "\n\n我的笔记")
+        self.pull()
+        self.assertEqual(self.kinds(), [], "a notes edit makes the box be read again")
+
+    def test_a_real_edit_of_linked_text_is_still_a_box_edit(self):
+        self.fake.user_set_markdown(self.page, self.fake.markdown[self.page].replace("通知正文已截断", "通知正文完整"))
+        self.pull()
+        self.assertEqual(self.kinds(), ["body_edit"])
+
+    def test_a_url_before_chinese_text_is_written_as_a_link_of_its_own(self):
+        url = "https://forum.example.edu/courses/1/discussion/2"
+        self.assertIn(f"原帖 [{url}]({url})。通知正文已截断", self.fake.markdown[self.page])
+
+    def link_mail(self, task):
+        self.add_items(mail("m1", "t1", "请核对", subject="Certificate renewal"))
+        self.conn.execute("UPDATE source_items SET url='https://mail.google.com/mail/#all/t1' WHERE external_id='m1'")
+        store.link_evidence(self.conn, "task", task, self.item_id("m1"), "origin")
+        self.push(task)
+
+    def test_a_linked_box_fingerprinted_by_the_earlier_code_is_not_a_box_edit(self):
+        # The earlier code wrote bare URLs (Notion linked them) next to the source links, and
+        # kept the old fingerprint of what it sent.
+        self.link_mail(self.task)
+        sent = self.sync.render_body(store.get_task(self.conn, self.task))
+        self.assertIn("](https://mail.google.com/", sent)
+        earlier = re.sub(r"\[(https?://[^\]]+)\]\(\1\)", r"\1", sent)
+        self.assertNotEqual(earlier, sent)
+        md = self.fake.markdown[self.page]
+        self.fake.markdown[self.page] = md.replace(body.extract(md), autolinked(earlier))
+        self.remember_old_fingerprint(self.page, earlier)
+        self.update_summary(self.task, LINKY + "\n周三前部署")
+        self.assertEqual(self.kinds(), [])
+        self.assertIn("周三前部署", self.fake.markdown[self.page])
+
+    def test_a_box_with_source_links_fingerprinted_by_the_earlier_code_is_not_a_box_edit(self):
+        task = store.create_task(self.conn, "更新证书", origin="intake", summary="按邮件步骤部署")
+        self.link_mail(task)
+        page = self.page_of(task)
+        region = body.extract(self.fake.markdown[page])
+        self.assertIn("](https://mail.google.com/", region)
+        self.remember_old_fingerprint(page, region)
+        self.update_summary(task, "按邮件步骤部署，周三前")
+        self.assertEqual(self.kinds(), [])
+        self.assertIn("周三前", self.fake.markdown[page])
+
+
+class LinkRenderingTests(unittest.TestCase):
+    def test_bare_urls_in_text_become_links_that_end_where_the_url_ends(self):
+        out = body.render({"summary": "见 https://a.org/x_y?q=1&r=(2)。然后\n(参考 https://c.org/z)",
+                           "done_criteria": "打开 https://b.org/~me/p."}, lang="zh-CN")
+        self.assertIn("见 [https://a.org/x_y?q=1&r=(2)](https://a.org/x_y?q=1&r=%282%29)。然后", out)
+        self.assertIn("(参考 [https://c.org/z](https://c.org/z))", out)
+        self.assertIn("打开 [https://b.org/\\~me/p](https://b.org/~me/p).", out)
+
+    def test_a_source_titled_by_its_url_is_linked_once(self):
+        out = body.render({"sources": [{"title": "", "url": "https://d.org/1"}]}, lang="en")
+        self.assertIn("- [https://d.org/1](https://d.org/1)", out)
+        self.assertNotIn("[[", out)
+
+    def test_links_count_by_their_visible_text(self):
+        self.assertEqual(body.content_fingerprint("见 [https://a.org/x](https://a.org/x)。然后"),
+                         body.content_fingerprint("见 https://a.org/x。然后"))
+        self.assertEqual(body.content_fingerprint("证书 [certs.example.edu](http://certs.example.edu) 的"),
+                         body.content_fingerprint("证书 certs.example.edu 的"))
+        self.assertNotEqual(body.content_fingerprint("见 https://a.org/x。然后"),
+                            body.content_fingerprint("见 https://a.org/y。然后"))

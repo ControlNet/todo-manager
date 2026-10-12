@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import re
 import uuid
 from typing import Any
 
@@ -24,6 +25,24 @@ USER_ID = "user-0001"
 
 def _minute(ts: str) -> str:
     return ts[:16] + ":00.000Z"
+
+
+# Seen on the production workspace (2026-10-11): Notion stores a bare URL as a link that ends
+# only at white space (CJK text after it becomes part of the link) and a bare domain as a link
+# to http://domain; the markdown write's response does not show it, later reads do.
+_AUTOLINK = re.compile(r"(?P<link>(?<!\\)\[(?:\\.|[^\]\\])*\]\([^)\s]*\))"
+                       r"|(?P<url>https?://[^\s<>\]]+)"
+                       r"|(?<![\w./@-])(?P<domain>[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:edu|com|org|net|io|au))(?![\w-])")
+
+
+def autolinked(markdown: str) -> str:
+    def link(m: re.Match) -> str:
+        if m.group("url"):
+            return f"[{m.group('url')}]({m.group('url')})"
+        if m.group("domain"):
+            return f"[{m.group('domain')}](http://{m.group('domain')})"
+        return m.group(0)
+    return _AUTOLINK.sub(link, markdown)
 
 
 class FakeNotion:
@@ -39,6 +58,7 @@ class FakeNotion:
         self.fail_next: dict[tuple[str, str], Exception] = {}
         self.precise_times = False   # True: page edit times keep their seconds (default: rounded to the minute)
         self.truncate_markdown_at: int | None = None   # imitate the API cutting a large body (``truncated``)
+        self.autolink = False   # True: store bare URLs and domains as links, as Notion does (see autolinked)
         self.lose_response: set[tuple[str, str]] = set()
         self.people: list[dict[str, Any]] = [{"object": "user", "id": USER_ID, "type": "person", "name": "Me"}]
         self._ids = itertools.count(1)
@@ -266,6 +286,8 @@ class FakeNotion:
             return {"object": "data_source", "id": ds["id"], "properties": copy.deepcopy(ds["properties"])}
         if parts == ["pages"] and method == "POST":
             page = self._new_page(body["parent"], body.get("properties", {}), body.get("markdown", ""), BOT_ID)
+            if self.autolink:
+                self.markdown[page["id"]] = autolinked(self.markdown[page["id"]])
             return self._page_view(page)
         if parts[0] == "pages":
             page = self.pages.get(parts[1])
@@ -418,8 +440,11 @@ class FakeNotion:
                     current = (current + "\n" if current else "") + content
             elif kind == "replace_content":
                 current = body["replace_content"]["new_str"]
-            self.markdown[pid] = current
+            self.markdown[pid] = autolinked(current) if self.autolink else current
             self._touch(page, BOT_ID)
-        text, cut = self.markdown[pid], self.truncate_markdown_at
+            text = current                    # the response shows the content as sent
+        else:
+            text = self.markdown[pid]
+        cut = self.truncate_markdown_at
         return {"object": "page_markdown", "id": pid, "markdown": text if cut is None else text[:cut],
                 "truncated": cut is not None and len(text) > cut, "unknown_block_ids": []}

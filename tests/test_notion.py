@@ -397,6 +397,26 @@ class EvidenceSourcesTests(NotionCase):
         self.assertEqual(self.fake.prop(page, "来源"), "邮件")
         self.assertIn("Dataset split", self.fake.markdown[page])
 
+    def test_a_thread_is_listed_once_with_its_latest_message(self):
+        day = 24 * 60
+        self.add_items(mail("m1", "t1", "first", subject="Dataset split", minutes=-3 * day),
+                       mail("m2", "t2", "other", subject="Budget", minutes=-2 * day),
+                       mail("m3", "t1", "second", subject="Re: Dataset split", minutes=-day))
+        self.conn.execute("UPDATE source_items SET url='https://mail.google.com/mail/#all/t1' WHERE external_id IN ('m1','m3')")
+        task = store.create_task(self.conn, "发送拆分文件", origin="intake")
+        for ext in ("m1", "m2", "m3"):
+            store.link_evidence(self.conn, "task", task, self.item_id(ext), "origin")
+        self.push(task)
+        region = body.extract(self.fake.markdown[self.page_of(task)])
+        local = lambda ext: clock.local_dt(self.cfg.tz, clock.parse(self.conn.execute(
+            "SELECT occurred_at FROM source_items WHERE external_id=?", (ext,)).fetchone()[0])).strftime("%Y-%m-%d")
+        lines = [line for line in region.splitlines() if "#all/t1" in line]
+        self.assertEqual(len(lines), 1, region)
+        self.assertIn("Re: Dataset split", lines[0])
+        self.assertIn(local("m3"), lines[0])
+        self.assertNotIn(local("m1"), lines[0])
+        self.assertLess(region.index("Budget"), region.index("Re: Dataset split"), "in the order of their latest message")
+
 
 class DirtyScanTests(NotionCase):
     def test_dirty_scan_pushes_only_changed(self):
