@@ -327,7 +327,7 @@ class FakeNotion:
             if body.get("discussion_id"):
                 page_id = next(c["parent"]["page_id"] for c in self.comments if c["discussion_id"] == body["discussion_id"])
             return copy.deepcopy(self._add_comment(page_id, body["markdown"], body.get("discussion_id"), BOT_ID))
-        if parts[0] == "blocks" and parts[2] == "children" and method == "PATCH":
+        if parts[0] == "blocks" and len(parts) == 3 and parts[2] == "children" and method == "PATCH":
             new = [self.block(c["type"], self.text(c) if "rich_text" in c[c["type"]] else "")
                    for c in body["children"]]
             position = body.get("position") or {"type": "end"}
@@ -336,8 +336,22 @@ class FakeNotion:
                 raise HttpError(400, "body.position.after_block should be defined", body={"code": "validation_error"})
             self._insert_blocks(parts[1], new, (position.get("after_block") or {}).get("id"), position["type"])
             return {"results": copy.deepcopy(new), "has_more": False, "next_cursor": None}
-        if parts[0] == "blocks" and parts[2] == "children":
+        if parts[0] == "blocks" and len(parts) == 3 and parts[2] == "children":
             return self._paged(copy.deepcopy(self.blocks.get(parts[1], [])), params)
+        if parts[0] == "blocks" and len(parts) == 2 and method in ("PATCH", "DELETE"):
+            for page_id, blocks in self.blocks.items():
+                found = next((b for b in blocks if b["id"] == parts[1]), None)
+                if found is None:
+                    continue
+                if method == "DELETE":     # to the trash: no longer among the page's children
+                    blocks.remove(found)
+                    return {**copy.deepcopy(found), "in_trash": True}
+                kind = found["type"]
+                if kind in body and "rich_text" in body[kind]:
+                    text = "".join(t.get("text", {}).get("content", "") for t in body[kind]["rich_text"])
+                    found[kind]["rich_text"] = [{"type": "text", "text": {"content": text}, "plain_text": text}]
+                return copy.deepcopy(found)
+            raise HttpError(404, "not found", body={"code": "object_not_found", "message": "not found"})
         if parts == ["views"] and method == "GET":
             views = [v for v in self.views.values() if
                      (not params.get('data_source_id') or v.get('data_source_id') == params['data_source_id']) and

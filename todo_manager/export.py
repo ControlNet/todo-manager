@@ -147,16 +147,15 @@ def view_rows(conn: sqlite3.Connection, cfg: Config) -> dict[str, list[dict[str,
     rows = {
         "all": open_,
         "focus": [t for t in open_ if t["status"] in ("todo", "in_progress") and t["next_actor"] == "me"
-                    and awake(t) and (labels[t["id"]] in delegation.NEEDS_USER_LABELS or t["focus"] or (t.get("due_date") and t["due_date"][:10] <= week))],
+                    and awake(t) and (t["focus"] or (t.get("due_date") and t["due_date"][:10] <= week))],
         "waiting": [t for t in open_ if t["status"] == "waiting" and awake(t)],
         "decision": [t for t in store.list_tasks(conn, store.TASK_STATUSES) if t["status"] == "decision" or t.get("decision")],
-        "agent": [t for t in open_ if labels[t["id"]]],
-        "review": [t for t in open_ if t["status"] == "review" or labels[t["id"]] in delegation.NEEDS_USER_LABELS],
+        "agent": [t for t in open_ if delegation.PROGRESS.get(labels[t["id"]] or "")],
         "recent": [dict(r) for r in conn.execute(
             "SELECT * FROM tasks WHERE updated_at >= ? AND (status IN ('done','cancelled') OR change_note IS NOT NULL)"
             " ORDER BY updated_at DESC", (since,))],
     }
-    order = ("decision", "review", "agent", "focus", "projects", "waiting", "all", "recent")   # notion.setup.SECTIONS
+    order = ("decision", "agent", "focus", "projects", "waiting", "all", "recent")   # notion.setup.SECTIONS
     return {k: rows[k] for k in order if k in rows}
 
 

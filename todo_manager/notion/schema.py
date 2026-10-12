@@ -30,6 +30,9 @@ COLORS = {
     # blocked also summarizes actionable child questions/failures; native root state is unchanged.
     "delegation": {"queued": "gray", "running": "blue", "blocked": "orange", "review": "purple",
                    "delivered": "green", "paused": "yellow", "quarantined": "red"},
+    # The Agent progress board: what the user is asked for, the user's drags, the agent at work.
+    "agent_progress": {"answer": "orange", "review": "purple", "done": "green", "todo": "blue", "cancel": "red",
+                       "working": "gray"},
     "source": {"gmail": "red", "slack": "purple", "github": "default", "commit": "default", "notion": "default",
                "matrix": "green", "cli": "blue", "migration": "brown"},
 }
@@ -37,6 +40,7 @@ SELECT_VALUES = {   # values that become Notion select options (delegation ended
     "delegation": ("queued", "running", "blocked", "review", "delivered", "paused", "quarantined"),
     # The board's choices; agree/decline (boards set up before 2026-10-12) are still read.
     "decision": ("pending", "cancel", "done", "todo", "agent"),
+    "agent_progress": ("answer", "review", "done", "todo", "cancel", "working"),
 }
 
 
@@ -83,6 +87,7 @@ TASK_PROPS: tuple[Prop, ...] = (
     Prop("task", "focus", "checkbox"),
     Prop("task", "change_note", "rich_text"),
     Prop("task", "delegation", "select", editable=False, group="delegation"),
+    Prop("task", "agent_progress", "select", group="agent_progress"),
     Prop("task", "source", "select", editable=False, group="source"),
     Prop("task", "tm_id", "rich_text", editable=False),
     Prop("task", "updated", "last_edited_time", editable=False),
@@ -259,6 +264,8 @@ def render_properties(kind: str, values: dict[str, Any], pmap: PropertyMap,
     for p in written_props(kind):
         if only is not None and p.field not in only:
             continue
+        if pmap.ids and p.field not in pmap.ids:
+            continue    # added by an upgrade whose install has not created it yet
         result[pmap.key(p)] = render_value(p, values.get(p.field), pmap.lang)
     return result
 

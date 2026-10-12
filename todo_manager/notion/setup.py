@@ -19,10 +19,12 @@ from . import body, schema
 from .client import NotionClient, NotionError
 from .sync import HOME_MARKER, save_state
 
-SECTIONS = ("decision", "review", "agent", "focus", "projects", "waiting", "all", "recent")   # the user's order
+SECTIONS = ("decision", "agent", "focus", "projects", "waiting", "all", "recent")   # the user's order
 # 2: card events no longer set a Task to "review": "Agent work" shows every state and "To
 # review" also lists agent work waiting for the user (question, delivery).
 # 3: actionable agent work is visible in focus without a focus flag or near deadline.
+# The Agent progress board (one board instead of Agent work + To review; Focus without agent
+# work) is installed by ``agent_board_migration``, not by these filter upgrades.
 VIEWS_VERSION = 3
 
 
@@ -45,15 +47,14 @@ def view_specs(p: dict[str, str], q: dict[str, str], lang: str | None = None) ->
         return {"key": key, "heading": i18n.t(f"home.section.{key}", lang), "source": source,
                 "name": i18n.t(f"view.{key}", lang), "type": kind, **rest}
 
-    needs_user = [schema.label("delegation", v, lang) for v in delegation.NEEDS_USER_LABELS]
     specs = [
         # Worth pushing now: focus, or due within a week / overdue; snoozed tasks are hidden.
+        # Agent work waiting for the user is on the Agent board, not here.
         spec("focus", "task", "table",
              filter={"and": [{"property": p["status"], "select": {"equals": task("todo", "in_progress")}},
                              {"property": p["next_actor"], "select": {"equals": schema.label("next_actor", "me", lang)}},
                              _not_snoozed(p),
-                             {"or": [{"property": p["delegation"], "select": {"equals": needs_user}},
-                                     {"property": p["focus"], "checkbox": {"equals": True}},
+                             {"or": [{"property": p["focus"], "checkbox": {"equals": True}},
                                      {"property": p["due_date"], "date": {"on_or_before": "one_week_from_now"}}]}]},
              sorts=[{"property": p["due_date"], "direction": "ascending"},
                     {"property": p["updated"], "direction": "descending"}],
@@ -81,17 +82,13 @@ def view_specs(p: dict[str, str], q: dict[str, str], lang: str | None = None) ->
              sorts=[{"property": p["follow_up_date"], "direction": "ascending"}],
              configuration={"type": "table", "properties": cols(p, ["title", "waiting_on", "follow_up_date",
                                                                     "next_step", "project_id"])}),
+        # Every column shown: the user's choices (Done / My to-do / Cancel) are empty drop targets.
         spec("agent", "task", "board",
-             filter={"property": p["delegation"], "select": {"is_not_empty": True}},
-             configuration={"type": "board", "group_by": {"type": "select", "property_id": p["delegation"],
-                                                          "sort": {"type": "manual"}, "hide_empty_groups": True},
-                            "properties": cols(p, ["next_step", "project_id"])}),
-        spec("review", "task", "table",
-             filter={"or": [{"property": p["status"], "select": {"equals": task("review")}},
-                            {"property": p["delegation"], "select": {"equals": needs_user}}]},
+             filter={"property": p["agent_progress"], "select": {"is_not_empty": True}},
              sorts=[{"property": p["updated"], "direction": "descending"}],
-             configuration={"type": "table", "properties": cols(p, ["title", "delegation", "change_note",
-                                                                    "project_id"])}),
+             configuration={"type": "board", "group_by": {"type": "select", "property_id": p["agent_progress"],
+                                                          "sort": {"type": "manual"}, "hide_empty_groups": False},
+                            "properties": cols(p, ["next_step", "delegation", "change_note", "project_id"])}),
         spec("recent", "task", "table",
              filter={"and": [{"property": p["updated"], "last_edited_time": {"on_or_after": "one_week_ago"}},
                              {"or": [{"property": p["status"], "select": {"equals": task("done", "cancelled")}},
@@ -103,8 +100,8 @@ def view_specs(p: dict[str, str], q: dict[str, str], lang: str | None = None) ->
 
 
 def _earlier_filters(p: dict[str, str], lang: str | None) -> dict[str, dict[str, Any]]:
-    """Earlier owned filters (versions 1 and 2), used to preserve customized views."""
-    states = [schema.label("delegation", v, lang) for v in ("queued", "running", "paused", "quarantined")]
+    """Earlier owned filters (versions 1 and 2), used to preserve customized views. The Agent work
+    and To review views are replaced by ``agent_board_migration``."""
     # Version 2 focus required an explicit focus flag or a near deadline.
     focus = {"and": [
         {"property": p["status"], "select": {"equals": [schema.label('task_status', v, lang) for v in ('todo', 'in_progress')]}},
@@ -112,8 +109,7 @@ def _earlier_filters(p: dict[str, str], lang: str | None) -> dict[str, dict[str,
         _not_snoozed(p),
         {"or": [{"property": p['focus'], "checkbox": {"equals": True}},
                 {"property": p['due_date'], "date": {"on_or_before": 'one_week_from_now'}}]}]}
-    return {"focus": focus, "agent": {"property": p["delegation"], "select": {"equals": states}},
-            "review": {"property": p["status"], "select": {"equals": schema.label("task_status", "review", lang)}}}
+    return {"focus": focus}
 
 
 def view_upgrades(conn: sqlite3.Connection, client: NotionClient) -> tuple[list[dict[str, Any]], list[str]]:
@@ -259,7 +255,7 @@ def apply(conn: sqlite3.Connection, client: NotionClient, parent_page_id: str | 
         save_state(conn, views=views)
     done["views"] = views
     if fresh:
-        save_state(conn, views_version=str(VIEWS_VERSION), decision_ui_version="2")
+        save_state(conn, views_version=str(VIEWS_VERSION), decision_ui_version="2", agent_ui_version="1")
     if not get_meta(conn, "notion.setup_at"):
         save_state(conn, setup_at=clock.iso())
     return done

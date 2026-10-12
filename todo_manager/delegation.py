@@ -944,11 +944,44 @@ def task_label(conn: sqlite3.Connection, task_id: str) -> str | None:
     for status in LABEL_ORDER:
         if status in statuses:
             return status
-    row = conn.execute("SELECT id, status FROM delegations WHERE task_id=? ORDER BY created_at DESC, rowid DESC"
-                       " LIMIT 1", (task_id,)).fetchone()
-    if row is not None and row["status"] == "ended" and _latest_result(conn, row["id"]) is not None:
+    row = conn.execute("SELECT id, status, handled_at FROM delegations WHERE task_id=?"
+                       " ORDER BY created_at DESC, rowid DESC LIMIT 1", (task_id,)).fetchone()
+    if row is not None and row["status"] == "ended" and not row["handled_at"] \
+            and _latest_result(conn, row["id"]) is not None:
         return "delivered"
     return None
+
+
+# The Agent progress board column of a "Agent work" label: what the user is asked for.
+PROGRESS = {"blocked": "answer", "review": "review", "delivered": "review",
+            "queued": "working", "running": "working", "paused": "working", "quarantined": "working"}
+
+
+def task_progress(conn: sqlite3.Connection, task_id: str) -> str | None:
+    return PROGRESS.get(task_label(conn, task_id) or "")
+
+
+def board_choice(conn: sqlite3.Connection, task_id: str, choice: str, feedback_id: str) -> list[str]:
+    """The user's drag on the Agent progress board: ``done`` / ``todo`` accept a version waiting
+    for review; ``todo`` also stops work still going (the user takes the task over); closing the
+    task (``done``, ``cancel``) stops the rest through ``on_task_closed``. The latest delivery is
+    handled either way, so the task leaves the board. Called before the task's status changes."""
+    notes = []
+    for d in for_task(conn, task_id, active_only=True):
+        kind = ("accept" if choice in ("done", "todo") and d["status"] == "review"
+                else "cancel" if choice == "todo" and d["status"] in ACTIVE else None)
+        if kind is None:
+            continue
+        try:
+            add_message(conn, d["id"], kind, i18n.t("dlg.board_accept" if kind == "accept" else "dlg.board_take_over"),
+                        feedback_id=feedback_id)
+        except DelegationError as exc:   # e.g. being cancelled already: the task change still applies
+            notes.append(f"{kind}_refused:{d['id']}:{exc}")
+            continue
+        notes.append(f"{kind}:{d['id']}")
+    conn.execute("UPDATE delegations SET handled_at=? WHERE id=(SELECT id FROM delegations WHERE task_id=?"
+                 " ORDER BY created_at DESC, rowid DESC LIMIT 1) AND handled_at IS NULL", (clock.iso(), task_id))
+    return notes
 
 
 def for_task_active_other(conn: sqlite3.Connection, d: dict[str, Any]) -> bool:
@@ -1857,7 +1890,7 @@ def _accepted(conn: sqlite3.Connection, d: dict[str, Any], msg: dict[str, Any], 
     with tx(conn):
         conn.execute("UPDATE delegation_messages SET status='sent', sent_at=?, error=NULL WHERE id=?",
                      (clock.iso(), msg["id"]))
-        _set(conn, d["id"], status="ended", card_status=card_status)
+        _set(conn, d["id"], status="ended", card_status=card_status, handled_at=clock.iso())
         if not for_task_active_other(conn, d):
             _next_actor(conn, d["id"], "me", i18n.t("dlg.accepted"))
 

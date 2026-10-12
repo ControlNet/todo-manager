@@ -1,7 +1,7 @@
 ---
 name: todo-manager
 description: "The user's todos, tasks, projects, follow-ups and delegated agent work (Notion Todo Manager + Hermes Kanban), kept by the `todo-manager` command. Use it in the Todo Manager cron runs and whenever the user talks about their todos, reminders, delegated work, their Todo preferences (what becomes a task, what to ignore, when to ask), or how this automation should behave."
-version: 3.4.0
+version: 3.5.0
 author: todo-manager
 license: AGPL-3.0-only
 metadata:
@@ -87,7 +87,8 @@ Explicit resume --release-recovery-hold --yes requires the user to have checked 
 board/uncertain effects; it releases that hold only, not cron or unrelated human blocks.
 
 Notion decision board: Cancel, Done and My to-do change the status directly; Assign to Agent
-arrives as a `delegate_request` feedback. Use the supplied --feedback ID; newer choices supersede
+arrives as a `delegate_request` feedback. The Agent progress board's Done, My to-do and Cancel
+are applied directly too; answers and revisions arrive as page comments. Use the supplied --feedback ID; newer choices supersede
 pending older ones. A drag is not
 external-action approval: delegate create with external actions and delegate approve/answer
 with approval reject this provenance. The feedback prompt defines the interpretation workflow.

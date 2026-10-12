@@ -119,8 +119,8 @@ class ReviewReliability(WorkspaceCase):
         self.question(child)
         self.assertEqual(dg.task_label(self.conn, self.task), 'blocked')
         views = export.view_rows(self.conn, self.cfg)
-        self.assertIn(self.task, [x['id'] for x in views['review']])
-        self.assertIn(self.task, [x['id'] for x in views['focus']])
+        self.assertIn(self.task, [x['id'] for x in views['agent']])
+        self.assertEqual(dg.task_progress(self.conn, self.task), 'answer', 'Needs my answer on the Agent board')
         self.assertEqual(self.d()['status'], 'queued')
 
     def answer(self, question, request='answer', approve=None):
@@ -290,7 +290,7 @@ class ReviewReliability(WorkspaceCase):
         self.sync()
         self.assertEqual(dg.task_label(self.conn, self.task), 'queued')
         self.assertEqual(store.get_task(self.conn, self.task)['next_actor'], 'me')
-        self.assertFalse(export.view_rows(self.conn, self.cfg)['review'])
+        self.assertEqual(dg.task_progress(self.conn, self.task), 'working')
 
     def test_dependency_wait_is_not_question_but_failure_needs_attention(self):
         self.submit()
@@ -350,17 +350,18 @@ class ReviewReliability(WorkspaceCase):
         self.assertEqual(sum(result['message'] in c['body'] for c in self.kb.comments), 1)
         self.assertNotEqual(old['id'], new['id'])
 
-    def test_notion_and_export_focus_use_same_attention_label(self):
+    def test_notion_and_export_put_a_child_question_on_the_agent_board_only(self):
         from todo_manager.notion import setup, schema
         self.submit()
         self.question(self.child())
         p = {x.field: x.name('en') for x in schema.TASK_PROPS}
         q = {x.field: x.name('en') for x in schema.PROJECT_PROPS}
-        spec = next(x for x in setup.view_specs(p, q, 'en') if x['key'] == 'focus')
-        condition = spec['filter']['and'][-1]['or'][0]
-        self.assertEqual(condition['property'], p['delegation'])
-        self.assertIn(schema.label('delegation', dg.task_label(self.conn, self.task), 'en'), condition['select']['equals'])
-        self.assertIn(self.task, [x['id'] for x in export.view_rows(self.conn, self.cfg)['focus']])
+        spec = next(x for x in setup.view_specs(p, q, 'en') if x['key'] == 'agent')
+        self.assertEqual(spec['configuration']['group_by']['property_id'], p['agent_progress'])
+        self.assertEqual(dg.task_progress(self.conn, self.task), 'answer')
+        rows = export.view_rows(self.conn, self.cfg)
+        self.assertIn(self.task, [x['id'] for x in rows['agent']])
+        self.assertNotIn(self.task, [x['id'] for x in rows['focus']])
 
     def test_pending_child_answer_does_not_change_other_question_version(self):
         self.submit()
@@ -427,7 +428,7 @@ class ReviewReliability(WorkspaceCase):
         self.question(child)
         self.assertEqual(store.get_task(self.conn, self.task)['status'], 'done')
         self.assertIsNone(dg.task_label(self.conn, self.task))
-        self.assertFalse(export.view_rows(self.conn, self.cfg)['review'])
+        self.assertNotIn(self.task, [x['id'] for x in export.view_rows(self.conn, self.cfg)['agent']])
 
     def test_hold_arriving_during_preflight_blocks_initial_create(self):
         original = self.kb.profile_valid

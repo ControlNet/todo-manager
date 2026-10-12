@@ -50,7 +50,7 @@ class SetupTests(NotionCase):
     def test_setup_creates_structure_once(self):
         self.assertTrue(self.sync.state.ready)
         self.assertEqual(len(self.fake.databases), 2)
-        self.assertEqual(len(self.fake.views), 8)
+        self.assertEqual(len(self.fake.views), 7)
         names = set(self.fake.data_sources[self.tasks_ds]["properties"])
         self.assertTrue({"任务", "状态", "下一步由谁", "项目", "TM ID", "委派"} <= names)
         self.assertIn("任务", self.fake.data_sources[self.projects_ds]["properties"], "dual relation on projects")
@@ -70,7 +70,7 @@ class SetupTests(NotionCase):
             self.assertEqual(md.count("数据新鲜度"), 1)
             self.assertIn("我自己写的说明", md)
             self.assertEqual(load_state(conn, self.cfg).home_page_id, home)
-            self.assertEqual(len(self.fake.views), 16, "8 more views on the adopted page")
+            self.assertEqual(len(self.fake.views), 14, "7 more views on the adopted page")
         finally:
             conn.close()
 
@@ -89,23 +89,23 @@ class ViewUpgradeTests(NotionCase):
         self.new_filters = {s["key"]: s["filter"] for s in setup.view_specs(tmap, {p.field: p.field for p in schema.PROJECT_PROPS},
                                                                              "zh-CN")}
 
-    def test_a_view_left_as_created_is_updated_a_changed_one_is_kept_and_reported(self):
+    def test_a_version_2_focus_view_is_current_again(self):
+        # Focus without agent work (the Agent board has it) is the version 2 filter.
+        self.assertEqual(setup.view_upgrades(self.conn, self.client), ([], []))
+
+    def test_a_changed_view_is_kept_and_reported(self):
         mine = {"property": "x", "select": {"equals": "我的筛选"}}
-        self.fake.views[self.views["review"]]["filter"] = mine
+        self.fake.views[self.views["focus"]]["filter"] = mine
         updates, notes = setup.view_upgrades(self.conn, self.client)
-        self.assertEqual([u["key"] for u in updates], ["agent", "focus"])
-        self.assertEqual(len(notes), 1)
-        self.assertIn("待我验收", notes[0])
-        self.assertIn("已交付", notes[0], "says what to add")
+        self.assertEqual((updates, len(notes)), ([], 1))
+        self.assertIn("保留现状", notes[0])
         setup.apply_view_upgrades(self.conn, self.client, updates)
-        self.assertEqual(self.fake.views[self.views["agent"]]["filter"], self.new_filters["agent"])
-        self.assertEqual(self.fake.views[self.views["review"]]["filter"], mine, "the user's view is never overwritten")
-        self.assertEqual(setup.view_upgrades(self.conn, self.client), ([], []), "checked once")
+        self.assertEqual(self.fake.views[self.views["focus"]]["filter"], mine, "the user's view is never overwritten")
 
     def test_a_removed_view_is_reported_not_recreated(self):
-        del self.fake.views[self.views["agent"]]
+        del self.fake.views[self.views["focus"]]
         updates, notes = setup.view_upgrades(self.conn, self.client)
-        self.assertEqual([u["key"] for u in updates], ["review", "focus"])
+        self.assertEqual(updates, [])
         self.assertTrue(any("未找到" in n for n in notes), notes)
 
     def test_a_fresh_setup_has_the_current_views(self):
@@ -456,7 +456,8 @@ class ChildAttentionProjectionTests(NotionCase):
         def label():
             return self.fake.pages[page]['properties']['委派']['select']['name']
         self.assertEqual(label(), schema.label('delegation', 'blocked', 'zh-CN'))
-        self.assertIn(task, [t['id'] for t in export.view_rows(self.conn, self.cfg)['review']])
+        self.assertIn(task, [t['id'] for t in export.view_rows(self.conn, self.cfg)['agent']])
+        self.assertEqual(delegation.task_progress(self.conn, task), 'answer')
         for index, child in enumerate(children):
             question = next(x for x in delegation.deliveries(self.conn, did) if x['card_id'] == child)
             ctx = ops.context(self.conn, self.cfg, request=f'answer-{index}', said='Markdown')
@@ -466,4 +467,4 @@ class ChildAttentionProjectionTests(NotionCase):
             expected = 'blocked' if index == 0 else 'queued'
             self.assertEqual(label(), schema.label('delegation', expected, 'zh-CN'))
         self.assertEqual(kb.cards[root]['status'], 'ready')
-        self.assertFalse(export.view_rows(self.conn, self.cfg)['review'])
+        self.assertEqual(delegation.task_progress(self.conn, task), 'working')

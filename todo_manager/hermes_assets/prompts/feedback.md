@@ -70,3 +70,7 @@ the feedback with a concise reply; Agree does not mean the work is already done.
 Returning to Pending withdraws only unprocessed decision feedback; it does not undo an
 external effect or automatically cancel active work. Never replay an unknown external action.
 Use `--feedback` for these writes so superseded choices cannot be acted on by an older turn.
+
+The Agent progress board's Done, My to-do and Cancel also take effect without a run (they accept
+or stop the agent work themselves). A comment on a task with agent work is an answer to the
+agent's open question, or else a change request (a revision of the delivered version).

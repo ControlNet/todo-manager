@@ -206,6 +206,9 @@ class NotionSync:
         if pending:
             values['project_id'] = pending['page_id']
         values["delegation"] = self.delegation_label(task["id"])
+        # Not written before the install created the property (``render_properties`` skips it).
+        values["agent_progress"] = (delegation.task_progress(self.conn, task["id"])
+                                    if "agent_progress" in self.pmap("task").ids else None)
         values["source"] = self.source_label(task)
         values["tm_id"] = task["id"]
         return values
@@ -559,6 +562,18 @@ class NotionSync:
                 local.update(status=desired_status if desired_status in ('todo', 'in_progress') else 'todo', next_actor='agent')
             local['decision'] = None
         board_closed = None
+        # The Agent progress board: Done / My to-do / Cancel act like the decision board's
+        # choices and also settle the agent work (``delegation.board_choice``); the program's
+        # own columns are not choices. The page gets the program's column back either way.
+        progress = local.pop('agent_progress', None) if 'agent_progress' in local else None
+        progress = progress if progress in BOARD_STATUS else None
+        if progress and 'status' not in local:
+            local['status'] = BOARD_STATUS[progress]
+            if progress == 'todo':
+                local['next_actor'] = 'me'
+            elif local['status'] in store.CLOSED_STATUSES:
+                board_closed = self.t('sync.agent_board_closed',
+                                      choice=schema.label('agent_progress', progress, self.state.language))
         if choice in BOARD_STATUS:
             # The board's own choices take effect here, without a model run; a status set in the
             # same edit wins. The choice is cleared, so the handled card leaves the board.
@@ -589,6 +604,7 @@ class NotionSync:
                 payload={"changes": changed, "before": {k: seen.get(k) for k in changed}}, status="applied")
             if pending_relation:
                 store.defer_notion_project(self.conn, task_id, pending_relation, actor='human', cause_ref=fid)
+            board_notes = delegation.board_choice(self.conn, task_id, progress, fid) if progress else []
             result = store.update_task(self.conn, task_id, local, actor="human", origin="notion", cause_ref=fid)
             if board_closed and store.get_task(self.conn, task_id)['status'] in store.CLOSED_STATUSES:
                 store.set_closed_reason(self.conn, task_id, board_closed)
@@ -624,11 +640,15 @@ class NotionSync:
             semantic_changes = dict(changed)
             if choice == 'agent':
                 semantic_changes.pop('next_actor', None)
-            followups = self._edit_semantics(before, after, semantic_changes, fid, author)
+            if progress:
+                semantic_changes.update({k: local[k] for k in ('status', 'next_actor') if k in local})
+                semantic_changes.pop('next_actor', None)   # settled by board_choice, not a delegate request
+            followups = board_notes + self._edit_semantics(before, after, semantic_changes, fid, author)
             feedback.resolve(self.conn, fid, "applied", {"applied": result.applied, "rejected": result.rejected,
                                                          "followups": followups})
             self._seen(page["id"], current, page)
-            if after["status"] != current.get("status") or after["next_actor"] != current.get("next_actor"):
+            if after["status"] != current.get("status") or after["next_actor"] != current.get("next_actor") \
+                    or 'agent_progress' in changed:
                 effects.task_push(self.conn, task_id)   # normalised pair differs from what the user typed
 
     def _edit_semantics(self, before: dict[str, Any], after: dict[str, Any], changed: dict[str, Any],

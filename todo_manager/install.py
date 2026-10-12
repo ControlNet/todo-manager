@@ -450,6 +450,14 @@ class Install:
                 return
             saved = decision_migration.apply(conn, client, self.cfg().home)
             self.note('notion', f'decision board migrated; original schema/view snapshot: {saved}')
+        from .notion import agent_board_migration
+        board = agent_board_migration.plan(conn, client)
+        if board:
+            if not self.prompter.confirm('notion_agent_board', 'Upgrade the Notion agent work board:', board['changes']):
+                self.note('notion', 'agent board migration not applied; run install to complete it')
+                return
+            saved = agent_board_migration.apply(conn, client, self.cfg().home)
+            self.note('notion', f'agent board migrated; original view snapshot: {saved}')
         updates, notes = setup.view_upgrades(conn, client)
         for text in notes:
             self.note("notion", text)

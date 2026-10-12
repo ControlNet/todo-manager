@@ -247,6 +247,13 @@ class NotionClient:
             body["position"] = position
         return self.patch(f"/blocks/{block_id}/children", body)["results"]
 
+    def update_block(self, block_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return self.patch(f"/blocks/{block_id}", body)
+
+    def trash_block(self, block_id: str) -> dict[str, Any]:
+        """Moves the block to the Notion trash (restorable there); repeating it is harmless."""
+        return self.request("DELETE", f"/blocks/{block_id}")
+
     def create_view(self, body: dict[str, Any]) -> dict[str, Any]:
         return self.post("/views", body)
 

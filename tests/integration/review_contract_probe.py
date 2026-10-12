@@ -132,7 +132,8 @@ try:
         sync()
     assert any(x['card_id'] == new_child for x in dg.deliveries(case.conn, did))
     assert not d()['children_sync_pending']
-    assert task in [x['id'] for x in export.view_rows(case.conn, case.cfg)['review']]
+    assert task in [x['id'] for x in export.view_rows(case.conn, case.cfg)['agent']]
+    assert dg.task_progress(case.conn, task) in ('answer', 'review')
     sync()
     with connect_closing(board=board) as conn:
         assert list_notify_subs(conn, card)[0]['last_event_id'] == before_cursor

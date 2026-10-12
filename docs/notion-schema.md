@@ -34,6 +34,7 @@ language are retained, so renaming a column does not break synchronization.
 | `focus` | checkbox | you | Focus | 精选 |
 | `change_note` | text | you | What changed | 变化 |
 | `delegation` | select | Todo Manager | Agent work | 委派 |
+| `agent_progress` | select | Todo Manager; you drag Done / My to-do / Cancel | Agent progress | Agent 进展 |
 | `source` | select | Todo Manager | Source | 来源 |
 | `tm_id` | text | Todo Manager | TM ID | TM ID |
 | `updated` | last edited time | Notion | Updated | 更新于 |
@@ -76,7 +77,14 @@ Agent work (`delegation`): `queued` Queued / 排队中, `running` Running / 执�
 answer / 等我回答, `review` To review / 待我验收, `delivered` Delivered / 已交付 (the latest agent
 work ended with a result; the task stays open until you close it), `paused` Paused / 已暂停,
 `quarantined` Problem / 异常. A cancelled delegation, or one that ended without a result,
-clears the column.
+clears the column; so does handling the delivery (accepting it, or Done / My to-do on the Agent
+progress board).
+
+Agent progress (`agent_progress`), the column of the Agent work board: `answer` Needs my answer /
+等我回答 (a question), `review` To review / 待我验收 (a version under review or a delivered result
+not yet handled), `working` In progress / 处理中 (queued, running, paused or a problem: "Agent
+work" tells which), and the user's drags `done` Done / 已完成, `todo` My to-do / 设为待办,
+`cancel` Cancel / 取消. Empty when the task has no agent work for you to see.
 
 Source: Email / 邮件, Slack, GitHub (issues, PRs and the commit digest), Notion, Matrix, Manual /
 手动, Migrated / 迁移.
@@ -105,9 +113,8 @@ Archived / 归档. The task relation adds a back-relation column "Tasks" / "任�
 | Section (en / zh-CN) | Linked view | Filter |
 |---|---|---|
 | 🤔 To decide / 需要决定 | board by decision | status to decide or a recorded decision |
-| ✅ To review / answer / 待我验收／待我补充 | table | status to review, or agent work needs my answer / to review / delivered |
-| 🤖 Agent queue / working / Agent 排队／处理中 | board by agent work | any agent work state |
-| ⭐ Focus / 精选待办 | table | open (to do, in progress), next by me, not snoozed, and focus or due within a week |
+| 🤖 Agent work / Agent 工作 | board by Agent progress | any Agent progress |
+| ⭐ Focus / 精选待办 | table | open (to do, in progress), next by me, not snoozed, and focus or due within a week (agent work is on the board) |
 | 📁 Active projects / 活跃项目 | table | project status active |
 | ⏳ Waiting on others / 等待别人 | table | waiting, not snoozed; sorted by follow-up date |
 | 📋 All open tasks / 全部未完成任务 | table | every task except done/cancelled |
@@ -126,7 +133,7 @@ view's `···` menu, "Hide database title"). The API cannot move existing block
 above applies to new home pages, and an existing page is reordered by dragging. Neither changes
 synchronization, which follows view IDs, not block positions.
 
-Views made by an earlier version (before the "Agent work" states above) are updated by
+Views made by an earlier version (Focus before 2026-10-12's agent board is current again) are updated by
 `todo-manager install`, after your confirmation, only while their filter is still the one Todo
 Manager created; a view you changed or removed is left alone and `install` says what to add.
 
@@ -190,6 +197,27 @@ Assign to Agent sets the status to-do and next by Agent and queues a delegation 
 feedback run. In every case the choice is then cleared, so the handled card leaves the board.
 Moving a card never sends RSVPs or other external messages. The older Agree / Decline choices
 are still read and go to the feedback run as before.
+
+**Agent work / Agent 工作** is a board grouped by **Agent progress / Agent 进展**: Needs my answer /
+To review / Done / My to-do / Cancel / In progress. Todo Manager writes the state columns; you
+drag a card to one of the three choices, applied by the import itself without a model run:
+
+- **Done**: accepts the version under review (the card completes, it is not cancelled) and closes
+  the task as done ("chosen on the Agent progress board").
+- **My to-do**: accepts the version under review, stops agent work still going (you take the task
+  over), and makes the task your to-do.
+- **Cancel**: cancels the task and its agent work.
+
+The card then shows its new state (or leaves the board); a card dragged to a state column goes back.
+Answers to the agent's questions and change requests are comments on the task page: the
+feedback run sends them as an answer or a revision. Like the decision board, every column stays
+visible, so hide Notion's empty "No Agent progress" column once.
+
+Installs set up before 2026-10-12 had a board grouped by Agent work and a separate "To review /
+answer" table, and Focus also listed agent work waiting for you. `todo-manager install` (after
+confirmation; snapshot in `backups/notion-agent-board-v1.json`) adds the select, creates the new
+board under the renamed heading, moves the old board and the To review section to the Notion
+trash, and narrows Focus when it is still as created.
 
 Pending creation requests also receive a new feedback identity when their decision changes;
 the original body completeness requirement remains in force. Cancelling a task in the same
