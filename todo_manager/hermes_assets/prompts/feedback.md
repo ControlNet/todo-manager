@@ -56,16 +56,14 @@ Pause/resume and requirement messages target the entry card, not every child. Re
 
 ## Notion decision board
 
-A `decision_choice` feedback records a verified user's drag to Agree or Decline. The
-Decision property is independent of task status. Apply the concrete choice in task context,
-update the next step/status as appropriate, and resolve the feedback with a concise reply.
-Agree does not mean the work is already done. Neither column authorizes external sends,
-RSVPs, purchases or approvals. Clarify only when the choice cannot be interpreted safely.
-A card whose next step starts with "Agent can:" (in the user's language) offers work: Agree:
-the user does it (status `todo`, next by me, next step rewritten as the user's action); Decline:
-not needed (cancel it with the reason); Assign to Agent: delegate it as described.
-Assign to Agent arrives as `delegate_request`; create/reuse agent work under the existing
-rules above. If delegation is disabled, explain that `todo-manager install` enables it.
+The board's choices are Cancel, Done, My to-do and Assign to Agent. Cancel, Done and My to-do
+take effect without a run (the status changes and the card leaves the board). Assign to Agent
+arrives as `delegate_request`; create/reuse agent work under the existing rules above, from the
+card's "Agent can:" next step when it has one. If delegation is disabled, explain that
+`todo-manager install` enables it. A drag never authorizes external sends, RSVPs, purchases or
+approvals. Boards set up before this version may still send a `decision_choice` (Agree or
+Decline): apply it in task context, update the next step/status as appropriate, and resolve
+the feedback with a concise reply; Agree does not mean the work is already done.
 Returning to Pending withdraws only unprocessed decision feedback; it does not undo an
 external effect or automatically cancel active work. Never replay an unknown external action.
 Use `--feedback` for these writes so superseded choices cannot be acted on by an older turn.

@@ -56,6 +56,7 @@ from . import body, schema
 from .client import NotionClient, NotionError, NotionUncertain, plain_text
 
 TRASH_REASON = "sync.trash_reason"    # catalog keys
+BOARD_STATUS = {"cancel": "cancelled", "done": "done", "todo": "todo"}   # decision-board choice -> status
 HOME_MARKER = "home.marker"
 
 
@@ -556,6 +557,18 @@ class NotionSync:
             desired_status = local.get('status', existing['status'])
             if existing['status'] not in store.CLOSED_STATUSES and desired_status not in store.CLOSED_STATUSES:
                 local.update(status=desired_status if desired_status in ('todo', 'in_progress') else 'todo', next_actor='agent')
+            local['decision'] = None
+        board_closed = None
+        if choice in BOARD_STATUS:
+            # The board's own choices take effect here, without a model run; a status set in the
+            # same edit wins. The choice is cleared, so the handled card leaves the board.
+            if 'status' not in local:
+                local['status'] = BOARD_STATUS[choice]
+                if choice == 'todo':
+                    local['next_actor'] = 'me'
+                elif local['status'] in store.CLOSED_STATUSES:
+                    board_closed = self.t('sync.board_closed', choice=schema.label('decision', choice, self.state.language))
+            local['decision'] = None
         relation_changed = 'project_id' in local
         pending_relation = None
         if relation_changed:
@@ -577,6 +590,8 @@ class NotionSync:
             if pending_relation:
                 store.defer_notion_project(self.conn, task_id, pending_relation, actor='human', cause_ref=fid)
             result = store.update_task(self.conn, task_id, local, actor="human", origin="notion", cause_ref=fid)
+            if board_closed and store.get_task(self.conn, task_id)['status'] in store.CLOSED_STATUSES:
+                store.set_closed_reason(self.conn, task_id, board_closed)
             after = store.get_task(self.conn, task_id)
             if 'decision' in changed:
                 stale = [r['id'] for r in self.conn.execute(
@@ -590,7 +605,8 @@ class NotionSync:
                     "AND kind='new_task' AND status='pending'", (task_id,)).fetchall()
                 for creation in creations:
                     payload = loads(creation['payload'], {})
-                    payload['values'] = {**payload.get('values', {}), **local}
+                    payload['values'] = {**payload.get('values', {}), **local,
+                                         **({'decision': choice} if choice else {})}
                     replacement, _ = feedback.record(
                         self.conn, origin='notion_page', source_id=creation['source_id'],
                         source_version='creation-choice:' + fid, text=creation['text'],

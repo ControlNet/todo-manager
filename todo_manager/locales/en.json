@@ -235,5 +235,9 @@
   "label.decision.pending": "Pending",
   "label.decision.agree": "Agree",
   "label.decision.decline": "Decline",
+  "label.decision.cancel": "Cancel",
+  "label.decision.done": "Done",
+  "label.decision.todo": "My to-do",
+  "sync.board_closed": "Chosen on the decision board: {choice}",
   "label.decision.agent": "Assign to Agent"
 }

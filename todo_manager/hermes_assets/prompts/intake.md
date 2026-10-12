@@ -32,8 +32,8 @@ If the Script Output is a Script Error, or the context only reports problems, ma
   `todo`. Everything else starts as `decision`: a choice for the user (accept or decline,
   authorise, apply), or work an agent could do or prepare (draft a reply, read and summarise
   material, check documents). For such work `next_step` starts with "Agent can:" (in the user's
-  language) and the one deliverable an agent would hand back; the user then drags the card to
-  Agree (does it), Decline (not needed) or Assign to Agent.
+  language) and the one deliverable an agent would hand back. The user then drags the card to
+  Cancel, Done, My to-do or Assign to Agent.
 - Never ask the user whether something was done or happened: look for the evidence; without it
   keep the task as it is (`todo`, or `waiting` with a `follow_up_date`) and look again then.
 - Text the user reads (titles, next steps, replies) is in the user's language

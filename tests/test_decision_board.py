@@ -141,6 +141,52 @@ class DecisionBoardTests(NotionCase):
         self.assertTrue(result['duplicate'])
 
 
+class BoardChoiceTests(NotionCase):
+    """The board's four choices (user's design, 2026-10-12) take effect at the next pull without a
+    model run, and a handled card leaves the board (its Decision is cleared)."""
+
+    def drag(self, label, **more):
+        tid = store.create_task(self.conn, 'Offered work', origin='cli', status='decision',
+                                next_step='Agent 可以：起草回复')
+        self.push(tid)
+        self.fake.user_edit(self.page_of(tid), **{'决定': label, **more})
+        self.pull()
+        return tid
+
+    def test_new_board_offers_cancel_done_my_todo_and_agent(self):
+        self.assertEqual(list(schema.labels('decision', 'zh-CN').values()),
+                         ['待决定', '取消', '已完成', '设为待办', '交给 Agent'])
+        options = [o['name'] for o in schema.data_source_properties('task', self.projects_ds, 'zh-CN')['决定']['select']['options']]
+        self.assertEqual(options, ['待决定', '取消', '已完成', '设为待办', '交给 Agent'])
+
+    def test_each_choice_sets_the_status_and_leaves_the_board(self):
+        for label, status in (('取消', 'cancelled'), ('已完成', 'done'), ('设为待办', 'todo')):
+            with self.subTest(label):
+                tid = self.drag(label)
+                task = store.get_task(self.conn, tid)
+                self.assertEqual((task['status'], task['next_actor'], task['decision']), (status, 'me', None))
+                self.assertEqual([f for f in feedback.pending(self.conn) if f['scope_id'] == tid], [],
+                                 'nothing for a model to interpret')
+                self.push(tid)
+                props = self.fake.pages[self.page_of(tid)]['properties']
+                self.assertIsNone(props['决定']['select'])
+                self.assertEqual(props['状态']['select']['name'], schema.label('task_status', status, 'zh-CN'))
+                self.pull()
+                self.assertEqual(store.get_task(self.conn, tid)['version'], task['version'], 'no echo')
+                if status != 'todo':
+                    self.assertIn('需要决定', task['closed_reason'] or '')
+
+    def test_assign_to_agent_queues_the_request_and_clears_the_choice(self):
+        tid = self.drag('交给 Agent')
+        task = store.get_task(self.conn, tid)
+        self.assertEqual((task['status'], task['next_actor'], task['decision']), ('todo', 'agent', None))
+        self.assertEqual([f['kind'] for f in feedback.pending(self.conn)], ['delegate_request'])
+
+    def test_a_status_set_in_the_same_edit_wins(self):
+        tid = self.drag('设为待办', **{'状态': '等待'})
+        self.assertEqual(store.get_task(self.conn, tid)['status'], 'waiting')
+
+
 class DecisionMigrationTests(NotionCase):
     def old_ui(self):
         from todo_manager.db import get_meta, loads, set_meta
@@ -220,7 +266,7 @@ class DecisionMigrationTests(NotionCase):
         count = len(self.fake.views)
         decision_migration.apply(self.conn, self.client, self.tmp)
         self.assertEqual(len(self.fake.views), count + 1, 'only the all-open view remains to create')
-        self.assertEqual(get_meta(self.conn, 'notion.decision_ui_version'), '1')
+        self.assertEqual(get_meta(self.conn, 'notion.decision_ui_version'), decision_migration.VERSION)
         self.assertEqual(len([v for v in self.fake.views.values() if v['name']=='需要决定' and v['type']=='board']), 1)
 
 
@@ -245,6 +291,44 @@ class DecisionMigrationTests(NotionCase):
         self.assertEqual(order[3:8], ['🤔 需要决定', container('decision'), '📋 全部未完成任务', all_open,
                                       '🤖 Agent 排队／处理中'])
         self.assertEqual(order.count('📋 全部未完成任务'), 1, 'a lost response is reconciled, not repeated')
+
+
+class DecisionChoicesMigrationTests(NotionCase):
+    """A board set up with Agree / Decline gets the four choices at install; an old option still on a
+    page is kept until it is gone."""
+
+    def old_options(self, *used):
+        from todo_manager.db import set_meta
+        prop = self.fake.data_sources[self.tasks_ds]['properties']['决定']
+        prop['select']['options'] = [{'name': n, 'color': c} for n, c in
+                                     (('待决定', 'gray'), ('同意', 'green'), ('不同意', 'red'), ('交给 Agent', 'purple'))]
+        for label in used:
+            self.fake.user_create_page(self.tasks_ds, 'Old choice', **{'决定': label})
+        set_meta(self.conn, 'notion.decision_ui_version', '1')
+        return prop
+
+    def names(self):
+        return [o['name'] for o in self.fake.data_sources[self.tasks_ds]['properties']['决定']['select']['options']]
+
+    def test_install_replaces_agree_and_decline_once(self):
+        from todo_manager.notion import decision_migration
+        from todo_manager.db import get_meta
+        prop_id = self.old_options()['id']
+        plan = decision_migration.plan(self.conn, self.client)
+        self.assertTrue(any('取消' in c or 'Cancel' in c for c in plan['changes']))
+        decision_migration.apply(self.conn, self.client, self.tmp)
+        self.assertEqual(self.names(), ['待决定', '取消', '已完成', '设为待办', '交给 Agent'])
+        self.assertEqual(self.fake.data_sources[self.tasks_ds]['properties']['决定']['id'], prop_id)
+        self.assertEqual(get_meta(self.conn, 'notion.decision_ui_version'), '2')
+        before = len(self.writes())
+        self.assertIsNone(decision_migration.plan(self.conn, self.client))
+        self.assertEqual(len(self.writes()), before)
+
+    def test_an_old_option_in_use_is_kept(self):
+        from todo_manager.notion import decision_migration
+        self.old_options('同意')
+        decision_migration.apply(self.conn, self.client, self.tmp)
+        self.assertEqual(self.names(), ['待决定', '取消', '已完成', '设为待办', '交给 Agent', '同意'])
 
 
 class DecisionSchemaMigrationTests(__import__('unittest').TestCase):

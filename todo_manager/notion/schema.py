@@ -21,7 +21,8 @@ from .client import plain_text, rich_text
 
 # Option colours by local value (the option NAMES come from the language catalogs).
 COLORS = {
-    "decision": {"pending": "gray", "agree": "green", "decline": "red", "agent": "purple"},
+    "decision": {"pending": "gray", "cancel": "red", "done": "green", "todo": "blue", "agent": "purple",
+                 "agree": "green", "decline": "red"},
     "task_status": {"todo": "default", "in_progress": "blue", "waiting": "yellow", "decision": "orange",
                     "review": "purple", "done": "green", "cancelled": "gray"},
     "next_actor": {"me": "blue", "agent": "purple", "external": "yellow"},
@@ -34,6 +35,8 @@ COLORS = {
 }
 SELECT_VALUES = {   # values that become Notion select options (delegation ended/cancelled are body-only)
     "delegation": ("queued", "running", "blocked", "review", "delivered", "paused", "quarantined"),
+    # The board's choices; agree/decline (boards set up before 2026-10-12) are still read.
+    "decision": ("pending", "cancel", "done", "todo", "agent"),
 }
 
 
@@ -215,8 +218,8 @@ def parse_value(prop: Prop, raw: dict[str, Any] | None) -> tuple[Any, str | None
         name = option.get("name")
         if not prop.group:
             return name, None
-        for lang in i18n.LANGUAGES:    # accept option names of any language
-            reverse = {v: k for k, v in labels(prop.group, lang).items()}
+        for lang in i18n.LANGUAGES:    # accept option names of any language, also retired ones
+            reverse = {v: k for k, v in i18n.prefixed(f"label.{prop.group}", lang).items()}
             if name in reverse:
                 return reverse[name], None
         return None, f"unknown option {name!r} for {prop.name()}"

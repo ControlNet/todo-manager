@@ -258,7 +258,7 @@ def apply(conn: sqlite3.Connection, client: NotionClient, parent_page_id: str | 
         save_state(conn, views=views)
     done["views"] = views
     if fresh:
-        save_state(conn, views_version=str(VIEWS_VERSION), decision_ui_version="1")
+        save_state(conn, views_version=str(VIEWS_VERSION), decision_ui_version="2")
     if not get_meta(conn, "notion.setup_at"):
         save_state(conn, setup_at=clock.iso())
     return done

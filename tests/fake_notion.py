@@ -282,7 +282,11 @@ class FakeNotion:
                 return self._query(ds, body)
             if method == "PATCH":
                 for name, conf in body["properties"].items():
-                    self._add_ds_property(ds, name, conf)
+                    existing = ds["properties"].get(name) or ds["by_id"].get(name)
+                    if existing and "select" in conf:
+                        self._set_options(ds, existing, conf["select"].get("options", []))
+                    else:
+                        self._add_ds_property(ds, name, conf)
             return {"object": "data_source", "id": ds["id"], "properties": copy.deepcopy(ds["properties"])}
         if parts == ["pages"] and method == "POST":
             page = self._new_page(body["parent"], body.get("properties", {}), body.get("markdown", ""), BOT_ID)
@@ -365,6 +369,19 @@ class FakeNotion:
         chunk = items[start:start + size]
         more = start + size < len(items)
         return {"results": chunk, "has_more": more, "next_cursor": str(start + size) if more else None}
+
+    def _set_options(self, ds: dict[str, Any], prop: dict[str, Any], options: list[dict[str, Any]]) -> None:
+        """Notion keeps the options listed (by name; an existing one keeps its colour), adds new
+        ones and removes the rest; pages lose a removed option."""
+        old = {o["name"]: o for o in prop["select"]["options"]}
+        prop["select"]["options"] = [copy.deepcopy(old.get(o["name"], o)) for o in options]
+        kept = {o["name"] for o in options}
+        for page in self.pages.values():
+            if page["parent"].get("data_source_id") != ds["id"]:
+                continue
+            value = page["properties"].get(prop["name"], {}).get("select")
+            if value and value.get("name") not in kept:
+                page["properties"][prop["name"]]["select"] = None
 
     def _add_ds_property(self, ds: dict[str, Any], name: str, conf: dict[str, Any]) -> None:
         ptype = next(k for k in conf if k not in ("type", "name"))

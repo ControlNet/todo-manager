@@ -235,5 +235,9 @@
   "label.decision.pending": "待决定",
   "label.decision.agree": "同意",
   "label.decision.decline": "不同意",
+  "label.decision.cancel": "取消",
+  "label.decision.done": "已完成",
+  "label.decision.todo": "设为待办",
+  "sync.board_closed": "在需要决定看板上选择了「{choice}」",
   "label.decision.agent": "交给 Agent"
 }

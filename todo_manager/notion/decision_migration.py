@@ -12,9 +12,15 @@ from .client import NotionUncertain
 from .sync import save_state
 
 
+VERSION = '2'   # 1: the decision board; 2: its choices are Cancel / Done / My to-do / Assign to Agent
+
+
 def plan(conn, client):
-    if get_meta(conn, 'notion.decision_ui_version') == '1':
+    version = get_meta(conn, 'notion.decision_ui_version')
+    if version == VERSION:
         return None
+    if version == '1':
+        return _choices_plan(conn, client)
     home = get_meta(conn, 'notion.home_page_id')
     ds_id = get_meta(conn, 'notion.tasks_data_source_id')
     if not home or not ds_id:
@@ -45,16 +51,59 @@ def plan(conn, client):
             raise RuntimeError(f'{name}: existing property has unknown ownership/options')
     return {'home': home, 'data_source': ds, 'decision_view': decision, 'views': views,
             'lang': lang, 'home_blocks': client.block_children(home), 'changes': [
-                'Add the Decision select: Pending / Agree / Decline / Assign to Agent.',
+                'Add the Decision select: Pending / Cancel / Done / My to-do / Assign to Agent.',
                 'Add a draggable Decisions board as the first tab in the same database; retain the original list as a fallback.',
                 'Add All open tasks, with its heading, after the Decisions board on the home page; retain existing views, comments and custom content.',
                 'Initialize empty decisions on existing decision tasks as Pending; do not submit decisions or delegations.']}
+
+
+def _choices_plan(conn, client):
+    """Replace Agree / Decline with the board's four choices; an old option still on a page is
+    kept (removing it would clear that page's choice)."""
+    ds_id = get_meta(conn, 'notion.tasks_data_source_id')
+    prop_id = loads(get_meta(conn, 'notion.props.task'), {}).get('decision')
+    if not ds_id or not prop_id:
+        return None
+    lang = get_meta(conn, 'notion.language') or 'en'
+    ds = client.retrieve_data_source(ds_id)
+    prop = next((v for v in ds['properties'].values() if unquote(v.get('id') or '') == unquote(prop_id)), None)
+    if not prop or prop.get('type') != 'select':
+        raise RuntimeError('Decision property is missing or not a select; cannot update its choices safely')
+    current = [o['name'] for o in prop['select'].get('options', [])]
+    wanted = list(schema.labels('decision', lang).values())
+    if current[:len(wanted)] == wanted:
+        return None
+    used = set()
+    for page in client.query_data_source(ds_id):
+        option = ((page.get('properties') or {}).get(prop['name']) or {}).get('select')
+        if option:
+            used.add(option.get('name'))
+    keep = [n for n in current if n not in wanted and n in used]
+    names = lambda values: ' / '.join(schema.label('decision', v, lang) for v in values)
+    return {'kind': 'choices', 'data_source': ds_id, 'property': prop['id'], 'old_options': current,
+            'options': [{'name': n, 'color': schema.COLORS['decision'][v]}
+                        for v, n in schema.labels('decision', lang).items()] + [{'name': n} for n in keep],
+            'changes': [f"Decision board choices: {names(('cancel', 'done', 'todo', 'agent'))}"
+                        f" (replacing {names(('agree', 'decline'))}); a handled card leaves the board."]
+                       + ([f"Keep {', '.join(keep)} while a task still has it."] if keep else [])}
+
+
+def _apply_choices(conn, client, home: Path, proposed):
+    backup = home / 'backups' / 'notion-decision-ui-v2.json'
+    if not backup.exists():
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        backup.write_text(json.dumps({'at': clock.iso(), **proposed}, ensure_ascii=False, indent=2), encoding='utf-8')
+    client.update_data_source(proposed['data_source'], {proposed['property']: {'select': {'options': proposed['options']}}})
+    save_state(conn, decision_ui_version=VERSION)
+    return str(backup)
 
 
 def apply(conn, client, home: Path):
     proposed = plan(conn, client)
     if not proposed:
         return None
+    if proposed.get('kind') == 'choices':
+        return _apply_choices(conn, client, home, proposed)
     # Snapshot precedes all remote writes; reruns never replace the original snapshot.
     backup = home / 'backups' / 'notion-decision-ui-v1.json'
     if not backup.exists():
@@ -113,6 +162,11 @@ def apply(conn, client, home: Path):
         views['all'] = view['id']
         save_state(conn, views=views)
     save_state(conn, decision_ui_version='1')
+    later = _choices_plan(conn, client)
+    if later:
+        _apply_choices(conn, client, home, later)
+    else:
+        save_state(conn, decision_ui_version=VERSION)
     return str(backup)
 
 

@@ -67,8 +67,9 @@ class TaskRoutingTests(unittest.TestCase):
         self.assertIn("Agent can:", text)
         self.assertIn("never ask the user whether something was done", text.lower())
 
-    def test_feedback_reads_agree_and_decline_on_an_offered_card(self):
-        text = flat("cron/feedback.md")
-        self.assertIn("Agent can:", text)
-        self.assertIn("Agree: the user does it", text)
-        self.assertIn("Decline: not needed", text)
+    def test_the_board_choices_are_named_where_the_runs_read_them(self):
+        for name in ("cron/intake.md", "cron/feedback.md", "skill/SKILL.md"):
+            text = flat(name)
+            for choice in ("Cancel", "Done", "My to-do", "Assign to Agent"):
+                self.assertIn(choice, text, name)
+        self.assertIn("take effect without a run", flat("cron/feedback.md"))

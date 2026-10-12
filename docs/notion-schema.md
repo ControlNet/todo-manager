@@ -177,17 +177,19 @@ historical description above are no longer public CLI entry points. The homepage
 contains **All open tasks / 全部未完成任务**, without focus or due-date filtering.
 
 **Decisions / 需要决定** is a board grouped by editable **Decision / 决定**:
-Pending / 待决定, Agree / 同意, Decline / 不同意, Assign to Agent / 交给 Agent.
-Cards expose the title, next step/background, due date and project. All four options remain
-visible even if empty. Cards with a recorded decision remain in the board when business status
-changes, so the selection does not disappear after processing. The all-open view excludes
-completed/cancelled tasks independently.
+Pending / 待决定, Cancel / 取消, Done / 已完成, My to-do / 设为待办, Assign to Agent / 交给 Agent
+(choices since 2026-10-12; boards set up with Agree / Decline get them at the next `install`,
+which keeps an old option while a task still has it). Cards expose the title, next step/background,
+due date and project. Every option stays visible even if empty, so Notion also shows its own
+"No Decision" column, always empty here: the public API cannot hide one column without hiding the
+empty choice columns as well, so hide it once in Notion (column `···`, "Hide").
 
-The board records user intent; Hermes interprets the concrete consequence in the feedback
-round. It does not send RSVPs or other external messages just because a card was moved. A
-new choice supersedes unprocessed prior choices, including already claimed feedback, while
-committed operation retries still return their original result. Existing evidence, pages,
-comments, history and Kanban associations are retained.
+Cancel, Done and My to-do are applied by the import itself (the status changes; a status set in
+the same edit wins; Cancel and Done record "chosen on the decision board" as the closing reason).
+Assign to Agent sets the status to-do and next by Agent and queues a delegation request for the
+feedback run. In every case the choice is then cleared, so the handled card leaves the board.
+Moving a card never sends RSVPs or other external messages. The older Agree / Decline choices
+are still read and go to the feedback run as before.
 
 Pending creation requests also receive a new feedback identity when their decision changes;
 the original body completeness requirement remains in force. Cancelling a task in the same

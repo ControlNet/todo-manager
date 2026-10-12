@@ -245,15 +245,15 @@ is a configuration choice, not proof of worker readiness; existing health checks
 
 ## Decision board and Notion installation upgrade
 
-`install` now upgrades an existing project-owned Decisions list into a four-column board:
-Pending, Agree, Decline, Assign to Agent. Notion cannot change a view's layout type through
+`install` now upgrades an existing project-owned Decisions list into a board with the choices
+Pending, Cancel, Done, My to-do and Assign to Agent (earlier boards: Agree / Decline, replaced at install). Notion cannot change a view's layout type through
 PATCH, so installation creates a board as the first tab of the same database container and
 preserves the old list. It also adds All open tasks, with its heading, after the Decisions
 board. Existing custom decision filters/layouts stop migration for review rather than being
 overwritten.
 
-The editable Decision select is separate from Task status. Agree/Decline queue version-bound
-feedback for Hermes; neither completes a task automatically or approves external actions.
+Cancel, Done and My to-do set the task status at import, without a model run; the older
+Agree/Decline queue version-bound feedback for Hermes. No choice approves external actions.
 Assign to Agent queues the existing delegation workflow. Pending withdraws unprocessed choices;
 it cannot undo an already performed external effect or cancel running workers. Replies/results
 continue using the task's existing Notion discussion. Unknown authors cannot delegate by dragging.
