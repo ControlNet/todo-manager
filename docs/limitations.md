@@ -145,6 +145,9 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
   the stored material), not when the PR is merged.
   GitHub notification emails read through Gmail do not say who opened the PR, so such an email
   still reaches the model (which can ignore it as `automated_notice`).
+- An event the user takes part in (meeting, review, seminar, workshop) is closed at the first intake
+  run after its date (the passed-due-date check), not at its end time: its `due_date` is a date.
+  It needs that `due_date`; an event task without one stays open until material about it arrives.
 - Projects are created and filled by the intake run, by judgement: when a new or updated task and
   at least two related open tasks belong to one ongoing piece of work the user owns. The run is
   told how many open tasks have no project. Tasks with no new material are grouped only when a

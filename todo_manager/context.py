@@ -245,6 +245,10 @@ def intake(conn: sqlite3.Connection, cfg: Config, run_id: str, *, followups: lis
             task = store.get_task(conn, tid)
             if task:
                 out.append("- " + ("(due date passed) " if tid in passed else "") + task_line(task, titles))
+        if passed:
+            out.append("An event the user takes part in (meeting, review panel, seminar, workshop, presentation)"
+                       " is done once it has ended: close it with its invitation or acceptance as evidence,"
+                       " unless the material shows it was cancelled or moved (then set the new date).")
 
     batches = run_batches(conn, run_id)
     items = run_items(conn, run_id)

@@ -216,6 +216,13 @@ class DuePassedTests(Base):
         clock.advance(minutes=10)
         self.assertIn("due_passed:1", self.gate())
 
+    def test_the_check_says_an_event_that_has_ended_is_done_unless_cancelled_or_moved(self):
+        out = self.gate()
+        self.assertIn("An event the user takes part in", out)
+        self.assertIn("is done once it has ended", out)
+        self.assertIn("cancelled or moved", out)
+
+
 
 class ProjectGroupingTests(Base):
     def test_the_run_is_told_how_many_open_tasks_have_no_project(self):

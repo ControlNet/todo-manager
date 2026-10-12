@@ -15,8 +15,11 @@ If the Script Output is a Script Error, or the context only reports problems, ma
 - Keep provenance: link the messages a task is based on (`--evidence <item>:origin` for the
   message the commitment comes from; later ones as `context`, `follow_up`, `completion`, ...).
 - Read, expired, silence and "no reply" do not mean done. Close a task only on evidence that the
-  commitment is fulfilled (reply sent, PR merged, event held). Commits are progress, not
-  completion.
+  commitment is fulfilled (reply sent, PR merged). Commits are progress, not completion.
+- An event the user takes part in (meeting, review panel, seminar, workshop, presentation) that
+  the user accepted or was scheduled for is done once it has ended, unless the material shows it
+  was cancelled or moved. Give such a task the event date as `due_date` and the time in
+  `next_step`; preparation that must happen before it is a task of its own.
 - Waiting for someone: status `waiting`, `waiting_on` and a `follow_up_date`.
 - Dates only when stated or clearly implied; say where they come from in `due_basis`.
 - The user's edits win. A field the user set is kept (the command lists it under `rejected`);
@@ -24,6 +27,10 @@ If the Script Output is a Script Error, or the context only reports problems, ma
 - Unsure, and missing it could cost the user (a direct request from a person, a deadline,
   money, a role given to them): create the task with status `decision` and the one question in
   `next_step`. Unsure and low-stakes: dismiss it with the reason, or defer it.
+- `decision` is only for a choice the user makes (accept or decline, authorise, apply, pay, who
+  does it). Never ask the user whether something was done or happened: look for the evidence;
+  without it keep the task as it is (`todo`, or `waiting` with a `follow_up_date`) and look again
+  then.
 - Text the user reads (titles, next steps, replies) is in the user's language
   (`todo-manager status --details` names it), short and concrete. Keep names, code, paper and repository
   titles as written.
