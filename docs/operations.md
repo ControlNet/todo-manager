@@ -291,8 +291,9 @@ todo-manager daemon status           # expect "token": true, "mode": "webhook"; 
                                      # "accepted" grows and the comment is read within seconds
 ```
 
-Turn it off: `todo-manager config set daemon.enabled false && todo-manager install` (stops and
-removes the unit; the gate syncs again at its next run). `pause` stops the two cron jobs only:
+Turn it off: `todo-manager config set daemon.enabled false && todo-manager install` (the daemon
+stops by itself within about 20 s of the edit; `install` removes the unit; the gate syncs again at
+its next run). `pause` stops the two cron jobs only:
 the daemon keeps syncing but no longer starts the feedback job; stop it as well with
 `systemctl --user stop todo-manager-daemon`.
 
@@ -301,7 +302,8 @@ Checks: `todo-manager daemon status` (state, mode, last delivery, bad signatures
 `health` and the home callout report the `daemon` channels: `alive` (the gate found the daemon
 stale, on other code or waiting for install, and synced itself) and `webhook` (our writes
 produced no deliveries: tunnel or subscription broken; the daemon polls meanwhile). After code
-updates the daemon restarts itself; after a schema upgrade it waits for `todo-manager install`.
+updates and `config.toml` edits (`config set` or by hand) the daemon restarts itself within about
+20 s; after a schema upgrade it waits for `todo-manager install`.
 
 ## Migrating an older Notion todo system
 

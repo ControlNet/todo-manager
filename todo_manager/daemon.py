@@ -43,6 +43,7 @@ HEARTBEAT_SECONDS = 30
 STALE_SECONDS = 90
 CODE_CHECK_SECONDS = 10
 CODE_SETTLE_SECONDS = 10
+EXIT_DISABLED = 4   # `daemon run` with daemon.enabled false: the unit does not restart on it
 WAKE_INTERVAL_SECONDS = 60
 UNCLAIMED_WAKE_MINUTES = 5   # the same feedback still unclaimed after a wake: as often as the cron job
 CLAIMS_MINUTES = 1
@@ -72,8 +73,9 @@ def write_status(home: Path, data: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def code_fingerprint(root: Path | None = None) -> str:
-    """Path, mtime and size of every module of the package: changes with any edit or checkout."""
+def code_fingerprint(root: Path | None = None, config_path: Path | None = None) -> str:
+    """Path, mtime and size of every module of the package, and of ``config_path``: changes with
+    any edit, checkout or settings change (the daemon reads config.toml only when it starts)."""
     root = root or Path(__file__).resolve().parent
     digest = hashlib.sha1()
     for path in sorted(root.rglob("*.py")):
@@ -81,7 +83,17 @@ def code_fingerprint(root: Path | None = None) -> str:
             continue
         st = path.stat()
         digest.update(f"{path.relative_to(root)}:{st.st_mtime_ns}:{st.st_size}\n".encode())
+    if config_path is not None:
+        try:
+            st = config_path.stat()
+            digest.update(f"config:{st.st_mtime_ns}:{st.st_size}\n".encode())
+        except FileNotFoundError:
+            digest.update(b"config:absent\n")
     return digest.hexdigest()[:16]
+
+
+def fingerprint_of(cfg: Config) -> str:
+    return code_fingerprint(config_path=cfg.home / "config.toml")
 
 
 def health_of(cfg: Config) -> dict[str, Any]:
@@ -96,8 +108,8 @@ def health_of(cfg: Config) -> dict[str, Any]:
            "webhook": st.get("webhook"), "last_error": st.get("last_error")}
     if age is None or age * 60 > STALE_SECONDS:
         return {**out, "healthy": False, "reason": f"not running since {st.get('alive_at')}"}
-    if st.get("code") != code_fingerprint():
-        return {**out, "healthy": False, "reason": "running other code (restarting)"}
+    if st.get("code") != fingerprint_of(cfg):
+        return {**out, "healthy": False, "reason": "running other code or settings (restarting)"}
     if st.get("state") != "running":
         return {**out, "healthy": False, "reason": st.get("state") or "starting"}
     return {**out, "healthy": True, "reason": None}
@@ -122,6 +134,7 @@ ExecStart={launcher} daemon run
 Environment=TODO_HOME={todo_home}
 Environment=PYTHONDONTWRITEBYTECODE=1
 Restart=always
+RestartPreventExitStatus={EXIT_DISABLED}
 RestartSec=10
 WatchdogSec=120
 
@@ -197,7 +210,7 @@ class Daemon:
     def __init__(self, cfg: Config, *, notion_factory: Callable[[sqlite3.Connection, Config], Any] | None = None,
                  kanban_factory: Callable[[Config], Any] | None = None,
                  waker: Callable[[Config], bool] | None = None, board_db: Path | None = None,
-                 stats: webhook.Stats | None = None, fingerprint: Callable[[], str] = code_fingerprint) -> None:
+                 stats: webhook.Stats | None = None, fingerprint: Callable[[], str] | None = None) -> None:
         from . import wiring
         self.cfg = cfg
         self.events: "queue.Queue[webhook.Event]" = queue.Queue()
@@ -208,8 +221,8 @@ class Daemon:
         self.stats = stats or webhook.Stats()
         self.conn: sqlite3.Connection | None = None
         self.state = "starting"
-        self.fingerprint = fingerprint
-        self.code = fingerprint()
+        self.fingerprint = fingerprint or (lambda: fingerprint_of(cfg))
+        self.code = self.fingerprint()
         self.code_check_seconds, self.code_settle_seconds = CODE_CHECK_SECONDS, CODE_SETTLE_SECONDS
         self.started_at = clock.iso()
         self.pending: dict[Key, datetime] = {}
@@ -447,7 +460,7 @@ class Daemon:
             write_status(self.cfg.home, self.status())
 
     def run_forever(self, receiver: webhook.Receiver | None = None) -> int:
-        """The process: until the source changes (exit 0, systemd starts the new code)."""
+        """The process: until the source or config.toml changes (exit 0, systemd starts the new code)."""
         if receiver is not None:
             self.events = receiver.events
             self.stats = receiver.stats

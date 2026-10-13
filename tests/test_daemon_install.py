@@ -124,7 +124,7 @@ class CommandTests(InstallCase):
 
     def test_run_refuses_while_disabled(self):
         code, text = self.invoke("daemon", "run")
-        self.assertNotEqual(code, 0)
+        self.assertEqual(code, daemon.EXIT_DISABLED, "the unit does not restart on this code")
         self.assertIn("DISABLED", text)
 
     def test_token_and_reset(self):

@@ -164,9 +164,10 @@ Security bar agreed with the user: no unauthenticated access; no further hardeni
 2. Status file `state/daemon.json`, stamped every 30 s: pid, code fingerprint, state, mode,
    webhook counters, last error. It is a file, not a database row, so it needs no schema and
    works while the daemon waits for `install`.
-3. The feedback gate is the outer watchdog: a status older than 90 s, from other code, or not
-   `running` makes the gate sync itself, record the `daemon`/`alive` channel (shown by `health`
-   and the home callout) and restart an installed unit at most every 10 minutes.
+3. The feedback gate is the outer watchdog: a status older than 90 s, from other code or
+   settings, or not `running` makes the gate sync itself, record the `daemon`/`alive` channel
+   (shown by `health` and the home callout) and restart an installed unit at most every 10
+   minutes.
 4. End to end: our own Notion writes produce events (assumed from the documented payloads, to be
    confirmed at go-live). A write of ours `daemon.webhook_silence_minutes` ago with no delivery
    since means the tunnel or the subscription is broken: the daemon polls Notion as the gate did
@@ -181,18 +182,23 @@ Production imports this checkout directly (the cron pre-run scripts and the `tod
 launcher put it on `sys.path`), so a code change here is live at the next cron run. The daemon
 follows the same model: its unit runs the checkout, and it picks up new code by restarting.
 
-- **Code change**: every 10 s the daemon fingerprints its package files (path, mtime, size). On a
-  change it waits until the tree has been stable for 10 s (a `git pull` in progress is not loaded
-  half-way), stamps `restarting` and exits 0; systemd starts the new code.
-- **Version skew**: the status carries the code fingerprint. A gate whose own fingerprint differs
-  syncs itself for that run, so old daemon code and new gate code never split the work.
+- **Code or settings change**: every 10 s the daemon fingerprints its package files and the
+  workspace `config.toml` (path, mtime, size); it reads `config.toml` only when it starts. On a
+  change it waits until the files have been stable for 10 s (a `git pull` in progress is not
+  loaded half-way), stamps `restarting` and exits 0; systemd starts it with the new code and
+  settings. With `daemon.enabled` turned off it then refuses to run with exit code 4, which the
+  unit's `RestartPreventExitStatus` keeps down until `install` removes the unit.
+- **Version skew**: the status carries the fingerprint. A gate whose own fingerprint differs
+  (other code or other settings) syncs itself for that run, so an old daemon and a new gate
+  never split the work.
 - **Broken new code**: systemd retries every 10 s without limit, so a fixed checkout recovers by
   itself; meanwhile the gate syncs. No outage.
 - **Schema upgrade**: the daemon never migrates. When the code expects another schema it stays
   up as `waiting_install`, does nothing and tries again every minute; after `todo-manager
   install` migrates (with its backup) it continues.
-- **Unit or settings change**: `todo-manager install` rewrites the unit when it differs, reloads
-  systemd and restarts the daemon; `todo-manager daemon restart` restarts it alone.
+- **Unit change**: `todo-manager install` rewrites the unit when it differs, reloads systemd and
+  restarts the daemon (it also starts a stopped one); `todo-manager daemon restart` restarts it
+  alone.
 
 Merging the branch is the deployment. After the merge the daemon is still off: the gate then
 behaves as before except for the smaller set of pages read every run.
@@ -222,8 +228,8 @@ behaves as before except for the smaller set of pages read every run.
   ignored; a local write reaches Notion and a new delegation gets its card without the gate;
   idle means no request; board changes rate-limited; wake rate limit; webhook silence → polling
   and back; no token → polling; waiting for install; gate hand-over (healthy, stale, other code,
-  disabled, restart at most every 10 minutes); status file; fingerprint; exit after a settled
-  source change.
+  disabled, restart at most every 10 minutes, a config edit); status file; fingerprint of code and
+  config.toml; exit after a settled source or config change; the unit stays down on exit code 4.
 - `tests/test_daemon_install.py`: unit written/started/left alone/stopped/removed by `install` and
   `uninstall` with a fake systemctl; the `daemon` command; one real `daemon run` process on a
   temporary workspace answering the handshake over HTTP and stopping cleanly on SIGTERM.

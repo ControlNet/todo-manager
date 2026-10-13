@@ -151,8 +151,9 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     cfg = config.load(args.home)
     if args.action == "run":
         if not cfg.get("daemon.enabled"):
-            return _fail("DISABLED", "daemon.enabled is false: the feedback gate syncs; turn it on with"
-                                     " `todo-manager config set daemon.enabled true` and `todo-manager install`")
+            _fail("DISABLED", "daemon.enabled is false: the feedback gate syncs; turn it on with"
+                              " `todo-manager config set daemon.enabled true` and `todo-manager install`")
+            return daemon.EXIT_DISABLED
         return daemon.run(cfg)
     if args.action == "token":
         token = webhook.load_token(cfg.home)

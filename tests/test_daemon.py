@@ -283,7 +283,7 @@ class HandOverTests(DaemonCase):
     def test_a_daemon_on_other_code_is_not_trusted(self):
         self.d.code = "old"
         self.d.heartbeat(force=True)
-        self.assertEqual(daemon.health_of(self.cfg)["reason"], "running other code (restarting)")
+        self.assertEqual(daemon.health_of(self.cfg)["reason"], "running other code or settings (restarting)")
 
     def test_a_stale_installed_unit_is_restarted_at_most_every_ten_minutes(self):
         unit_dir = self.tmp / "units"
@@ -322,10 +322,31 @@ class StatusTests(DaemonCase):
         (root / "a.py").write_text("x = 22\n")
         self.assertNotEqual(daemon.code_fingerprint(root), before)
 
+    def test_the_fingerprint_follows_config_edits(self):
+        before = daemon.code_fingerprint(config_path=self.cfg.home / "config.toml")
+        with (self.cfg.home / "config.toml").open("a") as fh:
+            fh.write("\n# edited\n")
+        self.assertNotEqual(daemon.code_fingerprint(config_path=self.cfg.home / "config.toml"), before)
+
+    def test_after_a_config_edit_the_gate_syncs_until_the_daemon_restarts(self):
+        self.d.heartbeat(force=True)
+        self.assertTrue(daemon.health_of(self.cfg)["healthy"])
+        with (self.cfg.home / "config.toml").open("a") as fh:
+            fh.write("\n# edited\n")
+        self.assertFalse(daemon.health_of(self.cfg)["healthy"], "the running daemon still has the old settings")
+        restarted = daemon.Daemon(self.cfg, notion_factory=lambda conn, cfg: None, kanban_factory=lambda cfg: None,
+                                  waker=self.wake, board_db=None)
+        self.addCleanup(restarted.close)
+        restarted.open()
+        restarted.heartbeat(force=True)
+        self.assertTrue(daemon.health_of(self.cfg)["healthy"])
+
     def test_the_unit_runs_the_launcher_and_restarts(self):
         text = daemon.unit_text(Path("/home/u/.local/bin/todo-manager"), Path("/home/u/ws"))
         self.assertIn("ExecStart=/home/u/.local/bin/todo-manager daemon run", text)
         self.assertIn("Restart=always", text)
+        self.assertIn(f"RestartPreventExitStatus={daemon.EXIT_DISABLED}", text,
+                      "turned off in config.toml: it exits and stays down until install removes the unit")
         self.assertIn("Type=notify", text)
         self.assertTrue(text.startswith(daemon.UNIT_MARK))
 
@@ -343,6 +364,19 @@ class CodeChangeTests(DaemonCase):
         thread.join(timeout=15)
         self.assertEqual(result, [0])
         self.assertEqual(daemon.read_status(self.cfg.home)["state"], "restarting")
+
+    def test_the_daemon_exits_after_a_config_edit(self):
+        import threading
+        d = daemon.Daemon(self.cfg, notion_factory=lambda conn, cfg: None, kanban_factory=lambda cfg: None,
+                          waker=self.wake, board_db=None)
+        d.code_check_seconds, d.code_settle_seconds = 0, 0.5
+        result = []
+        thread = threading.Thread(target=lambda: result.append(d.run_forever()), daemon=True)
+        thread.start()
+        with (self.cfg.home / "config.toml").open("a") as fh:
+            fh.write("\n# edited\n")
+        thread.join(timeout=15)
+        self.assertEqual(result, [0], "systemd starts it again with the new settings")
 
 
 del GateCase   # imported only as a base

@@ -278,7 +278,9 @@ No credentials or private task text belong in source-control migration reports.
 
 ## Real-time sync daemon
 
-`daemon run` is what the systemd unit runs; it refuses while `daemon.enabled` is false and never
+`daemon run` is what the systemd unit runs; it refuses while `daemon.enabled` is false (exit code
+4, on which the unit does not restart), exits 0 to be restarted when its code or `config.toml`
+changes, and never
 takes the workspace lock for its lifetime (only per cycle), so `install` is not blocked. `daemon
 status` prints health, unit and `cloudflared` state, whether a webhook token is stored and the
 daemon's last status, never the token itself; `daemon token` prints the token for Notion's
