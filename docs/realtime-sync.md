@@ -101,6 +101,20 @@ the daemon is healthy it is the only Notion client: the feedback gate skips its 
 `daemon.reconcile_minutes`. When the daemon is unhealthy the gate does everything as today.
 Both sides take the existing `feedback` / `outbox` / `kanban-submit` file locks.
 
+### Local cost
+
+Measured on this host (2026-10-13): `PRAGMA data_version` 5 µs, `stat` of the board DB and its
+WAL 7 µs, so a check every 2 s is about 0.0006 % of one core; an idle stdlib process is about
+11 MB RSS. The checks are free; what they trigger is not:
+
+- The Kanban bridge is a Hermes Python process per call (about 0.6 s). Workers write the board DB
+  while they run, so a board change is rate-limited (at most one card sync per
+  `daemon.kanban_min_interval_seconds`) instead of running on every mtime change.
+- The daemon's own writes change `data_version` too: it records the value after its own
+  transaction and only reacts to a value it did not cause, otherwise outbox drains loop.
+- The open connection runs in autocommit and never keeps a read transaction open between
+  checks, so WAL checkpoints are not starved.
+
 ## Endpoint and authentication
 
 Security bar agreed with the user: no unauthenticated access; no further hardening.
@@ -142,6 +156,7 @@ Down for minutes: Notion retries, nothing is lost. Down for longer: the gate's p
 | `daemon.port` | 8655 | Loopback port of the receiver |
 | `daemon.local_poll_seconds` | 2 | `data_version` and board mtime checks |
 | `daemon.debounce_seconds` | 3 | Per (action, page) |
+| `daemon.kanban_min_interval_seconds` | 15 | Board changes trigger at most one card sync this often |
 | `daemon.reconcile_minutes` | 30 | Full Notion pass by the gate while the daemon is healthy |
 | `daemon.webhook_silence_minutes` | 30 | Own writes without any event this long → webhook reported broken |
 
