@@ -182,17 +182,33 @@ Down for minutes: Notion retries, nothing is lost. Down for longer: the gate's p
 | `daemon.reconcile_minutes` | 30 | Full Notion pass by the gate while the daemon is healthy |
 | `daemon.webhook_silence_minutes` | 30 | Own writes without any event this long → webhook reported broken |
 
-## Phases
+## Scope
 
-1. **Smaller hot set** (independent, also the fallback): every run only pages with an active
-   delegation, an open agent question or a user comment in the last 7 days; new tasks, user
-   edits and change notes move to a warm interval. Open: warm interval (proposed 30 min) and
-   whether a user edit stays hot for a short window (proposed 2 h).
-2. **Daemon v1**: receiver, handshake, signature, event → targeted reads, outbox on
-   `data_version`, waking feedback, gate hand-over, systemd unit, watchdogs.
-3. **Daemon v2**: Kanban mtime watch; the cron schedule relaxed once v1 has run for a while.
-4. **Acknowledgement** (needs a board decision): show "received / queued" on the task as soon
-   as a comment or drag that needs the agent arrives.
+Built and delivered together, one reviewable commit per item, tests first. The daemon ships
+disabled (`daemon.enabled = false`) until the go-live.
+
+1. **Smaller hot set** (the fallback while the daemon is down): every run only pages with an
+   active delegation, an open agent question or a user comment in the last 7 days; new tasks,
+   user edits and change notes move to a warm interval. Open: warm interval (proposed 30 min)
+   and whether a user edit stays hot for a short window (proposed 2 h).
+2. **Receiver**: loopback HTTP server, handshake and token file, signature check, event id
+   dedupe, event parsing (type, page, authors) into the work queue.
+3. **Worker loop**: Notion events → page comments / pull / body read, own-author drop;
+   `data_version` → dirty scan + outbox; board DB change (rate-limited) → card messages and
+   sync; minute timers → card creation, parked starts, claim expiry, home callout; claimable
+   feedback → `hermes cron run todo-manager-feedback` (at most once a minute).
+4. **Gate hand-over**: a healthy daemon (fresh `daemon.alive_at`) makes the gate skip its Notion
+   and Kanban steps except the reconciliation pass; a stale one makes it restart the unit,
+   report, and do everything as today.
+5. **Staying up**: heartbeat, `sd_notify` watchdog, exit on source change; `systemd --user`
+   unit written and removed by `install` / `uninstall`.
+6. **Visibility**: `todo-manager daemon run|status|reset-token`; `health` and the home callout
+   show daemon state, last event, signature failures, `cloudflared` state and webhook silence.
+7. **Fake Notion**: signed webhook deliveries in `tests/fake_notion.py`; the tests below.
+8. **Docs**: architecture, limitations, operations, open decisions and CLI updated to match.
+
+Not in scope: anything in the model runs (prompts, skills, how feedback is interpreted), intake,
+an "acknowledged" state on the boards.
 
 ## Verification
 
