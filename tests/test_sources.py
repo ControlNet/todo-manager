@@ -41,9 +41,9 @@ def b64(text):
     return base64.urlsafe_b64encode(text.encode()).decode()
 
 
-def gmail_message(mid, thread, *, sender="Alice <alice@x.org>", labels=("INBOX",), body="Hello", extra=()):
+def gmail_message(mid, thread, *, sender="Alice <alice@x.example>", labels=("INBOX",), body="Hello", extra=()):
     headers = [{"name": "From", "value": sender}, {"name": "To", "value": "me@example.edu"},
-               {"name": "Subject", "value": f"Subject {mid}"}, {"name": "Message-ID", "value": f"<{mid}@x.org>"},
+               {"name": "Subject", "value": f"Subject {mid}"}, {"name": "Message-ID", "value": f"<{mid}@x.example>"},
                *extra]
     return {"id": mid, "threadId": thread, "labelIds": list(labels),
             "internalDate": str(int(clock.now().timestamp() * 1000)),

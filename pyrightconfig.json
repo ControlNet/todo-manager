@@ -1,6 +1,0 @@
-{
-  "include": ["todo_manager", "tests"],
-  "venvPath": "~/.hermes/hermes-agent",
-  "venv": "venv",
-  "extraPaths": ["~/.hermes/hermes-agent"]
-}

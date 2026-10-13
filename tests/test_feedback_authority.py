@@ -64,9 +64,9 @@ class NonUserFeedbackTests(GateCase):
                                            (did,)).fetchone())
 
     def test_allowed_actions_are_parsed_the_same_everywhere(self):
-        self.assertEqual(delegation.action_names(["send_email:bob@x.org", " read ", "push_branch:main"]),
+        self.assertEqual(delegation.action_names(["send_email:bob@x.example", " read ", "push_branch:main"]),
                          {"send_email", "read", "push_branch"})
-        self.assertEqual(delegation.external_actions(["send_email:bob@x.org", "read"]), {"send_email"})
+        self.assertEqual(delegation.external_actions(["send_email:bob@x.example", "read"]), {"send_email"})
 
 
 class PropertyAuthorTests(NotionCase):

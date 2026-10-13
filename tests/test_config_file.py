@@ -47,12 +47,12 @@ class SetValuesTests(unittest.TestCase):
         return tomllib.loads(self.text())
 
     def test_a_value_is_replaced_and_its_comment_kept(self):
-        config_file.set_values(self.path, {"identity.emails": ["me@example.org", "me@lab.org"]})
-        self.assertIn('emails = ["me@example.org", "me@lab.org"]   # the work mailbox\n', self.text())
-        self.assertEqual(self.text().replace('["me@example.org", "me@lab.org"]', '["me@example.org"]'), ORIGINAL)
+        config_file.set_values(self.path, {"identity.emails": ["me@example.org", "me@lab.example"]})
+        self.assertIn('emails = ["me@example.org", "me@lab.example"]   # the work mailbox\n', self.text())
+        self.assertEqual(self.text().replace('["me@example.org", "me@lab.example"]', '["me@example.org"]'), ORIGINAL)
 
     def test_a_value_spanning_lines_is_replaced(self):
-        accounts = [{"name": "lab", "address": "me@lab.org", "token_command": ["helper", "lab"]}]
+        accounts = [{"name": "lab", "address": "me@lab.example", "token_command": ["helper", "lab"]}]
         config_file.set_values(self.path, {"email.accounts": accounts})
         self.assertEqual(self.data()["email"]["accounts"], accounts)
         self.assertIn("# the lab mailbox is not read\n", self.text())

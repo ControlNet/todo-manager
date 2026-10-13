@@ -46,7 +46,7 @@ def mail(ext: str, thread: str, body: str, *, me: bool = False, minutes: float =
          bulk: bool = False) -> Item:
     when = clock.iso(clock.now() + timedelta(minutes=minutes))
     return Item(source="gmail", account="primary", external_id=ext, conversation_key=f"gmail:primary:{thread}",
-                thread_key=f"gmail:primary:{thread}", occurred_at=when, author="me@example.edu" if me else "Alice <alice@x.org>",
+                thread_key=f"gmail:primary:{thread}", occurred_at=when, author="me@example.edu" if me else "Alice <alice@x.example>",
                 author_is_me=me, title=subject, body=body, meta={"bulk_hint": bulk})
 
 

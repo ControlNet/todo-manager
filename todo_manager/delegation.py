@@ -83,7 +83,7 @@ def card_retries(cfg: Config, d: dict[str, Any]) -> int | None:
 
 
 def action_names(allowed: list[str] | None) -> set[str]:
-    """Action names of an allowed-actions list; ``send_email:bob@x.org`` is ``send_email``.
+    """Action names of an allowed-actions list; ``send_email:bob@x.example`` is ``send_email``.
     The one parser for validation, external-action checks and approvals."""
     return {str(a).split(":", 1)[0].strip() for a in allowed or [] if str(a).strip()}
 

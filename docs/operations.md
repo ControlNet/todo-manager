@@ -12,13 +12,14 @@ Manager home page) and add your integration under ··· → Connections. An int
 cannot create a top-level page itself.
 
 ```bash
-git clone <repository url> ~/src/todo-manager
-cd ~/src/todo-manager
+git clone https://github.com/ControlNet/todo-manager.git   # any location; the jobs run from this checkout
+cd todo-manager
 python3 -B -m tests.run --all                     # parallel; expect "OK" (Hermes integration tests skip without Hermes)
 ./bin/todo-manager install                        # asks only what it cannot infer; every outside change needs a yes
 ```
 
-Requirements: Python ≥ 3.11 (standard library only), Hermes with cron and Kanban.
+Requirements: see the [README](../README.md#requirements) (Linux, Python ≥ 3.11 with the
+standard library only, Hermes with cron and Kanban, a Notion integration, source credentials).
 
 `install` discovers settings in a temporary workspace. It asks about source scope (selected
 mailboxes, Slack conversation types, GitHub participation), the Notion home page and identity,

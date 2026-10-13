@@ -11,3 +11,17 @@ __pycache__/
 /PREFERENCES.md
 /.test-durations.json
 /.omo/reviews
+# Machine-local editor settings (point pyright at your own Hermes venv)
+/pyrightconfig.json
+# Credentials and local environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+*token*.json
+id_rsa*
+id_ed25519*

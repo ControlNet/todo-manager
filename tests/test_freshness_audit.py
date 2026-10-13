@@ -362,8 +362,8 @@ class GmailBudgetChecks(WorkspaceCase):
             with self.subTest(match_page=match_page):
                 def listing(p):
                     self.assertIn(self.query, p['q'])
-                    self.assertIn('rfc822msgid:parent@x.org', p['q'])
-                    self.assertIn('rfc822msgid:reply@x.org', p['q'])
+                    self.assertIn('rfc822msgid:parent@x.example', p['q'])
+                    self.assertIn('rfc822msgid:reply@x.example', p['q'])
                     page = int(p.get('pageToken') or 0)
                     if page == match_page:
                         return {'messages': [{'threadId': 'changed'}]}
@@ -533,7 +533,7 @@ class GmailBudgetChecks(WorkspaceCase):
     def test_many_message_ids_are_bounded_chunks_and_resume_until_match(self):
         messages = [gmail_message(str(i), 'changed') for i in range(25)]
         def listing(p):
-            return {'messages': [{'threadId': 'changed'}] if 'rfc822msgid:24@x.org' in p['q'] else []}
+            return {'messages': [{'threadId': 'changed'}] if 'rfc822msgid:24@x.example' in p['q'] else []}
         http = self.transport(listing, messages)
         result = self.source(http, max_requests_per_run=2).fetch(json.dumps({'history_id': '1'}))
         for _ in range(5):

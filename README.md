@@ -41,18 +41,41 @@ sync, the durable link between a task and its agent cards, and install/upgrade/e
                                      └──▶ Hermes Kanban board "todo-manager" (delegations, scheduled by Hermes)
 ```
 
-## Quick start
+## Requirements
 
-Requires Python ≥ 3.11 (standard library only) and Hermes with cron and Kanban.
+- **Linux.** File locks use `fcntl`; the optional real-time daemon is a `systemd --user`
+  service. Other systems are untested.
+- **Python ≥ 3.11**, standard library only.
+- **Hermes** with cron and Kanban, verified against Hermes 0.21.5 (commit `105568c`). The board
+  bridge uses Hermes' Python modules, so other versions may need changes; see
+  [docs/hermes-native-verification.md](docs/hermes-native-verification.md).
+- **Notion:** an internal integration whose token is in `NOTION_API_KEY`, with the read content,
+  update content, insert content, read comments and insert comments capabilities.
+- **Sources** (each optional; `install` finds what Hermes already has):
+  - Gmail: a himalaya account in Hermes whose `gmail.auth.token.command` prints an OAuth access
+    token (read-only Gmail access is enough);
+  - Slack: a user token (`SLACK_USER_TOKEN`, or `$HERMES_HOME/credentials/slack_user_token`)
+    that can call `users.conversations`, `conversations.history`, `conversations.replies` and
+    `users.info` for the conversation types you include;
+  - GitHub: the `gh` CLI, logged in (`gh auth login`).
+
+Todo Manager only reads your sources. What it reads is stored in the local workspace and shown
+to the model your Hermes is configured with; your tasks are written to your Notion.
+
+## Quick start
 
 First create an empty top-level Notion page (the future home page) and add your Notion
 integration to it (··· → Connections). Then:
 
 ```bash
-git clone https://github.com/ControlNet/todo-manager.git ~/src/todo-manager && cd ~/src/todo-manager
+git clone https://github.com/ControlNet/todo-manager.git
+cd todo-manager
 python3 -B -m tests.run --all                   # parallel, under a minute; expect OK (Hermes tests skip without Hermes)
 ./bin/todo-manager install
 ```
+
+`install` points the Hermes jobs (and the optional daemon) at this checkout: keep it where it is,
+and note that edits in it take effect at once. Develop in a separate clone or `git worktree`.
 
 `install` infers the rest from Hermes (language, time zone, mailboxes, Slack, GitHub, Notion
 and Kanban settings), asks real choices (the home page, source scopes, execution profile and whether new jobs start) and shows every change outside the workspace before making it. It is safe to re-run;
@@ -64,8 +87,8 @@ backed up before replacement; all existing cron runtime settings are preserved);
 
 Runtime data (database, runs, exports, backups) lives only in the workspace
 (`TODO_HOME`, default `~/.hermes/workspace/todo-manager`); the tool refuses a workspace inside
-the source tree. Tokens are read from environment variables (for example `NOTION_API_KEY`);
-never commit `.env` / `.env.local` files.
+the source tree; it is readable only by you. Tokens are read from environment variables (for
+example `NOTION_API_KEY`); never commit `.env` / `.env.local` files (`.gitignore` covers them).
 
 ## Documentation
 

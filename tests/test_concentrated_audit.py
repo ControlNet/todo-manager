@@ -566,7 +566,7 @@ class SourceAndStoreAudit(WorkspaceCase):
         http = FakeHttp([
             ('/history', {'historyId': '2', 'history': [{'messagesAdded': [{'message': {'id': 'ad', 'threadId': 'ad'}}]}]}),
             ('/messages', {'messages': []}),
-            ('/threads/ad', {'messages': [gmail_message('ad', 'ad', sender='advertiser@outside.org')]}),
+            ('/threads/ad', {'messages': [gmail_message('ad', 'ad', sender='advertiser@outside.example')]}),
         ])
         source = GmailSource(account='test', address='me@example.edu', token=lambda: 'fake', my_addresses=[],
                              query='from:trusted@example.edu', http=http)
@@ -635,7 +635,7 @@ class SourceAndStoreAudit(WorkspaceCase):
         third = source.fetch(second.cursor)
         self.assertTrue(third.complete)
         self.assertFalse(third.items)
-        self.assertEqual(sum('rfc822msgid:one@x.org' in q for q in calls), 1,
+        self.assertEqual(sum('rfc822msgid:one@x.example' in q for q in calls), 1,
                          'selected thread is not searched again while backlog continues')
         self.assertTrue(all('rfc822msgid:' in q for q in calls))
 

@@ -209,21 +209,21 @@ class NotionLinkingTests(NotionCase):
 
 class LinkRenderingTests(unittest.TestCase):
     def test_bare_urls_in_text_become_links_that_end_where_the_url_ends(self):
-        out = body.render({"summary": "见 https://a.org/x_y?q=1&r=(2)。然后\n(参考 https://c.org/z)",
-                           "done_criteria": "打开 https://b.org/~me/p."}, lang="zh-CN")
-        self.assertIn("见 [https://a.org/x_y?q=1&r=(2)](https://a.org/x_y?q=1&r=%282%29)。然后", out)
-        self.assertIn("(参考 [https://c.org/z](https://c.org/z))", out)
-        self.assertIn("打开 [https://b.org/\\~me/p](https://b.org/~me/p).", out)
+        out = body.render({"summary": "见 https://a.example/x_y?q=1&r=(2)。然后\n(参考 https://c.example/z)",
+                           "done_criteria": "打开 https://b.example/~me/p."}, lang="zh-CN")
+        self.assertIn("见 [https://a.example/x_y?q=1&r=(2)](https://a.example/x_y?q=1&r=%282%29)。然后", out)
+        self.assertIn("(参考 [https://c.example/z](https://c.example/z))", out)
+        self.assertIn("打开 [https://b.example/\\~me/p](https://b.example/~me/p).", out)
 
     def test_a_source_titled_by_its_url_is_linked_once(self):
-        out = body.render({"sources": [{"title": "", "url": "https://d.org/1"}]}, lang="en")
-        self.assertIn("- [https://d.org/1](https://d.org/1)", out)
+        out = body.render({"sources": [{"title": "", "url": "https://d.example/1"}]}, lang="en")
+        self.assertIn("- [https://d.example/1](https://d.example/1)", out)
         self.assertNotIn("[[", out)
 
     def test_links_count_by_their_visible_text(self):
-        self.assertEqual(body.content_fingerprint("见 [https://a.org/x](https://a.org/x)。然后"),
-                         body.content_fingerprint("见 https://a.org/x。然后"))
+        self.assertEqual(body.content_fingerprint("见 [https://a.example/x](https://a.example/x)。然后"),
+                         body.content_fingerprint("见 https://a.example/x。然后"))
         self.assertEqual(body.content_fingerprint("证书 [certs.example.edu](http://certs.example.edu) 的"),
                          body.content_fingerprint("证书 certs.example.edu 的"))
-        self.assertNotEqual(body.content_fingerprint("见 https://a.org/x。然后"),
-                            body.content_fingerprint("见 https://a.org/y。然后"))
+        self.assertNotEqual(body.content_fingerprint("见 https://a.example/x。然后"),
+                            body.content_fingerprint("见 https://a.example/y。然后"))

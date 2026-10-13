@@ -12,6 +12,10 @@ license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/ControlNet/todo-manager"
+Issues = "https://github.com/ControlNet/todo-manager/issues"
+
 [project.scripts]
 todo-manager = "todo_manager.cli:main"
 
