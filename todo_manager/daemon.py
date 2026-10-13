@@ -10,11 +10,14 @@ daemon is stale, runs other code or is waiting for ``install``, the gate syncs a
 work is idempotent and goes through the gate's own steps, so either can stop at any time.
 
 Threads: the webhook receiver puts events on a queue; the main thread does all sync work, one
-cycle at a time, under the shared ``workspace`` lock and the ``sync`` lock.
+cycle at a time, under the shared ``workspace`` lock and the ``sync`` lock; a pulse thread stamps
+liveness.
 
-Liveness: a status file (``state/daemon.json``) stamped every ``HEARTBEAT_SECONDS``, read by the
-gate and ``health``; ``sd_notify`` READY/WATCHDOG for systemd; exit on a source change (systemd
-starts the new code).
+Liveness: every ``PULSE_SECONDS`` the pulse thread writes the status file (``state/daemon.json``,
+read by the gate and ``health``) and pings the systemd watchdog, as long as the main thread made
+progress (a loop, a sync step, a Notion request) within ``STALL_SECONDS``: a long cycle that is
+working stays healthy, a stuck one is killed by the watchdog and covered by the gate. Exit on a
+source or config change (systemd starts the new code).
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -39,7 +43,8 @@ from .locks import LockBusy, file_lock, lock_path
 
 UNIT_NAME = "todo-manager-daemon.service"
 UNIT_MARK = "# todo-manager daemon unit (generated; overwritten by `todo-manager install`)"
-HEARTBEAT_SECONDS = 30
+PULSE_SECONDS = 15
+STALL_SECONDS = 300    # no progress for this long: stop the heartbeat (above the 120 s Hermes wake call)
 STALE_SECONDS = 90
 CODE_CHECK_SECONDS = 10
 CODE_SETTLE_SECONDS = 10
@@ -119,6 +124,11 @@ def unit_path(cfg: Config) -> Path:
     return Path(cfg.get("daemon.unit_dir") or "~/.config/systemd/user").expanduser() / UNIT_NAME
 
 
+def _quoted(value: str) -> str:
+    """One systemd word: spaces, quotes, backslashes and ``%`` specifiers kept literally."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+
+
 def unit_text(launcher: Path, todo_home: Path) -> str:
     return f"""{UNIT_MARK}
 # workspace: {str(todo_home)!r}
@@ -130,8 +140,8 @@ StartLimitIntervalSec=0
 [Service]
 Type=notify
 NotifyAccess=main
-ExecStart={launcher} daemon run
-Environment=TODO_HOME={todo_home}
+ExecStart={_quoted(str(launcher))} daemon run
+Environment={_quoted(f"TODO_HOME={todo_home}")}
 Environment=PYTHONDONTWRITEBYTECODE=1
 Restart=always
 RestartPreventExitStatus={EXIT_DISABLED}
@@ -230,6 +240,12 @@ class Daemon:
         self.data_version: int | None = None
         self.board_mtime: tuple[float, ...] | None = None
         self.last_write_at: datetime | None = None
+        self.unanswered_since: datetime | None = None   # oldest write of ours no event has followed yet
+        self.notion_now: Any = None                     # the Notion sync of the running cycle
+        self.progress = 0
+        self._progress_seen: tuple[Any, ...] | None = None
+        self._progress_at: float | None = None
+        self.status_lock = threading.Lock()
         self.last_error: str | None = None
         self.last_summary: dict[str, Any] = {}
         self.silent = False
@@ -241,7 +257,7 @@ class Daemon:
 
     @property
     def webhook_ready(self) -> bool:
-        return webhook.load_token(self.cfg.home) is not None
+        return bool(self.setting("webhook", True)) and webhook.load_token(self.cfg.home) is not None
 
     @property
     def mode(self) -> str:
@@ -333,12 +349,13 @@ class Daemon:
             return
         grace = timedelta(minutes=float(self.setting("webhook_silence_minutes", 10)))
         last_event = clock.parse(self.stats.last_event_at) if self.stats.last_event_at else None
-        silent = bool(self.last_write_at and clock.now() - self.last_write_at > grace
-                      and (last_event is None or last_event < self.last_write_at))
+        if self.unanswered_since and last_event and last_event >= self.unanswered_since:
+            self.unanswered_since = None    # only a delivery answers; later writes do not move the deadline
+        silent = bool(self.unanswered_since and clock.now() - self.unanswered_since > grace)
         if silent != self.silent:
             self.silent = silent
             health.record_channel(self.conn, "daemon", "webhook",
-                                  f"no Notion events since our write at {clock.iso(self.last_write_at)}"
+                                  f"no Notion events since our write at {clock.iso(self.unanswered_since)}"
                                   if silent else None)
 
     # ------------------------------------------------------------ work
@@ -376,7 +393,6 @@ class Daemon:
             self.pending.pop(key, None)
         self.last_error = None
         self.last_summary = summary
-        self.data_version = self._data_version()   # what the work itself changed is not news
         return summary
 
     def work(self, keys: list[Key]) -> dict[str, Any]:
@@ -387,23 +403,35 @@ class Daemon:
         problems: list[str] = []
 
         def step(name: str, fn: Callable[[], Any]) -> Any:
+            self.touch()
             return gate_feedback._step(conn, summary, problems, name, fn)
 
         notion = self.notion_factory(conn, cfg)
+        self.notion_now = notion
+        try:
+            return self._work(keys, step, notion, summary, problems)
+        finally:
+            self.notion_now = None
+
+    def _work(self, keys: list[Key], step: Callable[[str, Callable[[], Any]], Any], notion: Any,
+              summary: dict[str, Any], problems: list[str]) -> dict[str, Any]:
+        from . import gate_feedback
+        assert self.conn is not None
+        conn, cfg = self.conn, self.cfg
         kanban = self.kanban_factory(cfg)
         names = {k[0] for k in keys}
         if "claims" in names:
             step("claims", lambda: gate_feedback.fail_exhausted_claims(conn, cfg))
         if notion is not None:
+            targets = [t for t in (notion.comment_target(k[1]) for k in keys if k[0] == "comments") if t]
             if "notion_pass" in names:
                 gate_feedback.notion_pull_steps(step, notion, cfg)
             else:
                 for kind in ("project", "task"):
                     if ("pull", kind) in keys:
                         step(f"pull_{kind}s", lambda kind=kind: notion.pull(kind))
-                targets = [t for t in (notion.comment_target(k[1]) for k in keys if k[0] == "comments") if t]
-                if targets:
-                    step("comments", lambda: notion.poll_comments(targets=targets))
+            if targets:   # also with a full pass: its selection may leave the event's page out
+                step("event_comments", lambda: notion.poll_comments(targets=targets))
         if kanban is not None:
             if names & {"local", "kanban", "claims"}:
                 gate_feedback.kanban_send_steps(step, conn, cfg, kanban)
@@ -413,6 +441,7 @@ class Daemon:
         gate_feedback.push_steps(step, conn, notion)
         if (summary.get("outbox") or {}).get("done"):
             self.last_write_at = clock.now()
+            self.unanswered_since = self.unanswered_since or self.last_write_at
         if notion is not None and "home" in names:
             gate_feedback.home_step(step, conn, cfg, notion, summary)
         if problems:
@@ -453,11 +482,29 @@ class Daemon:
                             "accepted": self.stats.accepted, "duplicates": self.stats.duplicates,
                             "bad_signatures": self.stats.bad_signatures, "silent": self.silent},
                 "last_write_at": clock.iso(self.last_write_at) if self.last_write_at else None,
+                "unanswered_since": clock.iso(self.unanswered_since) if self.unanswered_since else None,
                 "last_summary": self.last_summary}
 
     def heartbeat(self, force: bool = False) -> None:
-        if force or self.every("heartbeat", HEARTBEAT_SECONDS / 60):
+        with self.status_lock:
             write_status(self.cfg.home, self.status())
+
+    def touch(self) -> None:
+        """The main thread made progress."""
+        self.progress += 1
+
+    def pulse(self, mono: float | None = None) -> bool:
+        """Stamp the status and ping the watchdog, unless the main thread has made no progress
+        (no loop, step or Notion request) for ``STALL_SECONDS``."""
+        mono = time.monotonic() if mono is None else mono
+        seen = (self.progress, getattr(getattr(self.notion_now, "client", None), "requests", None))
+        if seen != self._progress_seen or self._progress_at is None:
+            self._progress_seen, self._progress_at = seen, mono
+        if mono - self._progress_at > STALL_SECONDS:
+            return False
+        self.heartbeat(force=True)
+        sd_notify("WATCHDOG=1")
+        return True
 
     def run_forever(self, receiver: webhook.Receiver | None = None) -> int:
         """The process: until the source or config.toml changes (exit 0, systemd starts the new code)."""
@@ -468,19 +515,25 @@ class Daemon:
         self.open()
         self.heartbeat(force=True)
         sd_notify("READY=1")
+        stop = threading.Event()
+
+        def pulses() -> None:
+            while not stop.wait(PULSE_SECONDS):
+                self.pulse()
+        pulser = threading.Thread(target=pulses, name="pulse", daemon=True)
+        pulser.start()
         changed_at: float | None = None
         seen_code = self.code
         next_code_check = time.monotonic()
         try:
             while True:
+                self.touch()
                 try:
                     first: webhook.Event | None = self.events.get(timeout=1.0)
                 except queue.Empty:
                     first = None
                 self.cycle(first)
                 self.maybe_wake()
-                self.heartbeat()
-                sd_notify("WATCHDOG=1")
                 if time.monotonic() >= next_code_check:
                     next_code_check = time.monotonic() + self.code_check_seconds
                     current = self.fingerprint()
@@ -493,6 +546,8 @@ class Daemon:
                 if self.conn is None:
                     time.sleep(59)   # waiting for install: try again in a minute
         finally:
+            stop.set()
+            pulser.join(timeout=5)
             sd_notify("STOPPING=1")
             if receiver is not None:
                 receiver.stop()

@@ -156,22 +156,28 @@ Security bar agreed with the user: no unauthenticated access; no further hardeni
 ## Staying up
 
 1. `systemd --user` unit `todo-manager-daemon.service` (`Type=notify`, `Restart=always`,
-   `RestartSec=10`, no start limit, `WatchdogSec=120`), running the `todo-manager` launcher.
+   `RestartSec=10`, no start limit, `WatchdogSec=120`), running the `todo-manager` launcher
+   (paths quoted for systemd).
    `install` writes, enables and (re)starts it while `daemon.enabled`; stops and removes it when
    turned off and on `uninstall`. A unit not written by todo-manager is left alone. The user has
    linger enabled (as for `hermes-gateway.service`). The Notion token comes from
    `notion.env_file`, as for the gates.
-2. Status file `state/daemon.json`, stamped every 30 s: pid, code fingerprint, state, mode,
-   webhook counters, last error. It is a file, not a database row, so it needs no schema and
-   works while the daemon waits for `install`.
+2. Status file `state/daemon.json`, stamped every 15 s by a pulse thread that also pings the
+   systemd watchdog: pid, fingerprint, state, mode, webhook counters, last error. The pulse goes
+   on while the main thread makes progress (a loop, a sync step, a Notion request), so a long
+   pass stays healthy; after 5 minutes without progress it stops, systemd kills the process and
+   the gate covers. It is a file, not a database row, so it needs no schema and works while the
+   daemon waits for `install`.
 3. The feedback gate is the outer watchdog: a status older than 90 s, from other code or
    settings, or not `running` makes the gate sync itself, record the `daemon`/`alive` channel
    (shown by `health` and the home callout) and restart an installed unit at most every 10
    minutes.
 4. End to end: our own Notion writes produce events (assumed from the documented payloads, to be
-   confirmed at go-live). A write of ours `daemon.webhook_silence_minutes` ago with no delivery
-   since means the tunnel or the subscription is broken: the daemon polls Notion as the gate did
-   and records the `daemon`/`webhook` channel until deliveries arrive again.
+   confirmed at go-live). The oldest write of ours still without any delivery after it, older
+   than `daemon.webhook_silence_minutes`, means the tunnel or the subscription is broken (later
+   writes do not move that deadline): the daemon polls Notion as the gate did and records the
+   `daemon`/`webhook` channel until a delivery arrives again. With `daemon.webhook = false` it
+   always polls.
 5. SIGTERM (`systemctl stop`) leaves through the cleanup; an interrupted transaction rolls back.
 
 Down for minutes: Notion retries and the gate covers. Down for longer: the gate's polling covers.
@@ -215,19 +221,23 @@ behaves as before except for the smaller set of pages read every run.
 | `daemon.kanban_poll_minutes` | 5 | Cards read on a timer as well |
 | `daemon.reconcile_minutes` | 30 | Full Notion pass while webhooks arrive |
 | `daemon.webhook_silence_minutes` | 10 | Our write without any delivery this long: webhook reported broken, Notion polled |
-| `daemon.unit_dir` | `~/.config/systemd/user` | Where `install` writes the unit |
+| `daemon.unit_dir` | `~/.config/systemd/user` | Where `install` writes the unit (tests); `systemctl --user enable` finds it only in a directory systemd searches |
 
 ## Verification
 
 - `tests/test_comment_polling.py`: which pages are read every run, every warm interval, round-robin.
-- `tests/test_webhook.py`: handshake, owner-only token, a second handshake refused, signature
+- `tests/test_webhook.py`: handshake, owner-only token, a second handshake refused (also two at
+  once), signature
   accept/reject, tampered body, retries deduplicated, bot-only marking, HTTP surface (path,
   method, body cap) on an ephemeral loopback port.
 - `tests/test_daemon.py`: a comment reads only its page and wakes once; a burst is one read; own
   writes are not work; property edits and pages created in Notion are pulled; unknown pages
-  ignored; a local write reaches Notion and a new delegation gets its card without the gate;
-  idle means no request; board changes rate-limited; wake rate limit; webhook silence → polling
-  and back; no token → polling; waiting for install; gate hand-over (healthy, stale, other code,
+  ignored; a comment event due with a full pass is not dropped; a local write reaches Notion
+  and a new delegation gets its card without the gate; a commit by another process during a
+  cycle is not swallowed; idle means no request; board changes rate-limited; wake rate limit;
+  webhook silence → polling and back (steady writes do not postpone it, only a delivery ends it;
+  receiver off → polling); no token → polling; waiting for install; a long cycle with progress
+  stays healthy, a stuck one stops the heartbeat; unit paths quoted; gate hand-over (healthy, stale, other code,
   disabled, restart at most every 10 minutes, a config edit); status file; fingerprint of code and
   config.toml; exit after a settled source or config change; the unit stays down on exit code 4.
 - `tests/test_daemon_install.py`: unit written/started/left alone/stopped/removed by `install` and

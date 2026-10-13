@@ -18,6 +18,7 @@ import hmac
 import json
 import os
 import queue
+import tempfile
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -49,11 +50,14 @@ def load_token(home: Path) -> str | None:
 def save_token(home: Path, token: str) -> None:
     path = token_path(home)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(token)
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)   # mode 0600
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(token)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def reset_token(home: Path) -> bool:
@@ -119,6 +123,7 @@ class Receiver:
         self.path = path
         self.stats = Stats()
         self.lock = threading.Lock()
+        self.handshake_lock = threading.Lock()   # one handshake stores the token; a second one sees it
         self.server = ThreadingHTTPServer((host, port), self._handler())
         self.server.daemon_threads = True
         self.thread: threading.Thread | None = None
@@ -139,16 +144,10 @@ class Receiver:
         """Handle one delivery; returns the HTTP status."""
         token = load_token(self.home)
         if token is None:
-            try:
-                payload = json.loads(body)
-            except ValueError:
-                return 400
-            offered = payload.get("verification_token") if isinstance(payload, dict) else None
-            if not isinstance(offered, str) or not offered.strip():
-                return 401
-            save_token(self.home, offered.strip())
-            self.stats.handshakes += 1
-            return 200
+            with self.handshake_lock:
+                token = load_token(self.home)
+                if token is None:
+                    return self._handshake(body)
         if not verify(token, body, signature):
             self.stats.bad_signatures += 1
             return 401
@@ -172,6 +171,18 @@ class Receiver:
                 self.stats.seen.popitem(last=False)
         self.stats.accepted += 1
         self.events.put(event)
+        return 200
+
+    def _handshake(self, body: bytes) -> int:
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            return 400
+        offered = payload.get("verification_token") if isinstance(payload, dict) else None
+        if not isinstance(offered, str) or not offered.strip():
+            return 401
+        save_token(self.home, offered.strip())
+        self.stats.handshakes += 1
         return 200
 
     def _handler(self) -> type[BaseHTTPRequestHandler]:

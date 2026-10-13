@@ -71,7 +71,7 @@ class UnitInstallTests(InstallCase):
         self.configure(enabled=True)
         self.install()
         text = self.unit().read_text()
-        self.assertIn(f"ExecStart={self.paths.launcher} daemon run", text)
+        self.assertIn(f'ExecStart="{self.paths.launcher}" daemon run', text)
         self.assertIn(f"TODO_HOME={self.home}", text)
         self.assertIn(["enable", daemon.UNIT_NAME], self.systemd.calls)
         self.assertIn(["restart", daemon.UNIT_NAME], self.systemd.calls)

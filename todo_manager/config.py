@@ -136,7 +136,7 @@ DEFAULTS: dict[str, Any] = {
         "kanban_poll_minutes": 5,  # cards read on a timer as well
         "reconcile_minutes": 30,  # full Notion pass while webhooks arrive
         "webhook_silence_minutes": 10,  # our write without any event this long: webhook reported broken
-        "unit_dir": "",  # "" = ~/.config/systemd/user
+        "unit_dir": "",  # "" = ~/.config/systemd/user; for tests (enable needs a systemd search path)
     },
     # The Hermes installation and what `install` sets on new cron jobs ("" = Hermes' default).
     # A model, provider or reasoning effort changed on a job in Hermes is kept by later upgrades.

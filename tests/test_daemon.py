@@ -112,6 +112,17 @@ class EventTests(DaemonCase):
         self.assertIsNone(self.loop(5))
 
 
+    def test_a_full_pass_due_with_a_comment_event_still_reads_the_event_page(self):
+        self.fake.user_comment(self.page, "改成周五")
+        self.deliver()
+        self.d.cycle()                                   # the event's read is debounced
+        self.d.due(("notion_pass",))                     # the reconcile pass falls due at the same time
+        clock.advance(seconds=3)
+        self.d.cycle()
+        self.assertEqual([f["kind"] for f in feedback.pending(self.conn)], ["comment"],
+                         "the page is not in the pass's selection, yet the event is not dropped")
+
+
 class LocalChangeTests(DaemonCase):
     def test_a_local_write_reaches_notion_without_waiting_for_the_gate(self):
         store.update_task(self.conn, self.task, {"due_date": "2026-10-30"}, actor="agent", origin="feedback",
@@ -128,6 +139,24 @@ class LocalChangeTests(DaemonCase):
         delegation.create(self.conn, self.cfg, task_id=self.task, title="起草", goal="draft")
         self.loop(1)
         self.assertEqual(len(self.kb.cards), 1)
+
+    def test_a_commit_by_another_process_during_the_work_is_not_swallowed(self):
+        other = db.open_existing(self.cfg.db_path)
+        self.addCleanup(other.close)
+        work = self.d.work
+
+        def work_then_someone_else_writes(keys):
+            out = work(keys)
+            store.update_task(other, self.task, {"next_step": "from the CLI"}, actor="agent", origin="cli",
+                              based_on_version=store.get_task(other, self.task)["version"])
+            return out
+        self.d.work = work_then_someone_else_writes
+        self.d.due(("claims",))
+        self.d.cycle()
+        self.d.work = work
+        self.loop(1)
+        self.assertIn("from the CLI", self.fake.prop(self.page, "下一步") or "",
+                      "the next loop sees the commit and pushes it")
 
 
 class BoardTests(DaemonCase):
@@ -238,6 +267,29 @@ class WebhookSilenceTests(DaemonCase):
         self.d.cycle()
         self.assertEqual(self.d.mode, "webhook")
 
+    def test_steady_writes_do_not_postpone_the_silence_check(self):
+        self.write()
+        for _ in range(3):                # a write every 5 minutes, no delivery at all
+            clock.advance(minutes=5)
+            self.write()
+        self.assertEqual(self.d.mode, "polling", "15 minutes since the first write still unanswered")
+
+    def test_a_new_write_does_not_end_a_detected_silence_only_a_delivery_does(self):
+        self.write()
+        clock.advance(minutes=11)
+        self.d.cycle()
+        self.assertEqual(self.d.mode, "polling")
+        self.write()
+        self.d.cycle()
+        self.assertEqual(self.d.mode, "polling")
+        self.d.stats.last_event_at = clock.iso()
+        self.d.cycle()
+        self.assertEqual(self.d.mode, "webhook")
+
+    def test_with_the_receiver_turned_off_a_stored_token_does_not_mean_webhook_mode(self):
+        self.cfg.data["daemon"]["webhook"] = False
+        self.assertEqual(self.d.mode, "polling")
+
     def test_without_a_verified_subscription_the_daemon_polls_notion_like_the_gate(self):
         webhook.reset_token(self.cfg.home)
         self.assertEqual(self.d.mode, "polling")
@@ -343,12 +395,44 @@ class StatusTests(DaemonCase):
 
     def test_the_unit_runs_the_launcher_and_restarts(self):
         text = daemon.unit_text(Path("/home/u/.local/bin/todo-manager"), Path("/home/u/ws"))
-        self.assertIn("ExecStart=/home/u/.local/bin/todo-manager daemon run", text)
+        self.assertIn('ExecStart="/home/u/.local/bin/todo-manager" daemon run', text)
         self.assertIn("Restart=always", text)
         self.assertIn(f"RestartPreventExitStatus={daemon.EXIT_DISABLED}", text,
                       "turned off in config.toml: it exits and stays down until install removes the unit")
         self.assertIn("Type=notify", text)
         self.assertTrue(text.startswith(daemon.UNIT_MARK))
+
+    def test_unit_paths_are_quoted_for_systemd(self):
+        text = daemon.unit_text(Path("/home/u/My Tools/todo-manager"), Path("/home/u/50% ws"))
+        self.assertIn('ExecStart="/home/u/My Tools/todo-manager" daemon run\n', text)
+        self.assertIn('Environment="TODO_HOME=/home/u/50%% ws"\n', text)
+
+
+class LivenessTests(DaemonCase):
+    class Client:
+        requests = 0
+
+    class Notion:
+        def __init__(self, client):
+            self.client = client
+
+    def test_a_long_cycle_that_makes_progress_stays_healthy(self):
+        client = self.Client()
+        self.d.notion_now = self.Notion(client)
+        self.assertTrue(self.d.pulse(mono=1000.0))
+        for t in range(1, 11):                       # 10 x 30 s inside one cycle, requests going out
+            client.requests += 5
+            clock.advance(seconds=30)
+            self.assertTrue(self.d.pulse(mono=1000.0 + 30 * t))
+        self.assertTrue(daemon.health_of(self.cfg)["healthy"], "the gate leaves the sync to the busy daemon")
+
+    def test_a_stuck_cycle_stops_the_heartbeat(self):
+        self.d.notion_now = self.Notion(self.Client())
+        self.assertTrue(self.d.pulse(mono=1000.0))
+        clock.advance(seconds=daemon.STALL_SECONDS + 1)
+        self.assertFalse(self.d.pulse(mono=1000.0 + daemon.STALL_SECONDS + 1),
+                         "no watchdog ping: systemd kills and restarts it")
+        self.assertFalse(daemon.health_of(self.cfg)["healthy"], "the gate syncs itself")
 
 
 class CodeChangeTests(DaemonCase):

@@ -56,6 +56,26 @@ class ReceiverTests(unittest.TestCase):
         self.assertEqual(self.handshake("attacker"), 401)
         self.assertEqual(webhook.load_token(self.home), "secret_abc")
 
+    def test_two_handshakes_at_once_store_one_token(self):
+        import threading
+        import time
+        save = webhook.save_token
+
+        def slow_save(home, token):
+            time.sleep(0.2)
+            save(home, token)
+        webhook.save_token = slow_save
+        self.addCleanup(setattr, webhook, "save_token", save)
+        results = {}
+        threads = [threading.Thread(target=lambda t=t: results.__setitem__(t, self.handshake(t))) for t in ("first", "second")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        winners = [t for t, status in results.items() if status == 200]
+        self.assertEqual(len(winners), 1, results)
+        self.assertEqual(webhook.load_token(self.home), winners[0])
+
     def test_a_signed_comment_event_is_queued_with_its_page(self):
         self.handshake()
         self.fake.user_comment(self.page, "hi")
