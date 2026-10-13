@@ -48,8 +48,9 @@ main thread, about once a second:                                               
   events → due work per page (debounced)       PRAGMA data_version changed → local push
   board kanban.db / -wal mtime changed → card read (rate-limited)     timers → claims, home, passes
   every database access, opening included, under the shared `workspace` lock (schema checked
-  first), due work also under the `sync` lock, through gate_feedback's steps (a failed step:
-  again after 60 s, 5 times, then every `daemon.reconcile_minutes` until it succeeds):
+  first), due work also under the `sync` lock, through gate_feedback's steps (a failed read an
+  event asked for, judged per page: again after 60 s, 5 times, then every
+  `daemon.reconcile_minutes` until it succeeds; timer work is not retried, its timer recurs):
     ├─ Notion → local: pull of that kind (with body reads), comments of the named pages
     ├─ local → board: messages, cards of new delegations, parked starts
     ├─ board → local: card events
@@ -65,7 +66,7 @@ for it). Events and the work they cause:
 | Event | Work |
 |---|---|
 | `comment.created` / `updated` / `deleted` | comments of `data.page_id` only (not aggregated: arrives in seconds) |
-| `page.properties_updated` / `content_updated` / `created` / `moved` / `deleted` / `undeleted` | `pull` of that page's kind (task or project), which also reads edited bodies (aggregated: usually < 1 min); `deleted` / `undeleted` / `moved` of a known task page also read that page directly (a data source query leaves trashed pages out; a page that is gone is reported by `health`, not retried) |
+| `page.properties_updated` / `content_updated` / `created` / `moved` / `deleted` / `undeleted` | `pull` of that page's kind (task or project), which also reads edited bodies (aggregated: usually < 1 min); `deleted` / `undeleted` / `moved` of a known task page also read that page directly (a data source query leaves trashed pages out; a page that is gone is not retried but listed under `page_problems` in `daemon status` and `health` until it reads again) |
 | anything else | acknowledged and dropped |
 
 Rules:
@@ -237,8 +238,11 @@ behaves as before except for the smaller set of pages read every run.
 - `tests/test_daemon.py`: a comment reads only its page and wakes once; a burst is one read; own
   writes are not work; property edits and pages created in Notion are pulled; unknown pages
   ignored; a comment event due with a full pass is not dropped; a page deleted in Notion is read
-  directly, again slowly while its read keeps failing, reported when it is gone; a project
-  deletion is left to the pull; a failed event read is retried without another event; no
+  directly, again slowly while its read keeps failing, reported when it is gone until it reads
+  again (a home refresh does not clear it); a project deletion is left to the pull; a failed
+  event read is retried without another event, only that read, and timer work is not; the
+  status is read safely while the main thread records retries; a failing pulse does not end
+  the pulse thread; no
   database access (not even opening) while install holds the workspace; a schema changed
   underneath → waiting for install and back, the event taken meanwhile kept; a delivery during
   the work answers only the writes before it; a local write reaches Notion

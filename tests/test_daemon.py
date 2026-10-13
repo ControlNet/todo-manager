@@ -156,14 +156,41 @@ class EventTests(DaemonCase):
         row = self.conn.execute("SELECT trashed FROM notion_pages WHERE page_id=?", (self.page,)).fetchone()
         self.assertEqual(row["trashed"], 1)
 
-    def test_a_page_that_is_gone_is_reported_and_not_retried(self):
+    def test_a_page_that_is_gone_is_reported_until_it_reads_again_and_not_retried(self):
         self.fake.user_trash(self.page)
         self.deliver()
         self.fake.fail_next[("GET", "/pages/")] = HttpError(404, "gone", body={"code": "object_not_found"})
         self.loop()
         self.assertNotIn(("page", self.page), self.d.pending)
-        kept = json.loads(db.get_meta(self.conn, "health.problems.notion") or "{}")
-        self.assertTrue(any(self.page in p for p in kept.get("problems", [])), kept)
+        self.d.due(("home",))                         # a home refresh does not look at the page
+        self.d.cycle()
+        self.d.heartbeat(force=True)
+        self.assertIn(self.page, daemon.read_status(self.cfg.home)["page_problems"])
+        self.assertIn(self.page, daemon.health_of(self.cfg)["page_problems"])
+        self.fake.user_trash(self.page, trashed=False)   # shared again / restored: it reads
+        self.deliver()
+        self.loop()
+        self.d.heartbeat(force=True)
+        self.assertNotIn(self.page, daemon.read_status(self.cfg.home)["page_problems"])
+
+    def test_only_the_failed_event_read_is_retried(self):
+        other = store.create_task(self.conn, "Other", origin="intake")
+        self.push(other)
+        self.settle()
+        other_page = self.page_of(other)
+        self.fake.user_trash(self.page)
+        self.fake.user_comment(other_page, "x")
+        self.deliver()
+        self.fake.fail_next[("GET", "/comments")] = HttpError(400, "boom", body={"code": "validation_error"})
+        self.loop()
+        self.assertIn(("comments", other_page), self.d.pending)
+        self.assertNotIn(("page", self.page), self.d.pending, "its read succeeded")
+
+    def test_timer_work_is_not_retried_its_timer_runs_it_again(self):
+        self.fake.fail_next[("POST", "/data_sources/")] = HttpError(400, "boom", body={"code": "validation_error"})
+        self.d.due(("notion_pass",))
+        self.d.cycle()
+        self.assertNotIn(("notion_pass",), self.d.pending)
 
     def test_a_deleted_project_page_is_left_to_the_pull_as_before(self):
         project = store.create_project(self.conn, "合作项目", origin="cli")
@@ -546,6 +573,39 @@ class LivenessTests(DaemonCase):
             clock.advance(seconds=30)
             self.assertTrue(self.d.pulse(mono=1000.0 + 30 * t))
         self.assertTrue(daemon.health_of(self.cfg)["healthy"], "the gate leaves the sync to the busy daemon")
+
+    def test_the_status_can_be_read_while_the_main_thread_changes_retries(self):
+        import threading
+        d, writers = self.d, []
+
+        class Interleaved(dict):
+            """Halfway through the pulse thread's read, the main thread records a retry."""
+            def items(self):
+                for n, item in enumerate(dict.items(self)):
+                    yield item
+                    if n == 0:
+                        writer = threading.Thread(target=d.done, args=([("comments", "new")],),
+                                                  kwargs={"failed": {("comments", "new")}})
+                        writer.start()
+                        writer.join(0.2)          # blocked by the lock (fixed) or done (race)
+                        writers.append(writer)
+        d.retries = Interleaved({("comments", "a"): 9, ("comments", "b"): 9})
+        status = d.status()                        # RuntimeError without the lock
+        for writer in writers:
+            writer.join()
+        self.assertEqual(status["retrying"], ["comments/a", "comments/b"])
+        self.assertIn(("comments", "new"), d.retries)
+
+    def test_an_error_in_one_pulse_does_not_end_the_pulses(self):
+        calls = []
+
+        def broken(mono=None):
+            calls.append(1)
+            raise RuntimeError("x")
+        self.d.pulse = broken
+        self.d.pulse_once()
+        self.d.pulse_once()
+        self.assertEqual(len(calls), 2)
 
     def test_a_stuck_cycle_stops_the_heartbeat(self):
         self.d.notion_now = self.Notion(self.Client())

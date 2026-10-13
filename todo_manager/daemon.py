@@ -57,6 +57,8 @@ REVIVE_MINUTES = 10
 RETRY_SECONDS = 60     # a cycle with a failed step runs its work again after this
 MAX_RETRIES = 5        # then every daemon.reconcile_minutes until it succeeds (in memory only)
 LOCK_TIMEOUT_SECONDS = 30
+EVENT_KEYS = ("comments", "page", "pull")   # reads an event asked for: retried when they fail
+MAX_PAGE_PROBLEMS = 50
 LOCAL_DEBOUNCE_SECONDS = 1
 
 
@@ -104,6 +106,24 @@ def fingerprint_of(cfg: Config) -> str:
     return code_fingerprint(config_path=cfg.home / "config.toml")
 
 
+def failed_event_keys(keys: list[Key], summary: dict[str, Any]) -> set[Key]:
+    """The event reads of ``keys`` whose step failed in ``summary``."""
+    def broke(name: str) -> bool:
+        value = summary.get(name)
+        return isinstance(value, dict) and bool(value.get("error") or value.get("errors"))
+    pages = summary.get("event_pages")
+    failed: set[Key] = set()
+    for key in keys:
+        if key[0] == "comments" and broke("event_comments"):
+            failed.add(key)
+        elif key[0] == "pull" and broke(f"pull_{key[1]}s"):
+            failed.add(key)
+        elif key[0] == "page" and isinstance(pages, dict) and (
+                pages.get("error") or str((pages.get("read") or {}).get(key[1], "")).startswith("error")):
+            failed.add(key)
+    return failed
+
+
 def health_of(cfg: Config) -> dict[str, Any]:
     """Whether the gate can leave the sync to the daemon, and why not."""
     if not cfg.get("daemon.enabled"):
@@ -113,7 +133,8 @@ def health_of(cfg: Config) -> dict[str, Any]:
         return {"enabled": True, "healthy": False, "reason": "not running (no status)"}
     age = clock.minutes_since(st.get("alive_at"))
     out = {"enabled": True, "state": st.get("state"), "mode": st.get("mode"), "alive_at": st.get("alive_at"),
-           "webhook": st.get("webhook"), "last_error": st.get("last_error")}
+           "webhook": st.get("webhook"), "last_error": st.get("last_error"),
+           "page_problems": st.get("page_problems") or {}, "retrying": st.get("retrying") or []}
     if age is None or age * 60 > STALE_SECONDS:
         return {**out, "healthy": False, "reason": f"not running since {st.get('alive_at')}"}
     if st.get("code") != fingerprint_of(cfg):
@@ -250,6 +271,8 @@ class Daemon:
         self._progress_at: float | None = None
         self.status_lock = threading.Lock()
         self.retries: dict[Key, int] = {}
+        self.page_problems: dict[str, str] = {}   # page -> why it could not be read (until it reads)
+        self.shared_lock = threading.Lock()        # retries and page_problems: main thread vs pulse
         self.stamped_state: str | None = None
         self.lock_timeout = LOCK_TIMEOUT_SECONDS
         self.last_error: str | None = None
@@ -434,30 +457,30 @@ class Daemon:
             return None
         except Exception as exc:  # noqa: BLE001 - the daemon outlives any one failure
             self.last_error = f"{type(exc).__name__}: {str(exc)[:300]}"
-            self.done(keys, failed=True)
+            self.done(keys, failed={k for k in keys if k[0] in EVENT_KEYS})
             if isinstance(exc, sqlite3.Error):
                 self.close()       # opened again (and the schema checked) on the next loop
             return {"error": self.last_error}
-        failed = bool(summary.get("problems")) or any(
-            isinstance(v, dict) and (v.get("errors") or v.get("error")) for v in summary.values())
-        self.done(keys, failed=failed)
+        self.done(keys, failed=failed_event_keys(keys, summary))
         self.last_error = None
         self.last_summary = summary
         return summary
 
-    def done(self, keys: list[Key], *, failed: bool) -> None:
-        """Due work ran. A failed step (an acknowledged event's read included) runs it again after
+    def done(self, keys: list[Key], *, failed: set[Key]) -> None:
+        """Due work ran. The read an event asked for that failed (``failed``) runs again after
         ``RETRY_SECONDS``, ``MAX_RETRIES`` times, then every ``daemon.reconcile_minutes`` until it
-        succeeds: some work (a deleted page's read) no full pass would do. The work is idempotent."""
+        succeeds: some of it (a deleted page's read) no full pass would do. Timer work is not
+        retried: its timer runs it again. The work is idempotent."""
         slow = float(self.setting("reconcile_minutes", 30)) * 60
-        for key in keys:
-            self.pending.pop(key, None)
-            if not failed:
-                self.retries.pop(key, None)
-                continue
-            attempt = self.retries.get(key, 0) + 1
-            self.retries[key] = attempt
-            self.due(key, RETRY_SECONDS if attempt <= MAX_RETRIES else slow)
+        with self.shared_lock:
+            for key in keys:
+                self.pending.pop(key, None)
+                if key not in failed:
+                    self.retries.pop(key, None)
+                    continue
+                attempt = self.retries.get(key, 0) + 1
+                self.retries[key] = attempt
+                self.due(key, RETRY_SECONDS if attempt <= MAX_RETRIES else slow)
 
     def work(self, keys: list[Key]) -> dict[str, Any]:
         from . import gate_feedback
@@ -498,12 +521,7 @@ class Daemon:
                 step("event_comments", lambda: notion.poll_comments(targets=targets))
             pages = [k[1] for k in keys if k[0] == "page"]
             if pages:
-                step("event_pages", lambda: {"read": [notion.refresh_page(p) for p in pages]})
-            if notion.problems and "home" not in names:
-                # The home step replaces the kept problems with a whole pass's; until then add these.
-                kept = json.loads(db.get_meta(conn, "health.problems.notion") or "{}").get("problems", [])
-                health.record_problems(conn, "notion", kept + notion.problems)
-                summary["notion_problems"] = notion.problems[:20]
+                step("event_pages", lambda: self.read_pages(notion, pages))
         if kanban is not None:
             if names & {"local", "kanban", "claims"}:
                 gate_feedback.kanban_send_steps(step, conn, cfg, kanban)
@@ -519,6 +537,25 @@ class Daemon:
         if problems:
             summary["problems"] = problems
         return summary
+
+    def read_pages(self, notion: Any, pages: list[str]) -> dict[str, Any]:
+        """Direct reads of the pages events named, one outcome each. A page that is gone is a
+        definitive answer (not retried), kept in ``page_problems`` until the page reads again."""
+        read: dict[str, str] = {}
+        for page in pages:
+            try:
+                read[page] = notion.refresh_page(page)
+            except Exception as exc:  # noqa: BLE001 - one page's failure is retried alone
+                read[page] = f"error: {type(exc).__name__}: {str(exc)[:200]}"
+                continue
+            with self.shared_lock:
+                if read[page] == "missing":
+                    self.page_problems[page] = f"{clock.iso()}: no longer accessible (deleted or unshared)"
+                    while len(self.page_problems) > MAX_PAGE_PROBLEMS:
+                        self.page_problems.pop(next(iter(self.page_problems)))
+                else:
+                    self.page_problems.pop(page, None)
+        return {"read": read, "errors": sum(1 for v in read.values() if v.startswith("error"))}
 
     def ready_feedback(self) -> frozenset[str]:
         assert self.conn is not None
@@ -566,8 +603,12 @@ class Daemon:
                             "bad_signatures": self.stats.bad_signatures, "silent": self.silent},
                 "last_write_at": clock.iso(self.last_write_at) if self.last_write_at else None,
                 "unanswered_since": clock.iso(self.unanswered_since) if self.unanswered_since else None,
-                "retrying": sorted("/".join(k) for k, n in self.retries.items() if n > MAX_RETRIES),
-                "last_summary": self.last_summary}
+                **self.shared_status(), "last_summary": self.last_summary}
+
+    def shared_status(self) -> dict[str, Any]:
+        with self.shared_lock:
+            return {"retrying": sorted("/".join(k) for k, n in self.retries.items() if n > MAX_RETRIES),
+                    "page_problems": dict(self.page_problems)}
 
     def heartbeat(self, force: bool = False) -> None:
         with self.status_lock:
@@ -578,6 +619,13 @@ class Daemon:
     def touch(self) -> None:
         """The main thread made progress."""
         self.progress += 1
+
+    def pulse_once(self) -> None:
+        """One pulse of the pulse thread: an error is kept, never ends the thread."""
+        try:
+            self.pulse()
+        except Exception as exc:  # noqa: BLE001 - without pulses the watchdog would kill a working daemon
+            self.last_error = f"pulse failed: {type(exc).__name__}: {str(exc)[:200]}"
 
     def pulse(self, mono: float | None = None) -> bool:
         """Stamp the status and ping the watchdog, unless the main thread has made no progress
@@ -604,7 +652,7 @@ class Daemon:
 
         def pulses() -> None:
             while not stop.wait(PULSE_SECONDS):
-                self.pulse()
+                self.pulse_once()
         pulser = threading.Thread(target=pulses, name="pulse", daemon=True)
         pulser.start()
         changed_at: float | None = None
