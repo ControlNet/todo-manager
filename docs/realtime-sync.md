@@ -115,6 +115,24 @@ WAL 7 µs, so a check every 2 s is about 0.0006 % of one core; an idle stdlib pr
 - The open connection runs in autocommit and never keeps a read transaction open between
   checks, so WAL checkpoints are not starved.
 
+### The feedback cron job with the daemon
+
+| Gate step today (`gate_feedback.py`) | With a healthy daemon |
+|---|---|
+| Expire exhausted claims | daemon (timer); gate as fallback |
+| Notion pull, body reads, comment poll | daemon on events; gate every `daemon.reconcile_minutes` |
+| Kanban messages, card creation, parked starts, card sync | daemon on board changes and timers; gate as fallback |
+| Dirty scan + outbox | daemon on local changes |
+| Home freshness callout | daemon |
+| Problem reports (`[CRON_FAILURE]`) | gate (wakes the model) |
+| Claim feedback, build context, wake the model | gate, started on demand by the daemon |
+
+The job keeps three roles: the only entry point for model runs (Hermes owns prompt, skills,
+model, delivery and at-most-once claim, so the daemon does not run a model itself), the safety
+net (reconciliation, daemon watchdog, full takeover), and incident reports. With the Notion
+steps skipped an idle run is a local check of well under a second, so the `*/5` schedule stays:
+it bounds the fallback latency when the daemon is down.
+
 ## Endpoint and authentication
 
 Security bar agreed with the user: no unauthenticated access; no further hardening.
