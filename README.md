@@ -1,57 +1,89 @@
 # Todo Manager
 
-A personal todo system for [Hermes](https://github.com/NousResearch/hermes-agent) users. It
-reads your email, Slack and GitHub, keeps the commitments that are really yours as tasks in a
-local database, shows them in Notion where you read and edit, and hands explicit work to agents
-through a Hermes Kanban board.
+**Your email, Slack and GitHub, turned into a todo list you never had to write, in Notion, with
+an AI agent that can take some of the work off your plate.**
 
-It is a Todo automation **for** Hermes: Hermes runs the agent, its judgement, your conventions
-and skills, the board's workers, memory and delivery; Todo Manager adds what Hermes does not
-have - incremental reading of the sources, the task data and its history, the Notion UI and its
-sync, the durable link between a task and its agent cards, and install/upgrade/export. See
-[docs/architecture.md](docs/architecture.md).
+Todo Manager is an add-on for [Hermes](https://github.com/NousResearch/hermes-agent), the
+self-hosted AI agent. It reads your conversations, keeps the things that are really yours as
+tasks, and shows them in a Notion page you already know how to use.
 
-- **Evidence, not keywords.** Hermes judges new conversations with their full context once a
-  thread has gone quiet. Every new item ends up either linked to a task or dismissed with a
-  reason; nothing is dropped silently, and there is no "please triage" inbox.
-- **Your conventions, in your words.** What counts as your responsibility, what to ignore, when
-  to ask: `PREFERENCES.md` in the workspace, written by you or by Hermes when you ask in chat
-  or in a Notion comment, and given to every run as written. Settings such as
-  "wait an hour of Slack silence" are `config.toml` values (`todo-manager config set`).
-- **Your edits win.** Changes you make in Notion properties are imported as yours; agent
-  judgements based on older versions never overwrite them, and tasks you closed are never
-  reopened automatically. Comments are discussion and instructions; your notes on a page are
-  context.
-- **Cheap when idle.** Two Hermes cron jobs run deterministic pre-run gates every five minutes
-  and wake the model only when there is something to judge; the gate hands it the material
-  directly.
-- **Agent work on the Hermes board.** A Notion task can be delegated through an entry card on the board
-  `todo-manager`; Hermes schedules and runs it. Questions and late answers stay on the card that
-  asked, results come back to the task, closing the task cancels the work, and external actions
-  happen only when allowed or approved.
-- **Localized.** Everything you read follows `language` (English or Simplified Chinese);
-  prompts for the model stay in English.
+## Why
+
+You make promises all day, in many places: "sure, I'll look at it before Friday" in an email, a
+question in a Slack DM, a review request on a pull request. A todo app only helps if you write
+each one down; inbox zero only helps if you triage everything yourself.
+
+Todo Manager reads the conversations for you. Only what is actually yours ends up on the list,
+with the deadline, the background and a link back to where it came from. Everything else is
+set aside with a one-line reason, so nothing is lost and you never face a "please triage" pile.
+
+## What it is like
+
+- **A colleague emails:** "Could you review the draft before Friday?" Once the thread has gone
+  quiet, a task appears in Notion: *Review the draft*, due Friday, with why it is yours and a
+  link to the mail.
+- **Newsletters, notifications, threads you were only copied on** are dismissed, each with a
+  short reason you can look up later.
+- **Something only you can decide** lands on the *To decide* board. Drag the card to *Done*,
+  *Cancel*, *My to-do* or *Assign to Agent*.
+- **Assign to Agent** hands the task to a Hermes agent. If it needs something, it asks in a
+  comment on the task and you answer there. The result arrives as a delivery page under the
+  task, with its files, PDFs and images.
+- **Talk to it in plain words.** Comment "the deadline moved to Monday", or tell it "from now
+  on, ignore mail from this list". Lasting conventions go into a `PREFERENCES.md` you can read
+  and edit.
+- **It notices when you are done.** When you answer the mail or your pull request is merged,
+  the task is closed and the evidence is attached to it.
+
+## Your Notion home page
 
 ```
- Gmail / Slack / GitHub ──▶ intake gate ──(mature conversations, in the context)──▶ Hermes ──┐
-                                                                                             │ todo-manager task/source/… commands
- Notion (home, Tasks, Projects) ◀──── push / import ────▶  SQLite (source of truth)  ◀───────┘
-        comments, edits ──▶ feedback gate ──(needs judgement)──▶ Hermes ──▶ commands
-                                     │
-                                     └──▶ Hermes Kanban board "todo-manager" (delegations, scheduled by Hermes)
+Todo Manager
+  Data freshness: all sources are syncing normally
+  🤔 To decide            board: Pending · Cancel · Done · My to-do · Assign to Agent
+  🤖 Agent work           board: Needs my answer · To review · In progress · ...
+  ⭐ Focus                what to do now: due within a week, or marked as focus
+  📁 Active projects
+  ⏳ Waiting on others    sorted by when to follow up
+  📋 All open tasks
+  🕘 Recently done and notable changes
 ```
 
-## Requirements
+Every task page has one box that Todo Manager keeps up to date (why the task is yours, what
+"done" means, the sources). Everything outside that box is yours: your notes stay exactly as
+you wrote them, and the agent reads them as context.
 
-- **Linux.** File locks use `fcntl`; the optional real-time daemon is a `systemd --user`
+## You stay in charge
+
+- **Your edits win.** Change a field in Notion and no later AI judgement overwrites it. A task
+  you closed is never reopened by itself.
+- **Nothing disappears silently.** Every new message is either linked to a task or dismissed
+  with a reason.
+- **Agents ask before acting outside.** An agent may send an email or take a similar external
+  action only when you allowed it for that task or approve it in a comment.
+- **Todo Manager only reads** your mail, Slack and GitHub. It never posts there itself.
+- **Quiet when nothing happens.** Every five minutes plain code checks for news; the AI model is
+  woken only when there is something new to judge.
+- **English or Simplified Chinese**, for everything you read.
+
+## What you need
+
+- A Linux machine running Hermes, with its cron and Kanban features
+- A Notion workspace
+- Any of: Gmail, Slack, GitHub (each is optional)
+
+<details>
+<summary>Exact requirements</summary>
+
+- **Linux.** File locks use `fcntl`; the optional real-time sync runs as a `systemd --user`
   service. Other systems are untested.
-- **Python ≥ 3.11**, standard library only.
+- **Python ≥ 3.11**, standard library only; nothing to `pip install`.
 - **Hermes** with cron and Kanban, verified against Hermes 0.21.5 (commit `105568c`). The board
   bridge uses Hermes' Python modules, so other versions may need changes; see
   [docs/hermes-native-verification.md](docs/hermes-native-verification.md).
 - **Notion:** an internal integration whose token is in `NOTION_API_KEY`, with the read content,
   update content, insert content, read comments and insert comments capabilities.
-- **Sources** (each optional; `install` finds what Hermes already has):
+- **Sources** (`install` finds what Hermes already has):
   - Gmail: a himalaya account in Hermes whose `gmail.auth.token.command` prints an OAuth access
     token (read-only Gmail access is enough);
   - Slack: a user token (`SLACK_USER_TOKEN`, or `$HERMES_HOME/credentials/slack_user_token`)
@@ -59,57 +91,80 @@ sync, the durable link between a task and its agent cards, and install/upgrade/e
     `users.info` for the conversation types you include;
   - GitHub: the `gh` CLI, logged in (`gh auth login`).
 
-Todo Manager only reads your sources. What it reads is stored in the local workspace and shown
-to the model your Hermes is configured with; your tasks are written to your Notion.
+</details>
 
-## Quick start
+## Get started
 
-First create an empty top-level Notion page (the future home page) and add your Notion
-integration to it (··· → Connections). Then:
+1. **In Notion**, create an empty top-level page. It becomes your Todo Manager home. Add your
+   integration to it (`···` → *Connections*).
+2. **On the machine running Hermes:**
+
+   ```bash
+   git clone https://github.com/ControlNet/todo-manager.git
+   cd todo-manager
+   python3 -B -m tests.run --all      # optional self-check, under a minute; expect "OK"
+   ./bin/todo-manager install
+   ```
+
+   `install` works out most settings from Hermes (language, time zone, mailboxes, Slack,
+   GitHub, Notion) and asks only real choices: which page is home, which mailboxes and
+   conversations to read, and whether to start right away. It shows every change before making
+   it, and is safe to run again.
+3. **Open your home page in Notion.** Tasks appear there as recent conversations are read and
+   judged.
+
+Keep the cloned folder where it is: the scheduled jobs run from it, so changes to it take effect
+at once. To hack on the code, use a separate clone or a `git worktree`.
+
+## Day to day
+
+You mostly live in Notion. On the command line:
 
 ```bash
-git clone https://github.com/ControlNet/todo-manager.git
-cd todo-manager
-python3 -B -m tests.run --all                   # parallel, under a minute; expect OK (Hermes tests skip without Hermes)
-./bin/todo-manager install
+todo-manager status                                       # is everything healthy?
+todo-manager pause                                        # stop the scheduled jobs for a while
+todo-manager resume
+todo-manager config set slack.quiet_minutes 60 --human    # e.g. wait an hour of Slack silence
 ```
 
-`install` points the Hermes jobs (and the optional daemon) at this checkout: keep it where it is,
-and note that edits in it take effect at once. Develop in a separate clone or `git worktree`.
+You can also ask Hermes in chat to change a setting or a convention. Problems (a source that
+stopped syncing, an agent that got stuck) show up in the *Data freshness* box on the home page
+and in `todo-manager status`. More in [docs/operations.md](docs/operations.md).
 
-`install` infers the rest from Hermes (language, time zone, mailboxes, Slack, GitHub, Notion
-and Kanban settings), asks real choices (the home page, source scopes, execution profile and whether new jobs start) and shows every change outside the workspace before making it. It is safe to re-run;
-see [docs/operations.md](docs/operations.md#install).
+**Optional: real-time sync.** By default Notion is checked every five minutes. A small background
+service picks up your comments and edits within seconds instead; it needs a public HTTPS address
+for Notion's webhooks, for example through a Cloudflare Tunnel. See
+[docs/realtime-sync.md](docs/realtime-sync.md).
 
-For this breaking CLI release, drain old callers and install from a separate checkout using `./bin/todo-manager install` ([transition procedure](docs/cli.md#switching-from-the-old-cli)) (managed skill, prompts and AGENTS are
-backed up before replacement; all existing cron runtime settings are preserved); remove with `todo-manager uninstall`
-(all data stays). See [docs/operations.md](docs/operations.md#upgrade).
+## Your data
 
-Runtime data (database, runs, exports, backups) lives only in the workspace
-(`TODO_HOME`, default `~/.hermes/workspace/todo-manager`); the tool refuses a workspace inside
-the source tree. Tokens are read from environment variables (for
-example `NOTION_API_KEY`); never commit `.env` / `.env.local` files (`.gitignore` covers them).
+Everything Todo Manager reads is stored in a local SQLite database in its workspace
+(`~/.hermes/workspace/todo-manager` by default), never in this folder. Material that needs
+judging is shown to the AI model your Hermes is configured with, and your tasks are written to
+your Notion. Your Notion, Slack and GitHub tokens stay where Hermes keeps them; the settings
+file only names them.
+`todo-manager export` writes a readable copy of everything; `todo-manager uninstall` removes the
+scheduled jobs and keeps your data and Notion pages.
+
+## Status
+
+A personal project, in daily use by its author. It is built for one person on one machine.
+How well the AI judges what is yours has not been formally measured yet; see
+[docs/limitations.md](docs/limitations.md).
 
 ## Documentation
 
-- [docs/cli.md](docs/cli.md) – command contracts, explicit provenance, settlement and release transition
-- [docs/hermes-native-verification.md](docs/hermes-native-verification.md) – source evidence, native tests, migration and boundaries
-- [docs/architecture.md](docs/architecture.md) – what Hermes does and what Todo Manager does,
-  the two jobs, authority, ownership of files and settings
-- [docs/operations.md](docs/operations.md) – install, upgrade, changing the automation, health,
-  pause/resume, uninstall, export, backup/restore, migration
-- [docs/notion-schema.md](docs/notion-schema.md) – Notion structure, field mapping, home views,
-  sync rules
-- [docs/board-protocol.md](docs/board-protocol.md) – how delegations use the Hermes Kanban board
-- [docs/acceptance.md](docs/acceptance.md) – acceptance criteria and how each is verified
-- [docs/realtime-sync.md](docs/realtime-sync.md) – optional real-time sync daemon: Notion
-  webhooks, local and board changes synced at once (off by default)
-- [docs/open-decisions.md](docs/open-decisions.md) – proposed defaults and user decisions
-- [docs/limitations.md](docs/limitations.md) – known limitations
+- **Using it:** [operations](docs/operations.md) (install, upgrade, health, pause, export,
+  backup, uninstall) · [Notion pages and fields](docs/notion-schema.md) ·
+  [real-time sync](docs/realtime-sync.md)
+- **How it works:** [architecture](docs/architecture.md) (what Hermes does, what Todo Manager
+  does) · [agent work on the Kanban board](docs/board-protocol.md)
+- **Reference:** [command line](docs/cli.md) · [limitations](docs/limitations.md) ·
+  [acceptance criteria](docs/acceptance.md) · [open decisions](docs/open-decisions.md) ·
+  [Hermes verification](docs/hermes-native-verification.md)
 
-The Hermes skill, the cron prompts and the workspace `AGENTS.md` template ship in
-`todo_manager/hermes_assets/` (an optional example of conventions for academics:
-`hermes_assets/examples/academic.md`).
+An example of conventions for academic work is in
+[`todo_manager/hermes_assets/examples/academic.md`](todo_manager/hermes_assets/examples/academic.md).
 
 ## License
 
