@@ -170,6 +170,36 @@ Security bar agreed with the user: no unauthenticated access; no further hardeni
 
 Down for minutes: Notion retries, nothing is lost. Down for longer: the gate's polling covers it.
 
+## Updates and production safety
+
+Production imports this checkout directly (the cron pre-run scripts and the `todo-manager`
+launcher put it on `sys.path`), so a code change here is live at the next cron run. The daemon
+follows the same model: its unit runs the checkout, and it picks up new code by restarting.
+
+- **Code change**: every 10 s the daemon fingerprints its package files (path, mtime, size). On a
+  change it waits until the tree has been stable for 10 s (a `git pull` or checkout in progress
+  is not loaded half-way), finishes the current work item and exits 0; systemd starts the new
+  code.
+- **Version skew**: the heartbeat carries the code fingerprint. A gate whose own fingerprint
+  differs treats the daemon as unhealthy for that run and does the whole sync itself, so old
+  daemon code and new gate code never split the work.
+- **Broken new code**: an import error or crash makes systemd retry (`Restart=always`,
+  `RestartSec=10`, no start limit, so a fixed checkout recovers by itself). Meanwhile the
+  heartbeat goes stale and the gate does everything; `health` shows the last error. No outage.
+- **Schema upgrade**: the daemon never migrates. When the code expects a newer schema it stays
+  up, does nothing, reports `waiting for install`, and checks again every minute; after
+  `todo-manager install` migrates (with its backup) it continues. The daemon itself needs no
+  schema change: its queue and event dedupe live in memory (all work is idempotent) and its
+  heartbeat is a `meta` row.
+- **Unit or settings change**: `todo-manager install` rewrites the unit when it differs, runs
+  `systemctl --user daemon-reload` and restarts the daemon. `todo-manager daemon restart` does
+  the restart alone.
+
+Until the user says go, development happens in a separate worktree on a branch; the main checkout
+that production imports does not change. Merging is the deployment. After the merge the daemon
+is still off (`daemon.enabled = false`, no unit installed); the gate then behaves as today except
+for the smaller hot set.
+
 ## Settings (proposed)
 
 | Setting | Default | Effect |
