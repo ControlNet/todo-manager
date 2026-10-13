@@ -273,7 +273,7 @@ Turn it on:
 
 ```bash
 # 1. The unit and the receiver (loopback only); the daemon polls Notion until step 3 is done.
-todo-manager config set daemon.enabled true
+todo-manager config set daemon.enabled true --human
 todo-manager install                 # shows and then writes ~/.config/systemd/user/todo-manager-daemon.service
 todo-manager daemon status           # expect "healthy": true, "unit": "active", "token": false, "mode": "polling"
 
@@ -291,7 +291,7 @@ todo-manager daemon status           # expect "token": true, "mode": "webhook"; 
                                      # "accepted" grows and the comment is read within seconds
 ```
 
-Turn it off: `todo-manager config set daemon.enabled false && todo-manager install` (the daemon
+Turn it off: `todo-manager config set daemon.enabled false --human && todo-manager install` (the daemon
 stops by itself within about 20 s of the edit; `install` removes the unit; the gate syncs again at
 its next run). `pause` stops the two cron jobs only:
 the daemon keeps syncing but no longer starts the feedback job; stop it as well with

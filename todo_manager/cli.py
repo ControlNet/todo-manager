@@ -152,7 +152,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     if args.action == "run":
         if not cfg.get("daemon.enabled"):
             _fail("DISABLED", "daemon.enabled is false: the feedback gate syncs; turn it on with"
-                              " `todo-manager config set daemon.enabled true` and `todo-manager install`")
+                              " `todo-manager config set daemon.enabled true --human` and `todo-manager install`")
             return daemon.EXIT_DISABLED
         return daemon.run(cfg)
     if args.action == "token":
