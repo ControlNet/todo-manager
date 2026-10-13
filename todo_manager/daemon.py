@@ -170,7 +170,6 @@ Restart=always
 RestartPreventExitStatus={EXIT_DISABLED}
 RestartSec=10
 WatchdogSec=120
-UMask=0077
 
 [Install]
 WantedBy=default.target

@@ -18,7 +18,6 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import config, config_file, db, delegation, i18n, prefs
-from .files import private_dir
 from .net import HttpError, HttpTimeout, request_json
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -187,7 +186,6 @@ class Env:
 def init_workspace(home: str | os.PathLike[str] | None, language: str, timezone: str | None = None) -> dict[str, Any]:
     """Directories, the workspace guide, config.toml (only when missing) and the database."""
     cfg = config.load(home)
-    private_dir(cfg.home)   # also tightens a workspace created before this rule
     for sub in ("state", "runs", "exports", "backups", "notes"):
         (cfg.home / sub).mkdir(parents=True, exist_ok=True)
     target = cfg.home / "config.toml"

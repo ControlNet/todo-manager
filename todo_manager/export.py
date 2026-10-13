@@ -38,7 +38,7 @@ from typing import Any
 from . import clock, db, delegation, i18n, prefs, store
 from .db import loads
 from .config import Config
-from .files import private_dir, private_new_file, sha256_file
+from .files import sha256_file
 from .notion.schema import label as option_label
 
 EXPORT_FORMAT = "todo-manager-export/2"
@@ -190,16 +190,16 @@ def _snapshot(conn: sqlite3.Connection, path: Path) -> sqlite3.Connection:
 
 
 def export_snapshot(conn: sqlite3.Connection, cfg: Config, out_dir: Path | None = None) -> Path:
-    root = private_dir(out_dir or cfg.home / "exports" / _stamp())
-    holder = Path(tempfile.mkdtemp(prefix=f".{root.name}.snapshot.", dir=root.parent))   # mode 0700
+    root = out_dir or cfg.home / "exports" / _stamp()
+    root.mkdir(parents=True, exist_ok=True)
+    snap_path = root.parent / f".{root.name}.snapshot.sqlite"
+    snap = _snapshot(conn, snap_path)
     try:
-        snap = _snapshot(conn, private_new_file(holder / "snapshot.sqlite"))
-        try:
-            _write_export(snap, cfg, root)
-        finally:
-            snap.close()
+        _write_export(snap, cfg, root)
     finally:
-        shutil.rmtree(holder, ignore_errors=True)
+        snap.close()
+        for leftover in (snap_path, Path(f"{snap_path}-journal")):
+            leftover.unlink(missing_ok=True)
     return root
 
 
@@ -362,17 +362,15 @@ def import_bundle(root: Path, target: Path) -> dict[str, Any]:
         raise ImportError_(f"{target} is not empty; import only into a new directory")
     bundle = check_bundle(root)
     manifest, data = bundle["manifest"], bundle["data"]
-    holder = target.parent / f".{target.name}.importing"
-    if holder.exists():
-        shutil.rmtree(holder)
-    private_dir(holder)   # shields the workspace while copytree gives it the bundle's modes
-    staging = holder / "workspace"
+    staging = target.parent / f".{target.name}.importing"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
     try:
         if (root / "workspace").is_dir():
-            shutil.copytree(root / "workspace", staging)
-        private_dir(staging)
+            shutil.copytree(root / "workspace", staging, dirs_exist_ok=True)
         (staging / "state").mkdir(exist_ok=True)
-        conn = sqlite3.connect(str(private_new_file(staging / "state" / "todo.sqlite")), isolation_level=None)
+        conn = sqlite3.connect(str(staging / "state" / "todo.sqlite"), isolation_level=None)
         conn.row_factory = sqlite3.Row
         try:
             db.migrate(conn, target=int(manifest["schema_version"]))
@@ -396,14 +394,9 @@ def import_bundle(root: Path, target: Path) -> dict[str, Any]:
             report = reconcile_after_restore(conn, "import")
         finally:
             conn.close()
-        if target.exists():
-            private_dir(target)
-            _move_into(staging, target)
-        else:
-            staging.rename(target)
-        holder.rmdir()
+        staging.rename(target) if not target.exists() else _move_into(staging, target)
     except BaseException:
-        shutil.rmtree(holder, ignore_errors=True)
+        shutil.rmtree(staging, ignore_errors=True)
         raise
     return {"ok": True, "home": str(target), "schema_version": db.SCHEMA_VERSION,
             "from_schema": manifest["schema_version"], "tables": len(data),

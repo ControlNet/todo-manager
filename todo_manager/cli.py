@@ -23,7 +23,6 @@ from typing import Any
 
 from . import clock, config, db, delegation, feedback, health, i18n, ops, prefs, store
 from .db import dumps, loads
-from .files import private_dir, private_new_file
 from .locks import LockBusy
 
 EXIT_INVALID = 2
@@ -590,9 +589,8 @@ def cmd_restore(args: argparse.Namespace) -> int:
             else:
                 staged = None
                 backup_source = source
-            private_dir(cfg.home)
             cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(str(private_new_file(cfg.db_path)), isolation_level=None)
+            conn = sqlite3.connect(str(cfg.db_path), isolation_level=None)
             conn.row_factory = sqlite3.Row
             try:
                 if not existing:

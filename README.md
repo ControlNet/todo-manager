@@ -87,7 +87,7 @@ backed up before replacement; all existing cron runtime settings are preserved);
 
 Runtime data (database, runs, exports, backups) lives only in the workspace
 (`TODO_HOME`, default `~/.hermes/workspace/todo-manager`); the tool refuses a workspace inside
-the source tree; it is readable only by you. Tokens are read from environment variables (for
+the source tree. Tokens are read from environment variables (for
 example `NOTION_API_KEY`); never commit `.env` / `.env.local` files (`.gitignore` covers them).
 
 ## Documentation

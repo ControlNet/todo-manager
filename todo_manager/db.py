@@ -15,8 +15,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .files import private_new_file
-
 SCHEMA_VERSION = 15
 
 MIGRATIONS: dict[int, str] = {
@@ -638,7 +636,6 @@ def connect(path: str | Path) -> sqlite3.Connection:
     path = Path(path)
     if str(path) != ":memory:":
         path.parent.mkdir(parents=True, exist_ok=True)
-        private_new_file(path)
     conn = sqlite3.connect(str(path), timeout=30, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
