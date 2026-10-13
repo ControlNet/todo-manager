@@ -173,6 +173,27 @@ class EventTests(DaemonCase):
         self.d.heartbeat(force=True)
         self.assertNotIn(self.page, daemon.read_status(self.cfg.home)["page_problems"])
 
+    def test_a_gone_page_stays_reported_across_a_restart(self):
+        self.d.page_problems[self.page] = "no longer accessible"
+        self.d.heartbeat(force=True)
+        restarted = daemon.Daemon(self.cfg, notion_factory=lambda conn, cfg: None, kanban_factory=lambda cfg: None,
+                                  waker=self.wake, board_db=None)
+        restarted.heartbeat(force=True)
+        self.assertIn(self.page, daemon.read_status(self.cfg.home)["page_problems"])
+
+    def test_every_gone_page_is_kept(self):
+        pages = [f"page-{i}" for i in range(80)]
+        self.d.read_pages(type("N", (), {"refresh_page": staticmethod(lambda p: "missing")})(), pages)
+        self.assertEqual(sorted(self.d.page_problems), sorted(pages))
+
+    def test_a_pull_that_imports_the_page_clears_its_problem(self):
+        self.d.page_problems[self.page] = "no longer accessible"
+        self.fake.user_edit(self.page, **{"截止日期": "2026-10-21"})
+        self.deliver()
+        self.loop()
+        self.assertEqual(store.get_task(self.conn, self.task)["due_date"], "2026-10-21")
+        self.assertNotIn(self.page, self.d.page_problems)
+
     def test_only_the_failed_event_read_is_retried(self):
         other = store.create_task(self.conn, "Other", origin="intake")
         self.push(other)
@@ -437,6 +458,13 @@ class WebhookSilenceTests(DaemonCase):
     def test_with_the_receiver_turned_off_a_stored_token_does_not_mean_webhook_mode(self):
         self.cfg.data["daemon"]["webhook"] = False
         self.assertEqual(self.d.mode, "polling")
+
+    def test_with_webhooks_notion_is_still_read_as_often_as_the_gate_did(self):
+        self.assertEqual(self.d.mode, "webhook")
+        clock.advance(minutes=5)
+        self.d.cycle()
+        self.assertTrue([c for c in self.fake.calls if c[1].startswith("/data_sources/")],
+                        "a full pass every 5 minutes: what the events miss waits no longer than before")
 
     def test_without_a_verified_subscription_the_daemon_polls_notion_like_the_gate(self):
         webhook.reset_token(self.cfg.home)

@@ -66,7 +66,7 @@ for it). Events and the work they cause:
 | Event | Work |
 |---|---|
 | `comment.created` / `updated` / `deleted` | comments of `data.page_id` only (not aggregated: arrives in seconds) |
-| `page.properties_updated` / `content_updated` / `created` / `moved` / `deleted` / `undeleted` | `pull` of that page's kind (task or project), which also reads edited bodies (aggregated: usually < 1 min); `deleted` / `undeleted` / `moved` of a known task page also read that page directly (a data source query leaves trashed pages out; a page that is gone is not retried but listed under `page_problems` in `daemon status` and `health` until it reads again) |
+| `page.properties_updated` / `content_updated` / `created` / `moved` / `deleted` / `undeleted` | `pull` of that page's kind (task or project), which also reads edited bodies (aggregated: usually < 1 min); `deleted` / `undeleted` / `moved` of a known task page also read that page directly (a data source query leaves trashed pages out; a page that is gone is not retried but listed under `page_problems` in `daemon status` and `health`, across restarts, until any read imports it again) |
 | anything else | acknowledged and dropped |
 
 Rules:
@@ -224,7 +224,7 @@ behaves as before except for the smaller set of pages read every run.
 | `daemon.debounce_seconds` | 3 | Per kind of read and page |
 | `daemon.kanban_min_interval_seconds` | 15 | Board changes read the cards at most this often |
 | `daemon.kanban_poll_minutes` | 5 | Cards read on a timer as well |
-| `daemon.reconcile_minutes` | 30 | Full Notion pass while webhooks arrive |
+| `daemon.reconcile_minutes` | 5 | Full Notion pass while webhooks arrive: what the events miss (a body edit read within Notion's edit minute, a partly failed read) waits no longer than with the gate |
 | `daemon.webhook_silence_minutes` | 10 | Our write without any delivery this long: webhook reported broken, Notion polled |
 | `daemon.unit_dir` | `~/.config/systemd/user` | Where `install` writes the unit (tests); `systemctl --user enable` finds it only in a directory systemd searches |
 

@@ -134,7 +134,7 @@ DEFAULTS: dict[str, Any] = {
         "debounce_seconds": 3,  # per page and kind of read: a burst of events is one read
         "kanban_min_interval_seconds": 15,  # board changes read the cards at most this often
         "kanban_poll_minutes": 5,  # cards read on a timer as well
-        "reconcile_minutes": 30,  # full Notion pass while webhooks arrive
+        "reconcile_minutes": 5,  # full Notion pass while webhooks arrive (what events miss waits no longer than the gate did)
         "webhook_silence_minutes": 10,  # our write without any event this long: webhook reported broken
         "unit_dir": "",  # "" = ~/.config/systemd/user; for tests (enable needs a systemd search path)
     },

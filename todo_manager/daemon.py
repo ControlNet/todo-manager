@@ -58,7 +58,6 @@ RETRY_SECONDS = 60     # a cycle with a failed step runs its work again after th
 MAX_RETRIES = 5        # then every daemon.reconcile_minutes until it succeeds (in memory only)
 LOCK_TIMEOUT_SECONDS = 30
 EVENT_KEYS = ("comments", "page", "pull")   # reads an event asked for: retried when they fail
-MAX_PAGE_PROBLEMS = 50
 LOCAL_DEBOUNCE_SECONDS = 1
 
 
@@ -271,7 +270,8 @@ class Daemon:
         self._progress_at: float | None = None
         self.status_lock = threading.Lock()
         self.retries: dict[Key, int] = {}
-        self.page_problems: dict[str, str] = {}   # page -> why it could not be read (until it reads)
+        # page -> why it could not be read, until it reads again; kept across restarts (status file)
+        self.page_problems: dict[str, str] = dict((read_status(cfg.home) or {}).get("page_problems") or {})
         self.shared_lock = threading.Lock()        # retries and page_problems: main thread vs pulse
         self.stamped_state: str | None = None
         self.lock_timeout = LOCK_TIMEOUT_SECONDS
@@ -369,7 +369,7 @@ class Daemon:
         if self.every("kanban_poll", float(self.setting("kanban_poll_minutes", 5))):
             self.due(("kanban",))
         poll = (float(self.cfg.get("notion.active_poll_minutes", 5)) if self.mode == "polling"
-                else float(self.setting("reconcile_minutes", 30)))
+                else float(self.setting("reconcile_minutes", 5)))
         if self.every("notion_pass", poll):
             self.due(("notion_pass",))
 
@@ -471,7 +471,7 @@ class Daemon:
         ``RETRY_SECONDS``, ``MAX_RETRIES`` times, then every ``daemon.reconcile_minutes`` until it
         succeeds: some of it (a deleted page's read) no full pass would do. Timer work is not
         retried: its timer runs it again. The work is idempotent."""
-        slow = float(self.setting("reconcile_minutes", 30)) * 60
+        slow = float(self.setting("reconcile_minutes", 5)) * 60
         with self.shared_lock:
             for key in keys:
                 self.pending.pop(key, None)
@@ -529,6 +529,10 @@ class Daemon:
                 self.last["kanban_board"] = clock.now()
                 gate_feedback.kanban_read_steps(step, conn, cfg, kanban)
         gate_feedback.push_steps(step, conn, notion)
+        if notion is not None and notion.imported:
+            with self.shared_lock:
+                for page in notion.imported:
+                    self.page_problems.pop(page, None)
         if (summary.get("outbox") or {}).get("done"):
             self.last_write_at = clock.now()
             self.unanswered_since = self.unanswered_since or self.last_write_at
@@ -551,10 +555,6 @@ class Daemon:
             with self.shared_lock:
                 if read[page] == "missing":
                     self.page_problems[page] = f"{clock.iso()}: no longer accessible (deleted or unshared)"
-                    while len(self.page_problems) > MAX_PAGE_PROBLEMS:
-                        self.page_problems.pop(next(iter(self.page_problems)))
-                else:
-                    self.page_problems.pop(page, None)
         return {"read": read, "errors": sum(1 for v in read.values() if v.startswith("error"))}
 
     def ready_feedback(self) -> frozenset[str]:

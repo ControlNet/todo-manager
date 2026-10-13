@@ -114,6 +114,7 @@ class NotionSync:
         self.client = client
         self.state = state or load_state(conn, cfg)
         self.problems: list[str] = []
+        self.imported: set[str] = set()   # pages read and imported (the daemon clears their problems)
 
     # ================================================================== bookkeeping
 
@@ -415,6 +416,7 @@ class NotionSync:
 
     def import_page(self, kind: str, page: dict[str, Any]) -> str:
         """Apply unseen human edits of one page. Returns created|edited|unchanged|ignored."""
+        self.imported.add(page["id"])
         values, problems = schema.parse_page(kind, page, self.pmap(kind))
         for problem in problems:
             self.problems.append(f"{page['id']}: {problem}")
