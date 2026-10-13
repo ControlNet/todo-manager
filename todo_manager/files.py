@@ -17,6 +17,16 @@ def private_dir(path: Path) -> Path:
     os.chmod(path, 0o700)
     return path
 
+
+def private_new_file(path: Path) -> Path:
+    """Create ``path`` empty and owner-only unless it exists. Done before SQLite opens a new
+    database: its -wal, -shm and -journal files take the database file's mode."""
+    try:
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except FileExistsError:
+        pass
+    return path
+
 MAX_KEPT_BYTES = 100 * 1024 * 1024   # larger files are referenced (with their hash), not copied
 
 

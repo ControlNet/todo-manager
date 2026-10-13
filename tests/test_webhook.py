@@ -8,6 +8,7 @@ import json
 import queue
 import tempfile
 import unittest
+import unittest.mock
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -174,6 +175,31 @@ class EnrollmentTests(unittest.TestCase):
         self.assertEqual(self.handshake(), 200)
         self.assertIsNone(webhook.enrollment_until(self.home))
         self.assertFalse(webhook.enroll_path(self.home).exists())
+
+    def test_a_reset_during_a_handshake_keeps_the_window_it_opened(self):
+        """`daemon reset-token` runs in another process: it waits for a handshake in progress
+        instead of having its fresh window closed by it."""
+        import threading
+        webhook.open_enrollment(self.home)
+        real_save = webhook.save_token
+        resetter = threading.Thread(target=webhook.reset_and_enroll, args=(self.home,))
+
+        def save_then_reset(home, token):
+            real_save(home, token)
+            resetter.start()
+            resetter.join(timeout=1)   # without a shared lock the reset completes right here
+
+        with unittest.mock.patch.object(webhook, "save_token", save_then_reset):
+            self.assertEqual(self.handshake(), 200)
+        resetter.join(timeout=10)
+        self.assertIsNone(webhook.load_token(self.home), "the reset came last")
+        self.assertIsNotNone(webhook.enrollment_until(self.home), "and its window is open")
+
+    def test_enroll_refuses_while_a_token_is_stored(self):
+        webhook.save_token(self.home, "secret_x")
+        with self.assertRaises(webhook.TokenExists):
+            webhook.enroll(self.home)
+        self.assertIsNone(webhook.enrollment_until(self.home))
 
     def test_a_damaged_enrollment_file_counts_as_closed(self):
         webhook.enroll_path(self.home).parent.mkdir(parents=True, exist_ok=True)

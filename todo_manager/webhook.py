@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from . import clock
+from .locks import LockBusy, file_lock, lock_path
 
 SIGNATURE_HEADER = "X-Notion-Signature"
 MAX_BODY = 1 << 20
@@ -98,6 +99,29 @@ def enrollment_until(home: Path) -> str | None:
 
 def close_enrollment(home: Path) -> None:
     enroll_path(home).unlink(missing_ok=True)
+
+
+class TokenExists(Exception):
+    pass
+
+
+def _token_lock(home: Path) -> Any:
+    """Token and enrollment change together, in the daemon (handshake) and the CLI."""
+    return file_lock(lock_path(home, "webhook-token"), blocking=True, timeout=10)
+
+
+def enroll(home: Path, minutes: float = ENROLL_MINUTES) -> str:
+    """Open enrollment unless a token is stored (`daemon enroll`)."""
+    with _token_lock(home):
+        if load_token(home) is not None:
+            raise TokenExists(str(token_path(home)))
+        return open_enrollment(home, minutes)
+
+
+def reset_and_enroll(home: Path) -> tuple[bool, str]:
+    """Forget the token and open enrollment (`daemon reset-token`)."""
+    with _token_lock(home):
+        return reset_token(home), open_enrollment(home)
 
 
 def sign(token: str, body: bytes) -> str:
@@ -177,10 +201,13 @@ class Receiver:
         """Handle one delivery; returns the HTTP status."""
         token = load_token(self.home)
         if token is None:
-            with self.handshake_lock:
-                token = load_token(self.home)
-                if token is None:
-                    return self._handshake(body)
+            try:
+                with self.handshake_lock, _token_lock(self.home):
+                    token = load_token(self.home)
+                    if token is None:
+                        return self._handshake(body)
+            except LockBusy:
+                return 503
         if not verify(token, body, signature):
             self.stats.bad_signatures += 1
             return 401

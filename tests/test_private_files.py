@@ -6,9 +6,11 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from todo_manager import daemon, db, export, install
 from tests.helpers import WorkspaceCase
+from tests.test_cli_redesign import invoke
 
 
 def mode(path: Path) -> int:
@@ -63,6 +65,57 @@ class ExportTests(Umask022, WorkspaceCase):
         target = self.tmp / "restored"
         export.import_bundle(bundle, target)
         self.assertEqual(mode(target), 0o700)
+
+    @staticmethod
+    def exposed(top: Path, prefix: str) -> list[str]:
+        """Entries of ``top`` named ``prefix*`` that other users could enter or read (a 0700
+        directory shields what is inside it)."""
+        return [p.name for p in top.iterdir() if p.name.startswith(prefix) and p.stat().st_mode & 0o077]
+
+    def test_the_snapshot_of_an_outside_export_is_never_readable_by_others(self):
+        out = self.tmp / "elsewhere" / "bundle"
+        seen = []
+        real = export._write_export
+
+        def spy(conn, cfg, root):
+            seen.extend(self.exposed(root.parent, ".bundle"))
+            return real(conn, cfg, root)
+
+        with patch.object(export, "_write_export", spy):
+            export.export_snapshot(self.conn, self.cfg, out)
+        self.assertEqual(seen, [])
+
+    def test_an_import_under_construction_is_never_readable_by_others(self):
+        bundle = export.export_snapshot(self.conn, self.cfg)
+        os.chmod(bundle / "workspace", 0o755)   # as an export made under umask 022 leaves it
+        target = self.tmp / "restored"
+        seen = []
+        real = export.reconcile_after_restore
+
+        def spy(conn, reason):
+            seen.extend(self.exposed(target.parent, ".restored"))
+            return real(conn, reason)
+
+        with patch.object(export, "reconcile_after_restore", spy):
+            export.import_bundle(bundle, target)
+        self.assertEqual(seen, [])
+        self.assertEqual(mode(target / "state" / "todo.sqlite"), 0o600)
+
+    def test_an_import_into_an_existing_empty_directory_is_owner_only(self):
+        bundle = export.export_snapshot(self.conn, self.cfg)
+        target = self.tmp / "restored"
+        target.mkdir()
+        os.chmod(target, 0o755)
+        export.import_bundle(bundle, target)
+        self.assertEqual(mode(target), 0o700)
+
+    def test_restoring_a_backup_into_a_new_workspace_is_owner_only(self):
+        saved = export.backup(self.conn, self.cfg)
+        target = self.tmp / "parent" / "new-ws"
+        code, text = invoke(target, "restore", str(saved), "--yes", "--json")
+        self.assertEqual(code, 0, text)
+        self.assertEqual(mode(target), 0o700)
+        self.assertEqual(mode(target / "state" / "todo.sqlite"), 0o600)
 
 
 if __name__ == "__main__":
