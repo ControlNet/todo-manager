@@ -158,13 +158,22 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     if args.action == "token":
         token = webhook.load_token(cfg.home)
         if token is None:
-            return _fail("NO_TOKEN", "no verification token yet: create the subscription in Notion; its first"
-                                     " request stores the token here")
+            return _fail("NO_TOKEN", "no verification token yet: run `todo-manager daemon enroll`, then create the"
+                                     " subscription in Notion (or press Resend); its first request stores the token")
         print(token)
         return 0
+    if args.action == "enroll":
+        if webhook.load_token(cfg.home) is not None:
+            return _fail("TOKEN_EXISTS", "a verification token is stored; `todo-manager daemon reset-token` first"
+                                         " if the subscription was recreated")
+        _print({"enroll_until": webhook.open_enrollment(cfg.home, args.minutes or webhook.ENROLL_MINUTES),
+                "next": "create the subscription in Notion (or press Resend) before then; its first request"
+                        " stores the token, then `todo-manager daemon token`"})
+        return 0
     if args.action == "reset-token":
-        _print({"reset": webhook.reset_token(cfg.home),
-                "next": "recreate the subscription in Notion; its first request stores the new token"})
+        reset = webhook.reset_token(cfg.home)
+        _print({"reset": reset, "enroll_until": webhook.open_enrollment(cfg.home),
+                "next": "recreate the subscription in Notion before then; its first request stores the new token"})
         return 0
     if args.action == "restart":
         proc = daemon.systemctl("restart", daemon.UNIT_NAME)
@@ -181,6 +190,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         unit = tunnel = "unknown"
     _print({**state, "unit": unit, "unit_file": str(daemon.unit_path(cfg)), "cloudflared": tunnel,
             "token": webhook.load_token(cfg.home) is not None,
+            "enroll_until": webhook.enrollment_until(cfg.home),
             "listen": f"{cfg.get('daemon.host')}:{cfg.get('daemon.port')}{cfg.get('daemon.path')}",
             "status": daemon.read_status(cfg.home)})
     return 0
@@ -666,7 +676,9 @@ def build_parser() -> argparse.ArgumentParser:
     dms.add_parser("run", help="run in the foreground (what its systemd unit runs)")
     dms.add_parser("status", help="health, unit, tunnel, webhook token present, last status")
     dms.add_parser("token", help="print the Notion webhook verification token to paste into Notion's Verify")
-    dms.add_parser("reset-token", help="forget the token (for a recreated subscription)")
+    x = dms.add_parser("enroll", help="accept Notion's handshake (the token) for the next few minutes")
+    x.add_argument("--minutes", type=float, help="how long the window stays open (default: 15)")
+    dms.add_parser("reset-token", help="forget the token and open enrollment (for a recreated subscription)")
     dms.add_parser("restart", help="systemctl --user restart the daemon")
     s.set_defaults(fn=cmd_daemon)
 

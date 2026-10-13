@@ -10,9 +10,10 @@ import tempfile
 import unittest
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
-from todo_manager import webhook
+from todo_manager import clock, webhook
 from tests.fake_notion import BOT_ID, USER_ID, FakeNotion
 
 
@@ -23,6 +24,7 @@ class ReceiverTests(unittest.TestCase):
         self.home = Path(tmp.name)
         self.events = queue.Queue()
         self.receiver = webhook.Receiver(self.home, self.events, port=0)
+        webhook.open_enrollment(self.home)   # the operator ran `daemon enroll`
         self.fake = FakeNotion()
         self.page = self.fake._new_page({"type": "workspace"}, {}, "", USER_ID)["id"]
         self.fake.events.clear()
@@ -128,11 +130,56 @@ class ReceiverTests(unittest.TestCase):
         self.assertEqual(self.queued(), [])
         self.assertIsNotNone(self.receiver.stats.last_event_at, "still proof that deliveries arrive")
 
-    def test_reset_token_allows_a_new_handshake(self):
+    def test_reset_token_allows_a_new_handshake_once_enrollment_is_open_again(self):
         self.handshake()
         self.assertTrue(webhook.reset_token(self.home))
+        self.assertEqual(self.handshake("new"), 403, "the stored handshake closed the enrollment")
+        webhook.open_enrollment(self.home)
         self.assertEqual(self.handshake("new"), 200)
         self.assertEqual(webhook.load_token(self.home), "new")
+
+
+class EnrollmentTests(unittest.TestCase):
+    """Without a token, anyone who reaches the public URL could send the first handshake; it is
+    only accepted while the operator has opened enrollment (`daemon enroll`), and only once."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name)
+        clock.set_now(datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc))
+        self.addCleanup(clock.set_now, None)
+        self.receiver = webhook.Receiver(self.home, queue.Queue(), port=0)
+        self.addCleanup(self.receiver.server.server_close)
+
+    def handshake(self, token="secret_abc"):
+        return self.receiver.receive(json.dumps({"verification_token": token}).encode(), None)
+
+    def test_a_handshake_without_open_enrollment_is_refused(self):
+        self.assertEqual(self.handshake("attacker"), 403)
+        self.assertIsNone(webhook.load_token(self.home))
+        self.assertEqual(self.receiver.stats.refused_handshakes, 1)
+
+    def test_enrollment_expires(self):
+        until = webhook.open_enrollment(self.home, minutes=15)
+        self.assertEqual(until, "2026-10-13T12:15:00.000Z")
+        self.assertEqual(webhook.enrollment_until(self.home), until)
+        clock.advance(minutes=16)
+        self.assertIsNone(webhook.enrollment_until(self.home))
+        self.assertEqual(self.handshake(), 403)
+        self.assertIsNone(webhook.load_token(self.home))
+
+    def test_the_accepted_handshake_closes_enrollment(self):
+        webhook.open_enrollment(self.home)
+        self.assertEqual(self.handshake(), 200)
+        self.assertIsNone(webhook.enrollment_until(self.home))
+        self.assertFalse(webhook.enroll_path(self.home).exists())
+
+    def test_a_damaged_enrollment_file_counts_as_closed(self):
+        webhook.enroll_path(self.home).parent.mkdir(parents=True, exist_ok=True)
+        webhook.enroll_path(self.home).write_text("not a time")
+        self.assertIsNone(webhook.enrollment_until(self.home))
+        self.assertEqual(self.handshake(), 403)
 
 
 class HttpSurfaceTests(unittest.TestCase):
@@ -156,6 +203,8 @@ class HttpSurfaceTests(unittest.TestCase):
             return exc.code
 
     def test_handshake_and_signed_event_over_http(self):
+        self.assertEqual(self.request("/notion", json.dumps({"verification_token": "t"}).encode()), 403)
+        webhook.open_enrollment(self.home)
         self.assertEqual(self.request("/notion", json.dumps({"verification_token": "t"}).encode()), 200)
         fake = FakeNotion()
         page = fake._new_page({"type": "workspace"}, {}, "", USER_ID)["id"]

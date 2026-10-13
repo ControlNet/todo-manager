@@ -1,7 +1,7 @@
 # Real-time sync daemon
 
-Status: implemented on branch `realtime-sync` (2026-10-13), tested against the fake Notion only,
-**off by default** (`daemon.enabled = false`). Going live: [operations](operations.md#real-time-sync-daemon).
+Status: live since 2026-10-13 (real subscription, Cloudflare Tunnel); **off by default**
+(`daemon.enabled = false`). Going live: [operations](operations.md#real-time-sync-daemon).
 
 ## Why
 
@@ -139,7 +139,9 @@ bounds the latency when the daemon is down.
 
 ## Endpoint and authentication
 
-Security bar agreed with the user: no unauthenticated access; no further hardening.
+Webhook text is never trusted: an event only says which page to re-read through the normal API
+paths, so a forged event can at most cause extra reads. Events are authenticated by Notion's
+signature; the handshake that delivers the signing key is only accepted while enrollment is open.
 
 - `ThreadingHTTPServer` on `daemon.host:daemon.port` (127.0.0.1:8655), `POST daemon.path`
   (`/notion`) only, body cap 1 MiB, no request logging (`todo_manager/webhook.py`).
@@ -148,10 +150,15 @@ Security bar agreed with the user: no unauthenticated access; no further hardeni
   public hostname with path `^/notion$` → `http://127.0.0.1:8655`. No Cloudflare Access in front
   (Notion cannot authenticate to it); the signature is the key. `daemon status` shows whether
   `cloudflared` is active. Tailscale Funnel (`--set-path`) is the alternative.
-- Handshake: while no token is stored, a POST carrying `verification_token` is accepted and the
-  token saved (`state/notion-webhook-token`, mode 0600, not printed by `status` or logs);
-  `todo-manager daemon token` prints it for Notion's Verify dialog. Once stored, a second
-  handshake is refused; `todo-manager daemon reset-token` clears it for a recreated subscription.
+- Handshake: Notion's first request carries `verification_token` and no signature, so anyone
+  who reaches the public URL first could offer their own. It is accepted only while no token is
+  stored **and** the operator has opened enrollment: `todo-manager daemon enroll [--minutes N]`
+  (default 15; `state/notion-webhook-enroll`). Otherwise 403, counted as `refused_handshakes`.
+  The accepted handshake saves the token (`state/notion-webhook-token`, mode 0600, not printed by
+  `status` or logs) and closes enrollment; `todo-manager daemon token` prints it for Notion's
+  Verify dialog. Once stored, a second handshake is refused; `todo-manager daemon reset-token`
+  clears it and opens enrollment for a recreated subscription. If a token you did not expect was
+  stored (Notion's Verify rejects it), run `daemon reset-token` and press Resend in Notion.
 - Every other request must carry `X-Notion-Signature: sha256=<hex HMAC-SHA256 of the raw body,
   keyed with the token>` (constant-time compare); otherwise 401, counted in the status.
 - Event ids are deduplicated (Notion retries up to 8 times over ~24 h).
@@ -231,8 +238,8 @@ behaves as before except for the smaller set of pages read every run.
 ## Verification
 
 - `tests/test_comment_polling.py`: which pages are read every run, every warm interval, round-robin.
-- `tests/test_webhook.py`: handshake, owner-only token, a second handshake refused (also two at
-  once), signature
+- `tests/test_webhook.py`: handshake only during open enrollment (refused before, after expiry,
+  after the accepted one), owner-only token, a second handshake refused (also two at once), signature
   accept/reject, tampered body, retries deduplicated, bot-only marking, HTTP surface (path,
   method, body cap) on an ephemeral loopback port.
 - `tests/test_daemon.py`: a comment reads only its page and wakes once; a burst is one read; own
@@ -256,6 +263,6 @@ behaves as before except for the smaller set of pages read every run.
 - `tests/test_daemon_install.py`: unit written/started/left alone/stopped/removed by `install` and
   `uninstall` with a fake systemctl; the `daemon` command; one real `daemon run` process on a
   temporary workspace answering the handshake over HTTP and stopping cleanly on SIGTERM.
-- Not verified until go-live (fake Notion only, by agreement): the real subscription and
-  handshake, that our own writes produce events, payload fields beyond the documented examples,
-  the Cloudflare Tunnel path mapping.
+- Verified at go-live (2026-10-13) with the real Notion: the subscription and handshake, the
+  Cloudflare Tunnel path mapping, a comment read and claimed within seconds, and that our own
+  writes produce deliveries.

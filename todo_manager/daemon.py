@@ -600,7 +600,8 @@ class Daemon:
                 "state": self.state, "mode": self.mode, "last_error": self.last_error,
                 "webhook": {"token": self.webhook_ready, "last_event_at": self.stats.last_event_at,
                             "accepted": self.stats.accepted, "duplicates": self.stats.duplicates,
-                            "bad_signatures": self.stats.bad_signatures, "silent": self.silent},
+                            "bad_signatures": self.stats.bad_signatures,
+                            "refused_handshakes": self.stats.refused_handshakes, "silent": self.silent},
                 "last_write_at": clock.iso(self.last_write_at) if self.last_write_at else None,
                 "unanswered_since": clock.iso(self.unanswered_since) if self.unanswered_since else None,
                 **self.shared_status(), "last_summary": self.last_summary}

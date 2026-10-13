@@ -9,6 +9,8 @@ Authentication is Notion's own: the subscription's ``verification_token`` keys a
 of the raw body, sent as ``X-Notion-Signature: sha256=<hex>``. While no token is stored, the one
 request that carries ``verification_token`` (Notion's handshake) is accepted and the token kept
 for the user to paste into Notion's Verify dialog; every other request needs a valid signature.
+The handshake itself carries no proof of origin, so it is only accepted while the operator has
+opened enrollment (``todo-manager daemon enroll``, a few minutes); storing the token closes it.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +34,7 @@ from . import clock
 SIGNATURE_HEADER = "X-Notion-Signature"
 MAX_BODY = 1 << 20
 SEEN_EVENTS = 2000
+ENROLL_MINUTES = 15
 # Events the daemon acts on; others are acknowledged and dropped.
 EVENT_TYPES = ("comment.created", "comment.updated", "comment.deleted", "page.created", "page.properties_updated",
                "page.content_updated", "page.moved", "page.deleted", "page.undeleted")
@@ -47,17 +51,20 @@ def load_token(home: Path) -> str | None:
         return None
 
 
-def save_token(home: Path, token: str) -> None:
-    path = token_path(home)
+def _write_private(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)   # mode 0600
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(token)
+            fh.write(text)
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def save_token(home: Path, token: str) -> None:
+    _write_private(token_path(home), token)
 
 
 def reset_token(home: Path) -> bool:
@@ -66,6 +73,31 @@ def reset_token(home: Path) -> bool:
         return True
     except FileNotFoundError:
         return False
+
+
+def enroll_path(home: Path) -> Path:
+    return home / "state" / "notion-webhook-enroll"
+
+
+def open_enrollment(home: Path, minutes: float = ENROLL_MINUTES) -> str:
+    """Accept one handshake until the returned time."""
+    until = clock.iso(clock.now() + timedelta(minutes=minutes))
+    _write_private(enroll_path(home), until)
+    return until
+
+
+def enrollment_until(home: Path) -> str | None:
+    """The end of the open enrollment window, None when closed, expired or unreadable."""
+    try:
+        until = enroll_path(home).read_text(encoding="utf-8").strip()
+        end = clock.parse(until)
+    except (FileNotFoundError, ValueError):
+        return None
+    return until if end is not None and end > clock.now() else None
+
+
+def close_enrollment(home: Path) -> None:
+    enroll_path(home).unlink(missing_ok=True)
 
 
 def sign(token: str, body: bytes) -> str:
@@ -107,6 +139,7 @@ class Stats:
     last_event_at: str | None = None
     bad_signatures: int = 0
     handshakes: int = 0
+    refused_handshakes: int = 0   # no enrollment open (`daemon enroll`)
     accepted: int = 0
     duplicates: int = 0
     ignored: int = 0
@@ -181,7 +214,11 @@ class Receiver:
         offered = payload.get("verification_token") if isinstance(payload, dict) else None
         if not isinstance(offered, str) or not offered.strip():
             return 401
+        if enrollment_until(self.home) is None:
+            self.stats.refused_handshakes += 1
+            return 403
         save_token(self.home, offered.strip())
+        close_enrollment(self.home)
         self.stats.handshakes += 1
         return 200
 

@@ -285,7 +285,10 @@ systemctl is-active cloudflared      # expect: active
 # 3. Notion: integration settings -> Webhooks -> Create subscription
 #    URL https://<your hostname>/notion; events: comment created/updated/deleted, page created /
 #    properties updated / content updated / moved / deleted / undeleted (the integration needs
-#    the "read comments" capability). Notion sends the verification token to the daemon:
+#    the "read comments" capability). Open enrollment first: only then does the daemon accept
+#    the verification token Notion sends (15 minutes; press Resend in Notion if it ran out):
+todo-manager daemon enroll
+#    ... create the subscription in Notion, then:
 todo-manager daemon token            # paste it into Verify
 todo-manager daemon status           # expect "token": true, "mode": "webhook"; comment on a task:
                                      # "accepted" grows and the comment is read within seconds

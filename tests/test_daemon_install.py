@@ -18,7 +18,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from todo_manager import cli, config, daemon, hermes_install, webhook
+from todo_manager import cli, clock, config, daemon, hermes_install, webhook
 from tests.test_hermes_install import InstallCase
 
 
@@ -134,8 +134,25 @@ class CommandTests(InstallCase):
         code, text = self.invoke("daemon", "token")
         self.assertEqual((code, text.strip()), (0, "secret_x"))
         code, text = self.invoke("daemon", "reset-token")
-        self.assertTrue(json.loads(text)["reset"])
+        out = json.loads(text)
+        self.assertTrue(out["reset"])
         self.assertIsNone(webhook.load_token(self.home))
+        self.assertEqual(out["enroll_until"], webhook.enrollment_until(self.home),
+                         "a reset opens enrollment for the recreated subscription")
+
+    def test_enroll_opens_a_window_for_the_handshake(self):
+        code, text = self.invoke("daemon", "enroll", "--minutes", "5")
+        self.assertEqual(code, 0)
+        out = json.loads(text)
+        self.assertEqual(out["enroll_until"], webhook.enrollment_until(self.home))
+        self.assertIn("enroll_until", json.loads(self.invoke("daemon", "status")[1]))
+
+    def test_enroll_refuses_while_a_token_is_stored(self):
+        webhook.save_token(self.home, "secret_x")
+        code, text = self.invoke("daemon", "enroll")
+        self.assertNotEqual(code, 0)
+        self.assertIn("TOKEN_EXISTS", text)
+        self.assertIsNone(webhook.enrollment_until(self.home))
 
 
 def free_port():
@@ -162,6 +179,8 @@ class ProcessTests(InstallCase):
         status = daemon.read_status(self.home)
         self.assertIsNotNone(status, proc.stderr.read().decode() if proc.poll() is not None else "no status")
         self.assertEqual(status["state"], "running")
+        clock.set_now(None)   # the daemon process reads the real time
+        webhook.open_enrollment(self.home)
         req = urllib.request.Request(f"http://127.0.0.1:{port}/notion", method="POST",
                                      data=json.dumps({"verification_token": "secret_p"}).encode())
         with urllib.request.urlopen(req, timeout=5) as resp:

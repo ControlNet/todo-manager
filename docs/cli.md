@@ -21,7 +21,7 @@ source show|search|dismiss|defer
 feedback list|show|record|resolve
 delegate list|show|create|message|answer|approve
 run show|done
-daemon run|status|token|reset-token|restart
+daemon run|status|enroll|token|reset-token|restart
 ```
 
 Business responses are JSON, including list/show. `run show --context` deliberately returns the
@@ -283,7 +283,9 @@ No credentials or private task text belong in source-control migration reports.
 changes, and never
 takes the workspace lock for its lifetime (only per cycle), so `install` is not blocked. `daemon
 status` prints health, unit and `cloudflared` state, whether a webhook token is stored and the
-daemon's last status, never the token itself; `daemon token` prints the token for Notion's
-Verify dialog; `daemon reset-token` forgets it for a recreated subscription; `daemon restart`
+daemon's last status, never the token itself; `daemon enroll [--minutes N]` lets the daemon accept
+Notion's handshake for N minutes (default 15; refused while a token is stored); `daemon token`
+prints the token for Notion's Verify dialog; `daemon reset-token` forgets it and opens enrollment
+for a recreated subscription; `daemon restart`
 restarts the unit. `sync` and the feedback gate share the `sync` lock with the daemon. See
 [realtime-sync.md](realtime-sync.md).
