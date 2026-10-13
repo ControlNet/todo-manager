@@ -166,7 +166,7 @@ signature; the handshake that delivers the signing key is only accepted while en
 ## Staying up
 
 1. `systemd --user` unit `todo-manager-daemon.service` (`Type=notify`, `Restart=always`,
-   `RestartSec=10`, no start limit, `WatchdogSec=120`), running the `todo-manager` launcher
+   `RestartSec=10`, no start limit, `WatchdogSec=120`, `UMask=0077`), running the `todo-manager` launcher
    (paths quoted for systemd).
    `install` writes, enables and (re)starts it while `daemon.enabled`; stops and removes it when
    turned off and on `uninstall`. A unit not written by todo-manager is left alone. The user has

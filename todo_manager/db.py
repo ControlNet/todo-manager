@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+
+from .files import private_dir
 
 SCHEMA_VERSION = 15
 
@@ -634,9 +637,12 @@ CREATE TABLE delivery_pages (
 
 def connect(path: str | Path) -> sqlite3.Connection:
     path = Path(path)
+    new = str(path) != ":memory:" and not path.exists()
     if str(path) != ":memory:":
         path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=30, isolation_level=None)
+    if new:
+        os.chmod(path, 0o600)   # before WAL mode: SQLite gives -wal and -shm the database's mode
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")

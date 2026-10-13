@@ -155,6 +155,10 @@ brings everything back on the same data.
 
 ## Export, backup, restore
 
+The workspace, an export and an imported workspace are owner-only directories (0700; `install`
+also tightens an existing workspace), and a new database file is 0600. An export holds your
+mail, chats, tasks and history in plain text: keep it as private as the workspace.
+
 Two different things:
 
 - **Internal safety backup** (accepted by `restore`): one consistent SQLite file (tasks, history, evidence,

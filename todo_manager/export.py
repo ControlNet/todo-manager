@@ -38,7 +38,7 @@ from typing import Any
 from . import clock, db, delegation, i18n, prefs, store
 from .db import loads
 from .config import Config
-from .files import sha256_file
+from .files import private_dir, sha256_file
 from .notion.schema import label as option_label
 
 EXPORT_FORMAT = "todo-manager-export/2"
@@ -190,8 +190,7 @@ def _snapshot(conn: sqlite3.Connection, path: Path) -> sqlite3.Connection:
 
 
 def export_snapshot(conn: sqlite3.Connection, cfg: Config, out_dir: Path | None = None) -> Path:
-    root = out_dir or cfg.home / "exports" / _stamp()
-    root.mkdir(parents=True, exist_ok=True)
+    root = private_dir(out_dir or cfg.home / "exports" / _stamp())
     snap_path = root.parent / f".{root.name}.snapshot.sqlite"
     snap = _snapshot(conn, snap_path)
     try:
@@ -365,7 +364,7 @@ def import_bundle(root: Path, target: Path) -> dict[str, Any]:
     staging = target.parent / f".{target.name}.importing"
     if staging.exists():
         shutil.rmtree(staging)
-    staging.mkdir(parents=True)
+    private_dir(staging)
     try:
         if (root / "workspace").is_dir():
             shutil.copytree(root / "workspace", staging, dirs_exist_ok=True)
@@ -395,6 +394,7 @@ def import_bundle(root: Path, target: Path) -> dict[str, Any]:
         finally:
             conn.close()
         staging.rename(target) if not target.exists() else _move_into(staging, target)
+        private_dir(target)   # copytree carried the bundle's modes
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
