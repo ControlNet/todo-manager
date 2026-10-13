@@ -1,9 +1,14 @@
 """Which pages the comment poll reads in a gate run (one Notion request per page).
 
-Pages with recent activity are read every run; the others round-robin (open tasks hourly,
-recently closed ones daily). Our own writes are not activity: after a bulk push (a migration,
-a re-render) every page was "recently edited" by the bot and every run read every page
-(137 requests, about a minute per run, 2026-10-12). Notion is ``FakeNotion`` (test double).
+Pages where a conversation is going on are read every run (agent work, a user comment in the
+last week, a user edit in the last ``notion.user_edit_hot_hours``); pages that are merely recent
+(a new open task, a change note, an older user edit within 48 hours) every
+``notion.warm_comment_poll_minutes``; the others round-robin (open tasks hourly, recently closed
+ones daily). Our own writes are not activity: after a bulk push (a migration, a re-render) every
+page was "recently edited" by the bot and every run read every page (137 requests, about a
+minute per run, 2026-10-12). In production all 7 user comments of a day landed on pages with
+agent work while about 55 pages were read every run, mostly new tasks (2026-10-13).
+Notion is ``FakeNotion`` (test double).
 """
 
 from datetime import timedelta
@@ -43,21 +48,57 @@ class CommentPollingTests(NotionCase):
         clock.advance(minutes=5)
         self.assertEqual(self.targets(), {})
 
-    def test_a_new_open_task_is_read_every_run(self):
+    def test_a_new_open_task_is_read_every_warm_interval_not_every_run(self):
         t = store.create_task(self.conn, "New", origin="intake")
         self.push(t)
         self.poll()
         clock.advance(minutes=5)
-        self.assertEqual(self.targets(), {t: "hot"})
+        self.assertEqual(self.targets(), {})
+        clock.advance(minutes=26)
+        self.assertEqual(self.targets(), {t: "warm"})
+        self.poll()
+        clock.advance(minutes=5)
+        self.assertEqual(self.targets(), {}, "read again only after another warm interval")
+
+    def test_the_warm_interval_is_a_setting(self):
+        t = store.create_task(self.conn, "New", origin="intake")
+        self.push(t)
+        self.poll()
+        self.cfg.data["notion"]["warm_comment_poll_minutes"] = 10
+        clock.advance(minutes=11)
+        self.assertEqual(self.targets(), {t: "warm"})
 
     def test_open_pages_are_still_read_round_robin(self):
         clock.advance(minutes=61)
         self.assertEqual(set(self.targets()), set(self.open))
 
-    def test_a_page_the_user_edited_is_read_every_run(self):
-        self.fake.user_edit(self.page_of(self.open[0]), **{"下一步": "问一下 Bob"})
+    def test_a_page_the_user_edited_is_read_every_run_for_a_while_then_warm(self):
+        t = self.open[0]
+        self.fake.user_edit(self.page_of(t), **{"下一步": "问一下 Bob"})
         self.pull()
-        self.assertEqual(self.targets(), {self.open[0]: "hot"})
+        self.assertEqual(self.targets(), {t: "hot"})
+        clock.advance(minutes=119)
+        self.poll()
+        self.assertEqual(self.targets(), {t: "hot"})
+        clock.advance(minutes=2)
+        self.assertEqual(self.targets(), {}, "past user_edit_hot_hours and read a minute ago")
+        clock.advance(minutes=30)
+        self.assertEqual(self.targets(), {t: "warm"})
+        self.poll()
+        clock.advance(hours=47)
+        self.poll()
+        clock.advance(minutes=31)
+        self.assertNotIn(t, self.targets(), "48 hours after the edit it is an ordinary open page")
+
+    def test_the_hot_window_after_a_user_edit_is_a_setting(self):
+        t = self.open[0]
+        self.fake.user_edit(self.page_of(t), **{"下一步": "问一下 Bob"})
+        self.pull()
+        self.cfg.data["notion"]["user_edit_hot_hours"] = 6
+        clock.advance(hours=5)
+        self.poll()
+        clock.advance(minutes=5)
+        self.assertEqual(self.targets(), {t: "hot"})
 
     def test_a_page_the_user_edited_stays_hot_after_we_write_it_back(self):
         t = self.open[0]
@@ -81,14 +122,26 @@ class CommentPollingTests(NotionCase):
         delegation.create(self.conn, self.cfg, task_id=self.open[2], title="Draft", goal="Draft only")
         self.assertEqual(self.targets().get(self.open[2]), "hot")
 
-    def test_a_change_the_user_was_told_about_is_read_every_run_for_two_days(self):
+    def test_a_change_the_user_was_told_about_is_read_every_warm_interval_for_two_days(self):
         t = self.open[3]
         store.update_task(self.conn, t, {"change_note": "Agent 交付了草稿"}, actor="program", origin="kanban",
                           based_on_version=store.get_task(self.conn, t)["version"], override_human=True)
         self.conn.execute("UPDATE tasks SET change_note_at=? WHERE id=?", (clock.iso(), t))
         self.push(t)
-        self.assertEqual(self.targets(), {t: "hot"})
+        self.poll()
+        clock.advance(minutes=5)
+        self.assertNotIn(t, self.targets(), "not every run")
+        clock.advance(minutes=26)
+        self.assertEqual(self.targets(), {t: "warm"})
         clock.advance(hours=49)
         self.poll()
         clock.advance(minutes=5)
         self.assertNotIn(t, self.targets())
+
+    def test_a_question_from_the_agent_keeps_the_page_hot(self):
+        d = delegation.create(self.conn, self.cfg, task_id=self.open[3], title="Draft", goal="Draft only")
+        self.conn.execute("UPDATE delegations SET status='blocked' WHERE id=?", (d,))
+        clock.advance(hours=72)
+        self.poll()
+        clock.advance(minutes=5)
+        self.assertEqual(self.targets().get(self.open[3]), "hot")

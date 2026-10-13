@@ -74,9 +74,10 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
 
 - Notion is polled, not pushed: edits are imported within ~5 minutes; comments on pages
   without recent activity are polled round-robin (default hourly), so a comment there can take
-  up to that long to be noticed. Recent activity (read every run, one request per page): agent
-  work, a user comment in the last 7 days, and within 48 hours a user edit of the page, a new
-  open task or a change note on an open task. Todo Manager's own writes do not count.
+  up to that long to be noticed. Read every run (one request per page): agent work, a user
+  comment in the last 7 days, a user edit of the page in the last 2 hours. Read every 30 minutes:
+  within 48 hours an older user edit, a new open task or a change note on an open task.
+  Todo Manager's own writes do not count.
 - Page body edits wait for a covering read. Notion stamps edits to the minute, so a read in
   the same minute as the last edit does not count as covering it: a body edit or pending creation request is
   claimed (and a claimed one applied) only after a read past the end of that minute, i.e. up to a

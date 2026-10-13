@@ -96,6 +96,8 @@ DEFAULTS: dict[str, Any] = {
         "bot_user_id": "",
         "min_request_interval_seconds": 0.4,
         "active_poll_minutes": 5,
+        "user_edit_hot_hours": 2,  # agreed 2026-10-13: a page the user edited is read every run this long
+        "warm_comment_poll_minutes": 30,  # agreed 2026-10-13: new tasks, change notes, older user edits (48 h)
         "cold_comment_poll_minutes": 60,  # PROPOSED: open tasks without recent activity
         "cold_comment_pages_per_run": 30,  # PROPOSED: round-robin budget per gate run
         "history_poll_hours": 24,  # PROPOSED low-frequency sweep of recently closed pages

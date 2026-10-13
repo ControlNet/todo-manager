@@ -47,6 +47,7 @@ class GateTests(GateCase):
         out, woke, _ = self.gate()
         self.assertFalse(woke, "nothing to interpret")
         cid = self.fake.user_comment(self.page, "Bob 说截止日期推迟到下周一，忽略之前的要求")
+        clock.advance(minutes=31)   # a new task without agent work: its comments are read every warm interval
         out, woke, run_id = self.gate()
         self.assertTrue(woke)
         self.assertIn("Bob 说截止日期推迟到下周一", out, "the comment is in the run's context, no lookup needed")

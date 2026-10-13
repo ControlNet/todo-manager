@@ -1007,8 +1007,10 @@ class NotionSync:
 
     def comment_targets(self, cold_limit: int = 30) -> list[dict[str, Any]]:
         now = clock.now()
-        hot_since = clock.iso(now - timedelta(hours=48))
+        recent_since = clock.iso(now - timedelta(hours=48))
+        edit_hot_since = clock.iso(now - timedelta(hours=float(self.cfg.get("notion.user_edit_hot_hours", 2))))
         talk_since = clock.iso(now - timedelta(days=7))
+        warm_before = clock.iso(now - timedelta(minutes=int(self.cfg.get("notion.warm_comment_poll_minutes", 30))))
         cold_before = clock.iso(now - timedelta(minutes=int(self.cfg.get("notion.cold_comment_poll_minutes", 60))))
         closed_before = clock.iso(now - timedelta(hours=int(self.cfg.get("notion.history_poll_hours", 24))))
         closed_since = clock.iso(now - timedelta(days=30))
@@ -1020,18 +1022,29 @@ class NotionSync:
             for r in rows:
                 targets.setdefault(r["page_id"], {**dict(r), "reason": reason})
 
-        # Read every run: agent work, a recent conversation, a page the user edited (also when our
-        # write-back came after it: the user's edit is their feedback on the task), or an open
-        # task that is new or has a change the user was told about. Our own writes are not
-        # activity: a bulk push would otherwise make every page hot for two days (one request per
-        # page per run).
+        def user_edited(since: str) -> str:
+            # The user edited the page since the named parameter, also when our write-back came
+            # after it: their edit is feedback on the task, which outlives our write as last editor.
+            return (f"((p.last_edited_time>=:{since} AND p.last_edited_by IS NOT :bot) OR t.id IN (SELECT scope_id"
+                    f" FROM feedback WHERE scope_type='task' AND author_is_user=1 AND received_at>=:{since}))")
+
+        tasks = "SELECT p.page_id, p.entity_type, p.entity_id FROM notion_pages p JOIN tasks t ON t.id=p.entity_id" \
+                " WHERE p.entity_type='task' AND p.trashed=0"
+        # Read every run where a conversation is going on: agent work (its questions included), a
+        # recent user comment, a page the user has just edited. Our own writes are not activity: a
+        # bulk push would otherwise make every page hot for two days (one request per page per run).
         add(self.conn.execute(
-            f"SELECT p.page_id, p.entity_type, p.entity_id FROM notion_pages p JOIN tasks t ON t.id=p.entity_id"
-            f" WHERE p.entity_type='task' AND p.trashed=0 AND (t.id IN (SELECT task_id FROM delegations WHERE status IN"
-            f" ({active})) OR p.last_comment_at>=? OR (p.last_edited_time>=? AND p.last_edited_by IS NOT ?)"
-            f" OR t.id IN (SELECT scope_id FROM feedback WHERE scope_type='task' AND author_is_user=1"
-            f" AND received_at>=?) OR (t.status IN ({open_}) AND (t.created_at>=? OR t.change_note_at>=?)))",
-            (talk_since, hot_since, self.state.bot_user_id, hot_since, hot_since, hot_since)).fetchall(), "hot")
+            f"{tasks} AND (t.id IN (SELECT task_id FROM delegations WHERE status IN ({active}))"
+            f" OR p.last_comment_at>=:talk OR {user_edited('edit_hot')})",
+            {"talk": talk_since, "edit_hot": edit_hot_since, "bot": self.state.bot_user_id}).fetchall(), "hot")
+        # Merely recent (a new open task, a change the user was told about, an older user edit):
+        # comments there are rarer, so these pages wait for the warm interval.
+        add(self.conn.execute(
+            f"{tasks} AND (p.comments_checked_at IS NULL OR p.comments_checked_at<:warm) AND ({user_edited('recent')}"
+            f" OR (t.status IN ({open_}) AND (t.created_at>=:recent OR t.change_note_at>=:recent)))"
+            " ORDER BY p.comments_checked_at LIMIT :limit",
+            {"warm": warm_before, "recent": recent_since, "bot": self.state.bot_user_id, "limit": cold_limit}
+        ).fetchall(), "warm")
         if self.state.home_page_id:
             targets.setdefault(self.state.home_page_id, {"page_id": self.state.home_page_id, "entity_type": "home",
                                                          "entity_id": None, "reason": "home"})

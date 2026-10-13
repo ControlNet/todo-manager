@@ -114,6 +114,7 @@ class DisplayCutTests(Base):
                           based_on_version=store.get_task(self.conn, self.task)["version"])
         self.gate()                                   # pushes the new summary into the box
         self.fake.user_comment(self.page, LONG)
+        clock.advance(minutes=31)   # a new task without agent work: its comments are read every warm interval
         run_id, [first] = self.run_items()
         self.decide(run_id, [{"feedback": first["id"], "outcome": "ignored", "reason": "背景"}])
         self.fake.user_comment(self.page, TAIL)

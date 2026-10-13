@@ -16,7 +16,7 @@ when you ask it in chat, e.g. "wait an hour of Slack silence before analysing" s
 | `github.quiet_minutes` / `min_wake_interval_minutes` | 10 / 60 | Same shape as email |
 | `commits.digest_time` | 21:00 local | Daily commit digest (project progress only) |
 | `commits.max_attempts_per_day` | 2 | Model attempts for one day's digest |
-| `notion.cold_comment_poll_minutes` | 60 | Comment polling interval for open tasks without recent activity (active pages: every run; our own writes are not activity) |
+| `notion.cold_comment_poll_minutes` | 60 | Comment polling interval for open tasks without recent activity (pages with agent work, a user comment in the last week or a user edit in the last `notion.user_edit_hot_hours`: every run; new tasks, change notes and older user edits: every `notion.warm_comment_poll_minutes`; our own writes are not activity) |
 | `notion.cold_comment_pages_per_run` | 30 | Round-robin budget of cold pages per run |
 | `notion.history_poll_hours` | 24 | Sweep of recently closed pages for late comments |
 | `wake.max_context_chars` / `max_evidence_chars` / `max_items_per_run` | 60000 / 40000 / 60 | Whole rendered intake context / new evidence in it / new messages per run; the rest waits for the next run. The gate renders the context before waking and gives back conversations until it fits. Batches are taken round-robin across sources, so an email backlog cannot crowd out chat; a conversation larger than one run is split into segments in message order (each gets at most an even share per waiting source; a later segment waits for the earlier one). When more than one run's worth is waiting, the email/GitHub wake interval is skipped so a backlog drains every 5 minutes |
@@ -29,6 +29,7 @@ when you ask it in chat, e.g. "wait an hour of Slack silence before analysing" s
 
 | Setting | Default | Effect |
 |---|---|---|
+| `notion.user_edit_hot_hours` / `notion.warm_comment_poll_minutes` | 2 / 30 | Comments on a page you edited are read every run for 2 hours, then every 30 minutes until 48 hours after the edit; new open tasks and change notes every 30 minutes for 48 hours. Agent work and pages with your comment of the last week stay every run (2026-10-13: all of a day's comments were on pages with agent work, while new tasks made up most of the 55 pages read every run) |
 | `slack.quiet_minutes` | 30 | A Slack conversation matures only after 30 quiet minutes (change it freely; no floor) |
 | `slack.active_hours` / `slack.quiet_poll_minutes` | 168 / 30 | A Slack conversation with a human (non-bot) message in the last 7 days is read every run; quieter ones about every 30 minutes (staggered), so all DMs and channels stay within Slack's rate limits. A new message in a long-quiet conversation is seen within ~30 minutes, before the 30 quiet minutes of batching |
 | GitHub: your own PR merged/closed | context unless an open task is about it | A merge/close of a PR you opened (with no newer comment by someone else) wakes the model only when that PR is evidence of an open task, or an open task names it (its link, `owner/repo#N`, or `#N` with the repository or owner name; e.g. a task from a chat that waits for the PR), so the task gets updated |
