@@ -211,6 +211,10 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
   by Notion (usually under a minute, up to 5); comment events arrive in seconds. A webhook
   reaches only pages the integration can access. While the subscription is unverified or
   silent the daemon polls Notion like the gate.
+- Work the daemon owes for an acknowledged event (a failed read) is retried from memory: after
+  a daemon restart only the timers and full passes remain, and a full pass does not see a page
+  deleted in Notion. A project page deleted in Notion is not imported (as in the gate); task
+  pages are.
 
 ## Security
 

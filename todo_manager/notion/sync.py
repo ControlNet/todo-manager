@@ -1114,10 +1114,11 @@ class NotionSync:
         return stats
 
     def refresh_page(self, page_id: str) -> str:
-        """One known page a webhook named as deleted, restored or moved, read directly: a data
-        source query leaves trashed pages out. Returns what ``import_page`` did, or missing."""
+        """One known task page a webhook named as deleted, restored or moved, read directly: a
+        data source query leaves trashed pages out. Returns what ``import_page`` did, or missing
+        (recorded in ``problems``). Project pages are left to the pull, as in the gate."""
         row = self.page_row(page_id)
-        if row is None or row["entity_type"] not in ("task", "project"):
+        if row is None or row["entity_type"] != "task":
             return "ignored"
         try:
             page = self.client.retrieve_page(page_id)

@@ -157,7 +157,7 @@ class ProcessTests(InstallCase):
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.addCleanup(lambda: proc.poll() is None and proc.kill())
         deadline = time.time() + 20
-        while time.time() < deadline and daemon.read_status(self.home) is None:
+        while time.time() < deadline and (daemon.read_status(self.home) or {}).get("state") != "running":
             time.sleep(0.1)
         status = daemon.read_status(self.home)
         self.assertIsNotNone(status, proc.stderr.read().decode() if proc.poll() is not None else "no status")

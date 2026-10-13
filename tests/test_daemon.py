@@ -142,6 +142,52 @@ class EventTests(DaemonCase):
         self.d.cycle()
         self.assertEqual([f["kind"] for f in feedback.pending(self.conn)], ["comment"])
 
+    def test_a_deletion_read_that_keeps_failing_is_tried_again_slowly(self):
+        self.fake.user_trash(self.page)
+        self.deliver()
+        self.d.cycle()
+        for _ in range(daemon.MAX_RETRIES + 1):
+            self.fake.fail_next[("GET", "/pages/")] = HttpError(400, "boom", body={"code": "validation_error"})
+            clock.advance(seconds=daemon.RETRY_SECONDS)
+            self.d.cycle()
+        self.assertIn(("page", self.page), self.d.pending, "not forgotten: a full pass cannot see a trashed page")
+        clock.advance(minutes=30)
+        self.d.cycle()
+        row = self.conn.execute("SELECT trashed FROM notion_pages WHERE page_id=?", (self.page,)).fetchone()
+        self.assertEqual(row["trashed"], 1)
+
+    def test_a_page_that_is_gone_is_reported_and_not_retried(self):
+        self.fake.user_trash(self.page)
+        self.deliver()
+        self.fake.fail_next[("GET", "/pages/")] = HttpError(404, "gone", body={"code": "object_not_found"})
+        self.loop()
+        self.assertNotIn(("page", self.page), self.d.pending)
+        kept = json.loads(db.get_meta(self.conn, "health.problems.notion") or "{}")
+        self.assertTrue(any(self.page in p for p in kept.get("problems", [])), kept)
+
+    def test_a_deleted_project_page_is_left_to_the_pull_as_before(self):
+        project = store.create_project(self.conn, "合作项目", origin="cli")
+        self.loop(1)
+        page = self.conn.execute("SELECT page_id FROM notion_pages WHERE entity_type='project' AND entity_id=?",
+                                 (project,)).fetchone()["page_id"]
+        self.fake.user_trash(page)
+        self.deliver()
+        self.d.cycle()
+        self.assertNotIn(("page", page), self.d.pending)
+
+    def test_an_event_taken_while_the_schema_is_wrong_is_kept(self):
+        self.fake.user_trash(self.page)
+        self.deliver()
+        first = self.d.events.get_nowait()             # as the main loop takes it
+        other = db.open_existing(self.cfg.db_path)
+        self.addCleanup(other.close)
+        other.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(db.SCHEMA_VERSION + 1),))
+        self.assertIsNone(self.d.cycle(first))
+        other.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(db.SCHEMA_VERSION),))
+        self.loop()
+        row = self.conn.execute("SELECT trashed FROM notion_pages WHERE page_id=?", (self.page,)).fetchone()
+        self.assertEqual(row["trashed"], 1)
+
 
 class MaintenanceTests(DaemonCase):
     def test_while_install_or_restore_holds_the_workspace_the_daemon_touches_no_database(self):
@@ -159,6 +205,15 @@ class MaintenanceTests(DaemonCase):
         self.assertEqual(queries, [])
         self.loop()
         self.assertEqual([f["kind"] for f in feedback.pending(self.conn)], ["comment"], "the event was kept")
+
+    def test_the_database_is_not_even_opened_while_install_holds_the_workspace(self):
+        self.d.close()
+        self.d.lock_timeout = 0.1
+        with file_lock(lock_path(self.cfg.home, "workspace")):
+            self.assertIsNone(self.d.cycle())
+            self.assertIsNone(self.d.conn)
+        self.d.cycle()
+        self.assertIsNotNone(self.d.conn)
 
     def test_a_schema_changed_under_the_daemon_makes_it_wait_for_install(self):
         other = db.open_existing(self.cfg.db_path)
@@ -334,6 +389,23 @@ class WebhookSilenceTests(DaemonCase):
         self.d.stats.last_event_at = clock.iso()
         self.d.cycle()
         self.assertEqual(self.d.mode, "webhook")
+
+    def test_a_delivery_during_the_work_does_not_answer_a_write_made_after_it(self):
+        self.write()                                     # unanswered since t0
+        work = self.d.work
+
+        def delivery_then_write(keys):
+            self.d.stats.last_event_at = clock.iso()     # an event about an older change arrives
+            clock.advance(seconds=1)
+            return work(keys)                            # then this cycle writes again
+        self.d.work = delivery_then_write
+        store.update_task(self.conn, self.task, {"next_step": "again"}, actor="agent", origin="feedback",
+                          based_on_version=store.get_task(self.conn, self.task)["version"])
+        self.loop(1)
+        self.d.work = work
+        clock.advance(minutes=11)
+        self.d.cycle()
+        self.assertEqual(self.d.mode, "polling", "the second write was never answered")
 
     def test_with_the_receiver_turned_off_a_stored_token_does_not_mean_webhook_mode(self):
         self.cfg.data["daemon"]["webhook"] = False

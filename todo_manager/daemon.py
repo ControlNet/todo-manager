@@ -55,7 +55,7 @@ CLAIMS_MINUTES = 1
 HOME_MINUTES = 5
 REVIVE_MINUTES = 10
 RETRY_SECONDS = 60     # a cycle with a failed step runs its work again after this
-MAX_RETRIES = 5        # then the timers and the full pass cover it
+MAX_RETRIES = 5        # then every daemon.reconcile_minutes until it succeeds (in memory only)
 LOCK_TIMEOUT_SECONDS = 30
 LOCAL_DEBOUNCE_SECONDS = 1
 
@@ -250,6 +250,7 @@ class Daemon:
         self._progress_at: float | None = None
         self.status_lock = threading.Lock()
         self.retries: dict[Key, int] = {}
+        self.stamped_state: str | None = None
         self.lock_timeout = LOCK_TIMEOUT_SECONDS
         self.last_error: str | None = None
         self.last_summary: dict[str, Any] = {}
@@ -318,7 +319,7 @@ class Daemon:
                 self.due(("comments", event.page_id), debounce)
             return
         kinds = [row["entity_type"]] if row else (["task", "project"] if event.type == "page.created" else [])
-        if row and event.type in ("page.deleted", "page.undeleted", "page.moved"):
+        if row and row["entity_type"] == "task" and event.type in ("page.deleted", "page.undeleted", "page.moved"):
             self.due(("page", event.page_id), debounce)
         for kind in kinds:
             self.due(("pull", kind), debounce)
@@ -357,7 +358,10 @@ class Daemon:
         grace = timedelta(minutes=float(self.setting("webhook_silence_minutes", 10)))
         last_event = clock.parse(self.stats.last_event_at) if self.stats.last_event_at else None
         if self.unanswered_since and last_event and last_event >= self.unanswered_since:
-            self.unanswered_since = None    # only a delivery answers; later writes do not move the deadline
+            # Only a delivery answers, and only the writes before it; later writes do not move
+            # the deadline of an unanswered one.
+            later = self.last_write_at if self.last_write_at and self.last_write_at > last_event else None
+            self.unanswered_since = later
         silent = bool(self.unanswered_since and clock.now() - self.unanswered_since > grace)
         if silent != self.silent:
             self.silent = silent
@@ -369,23 +373,28 @@ class Daemon:
     def cycle(self, first: webhook.Event | None = None) -> dict[str, Any] | None:
         """Take the events (``first``: one already taken off the queue), then do the work that is
         due. Returns the summary, None when idle."""
-        if not self.open():
-            return None
         try:
-            # Every database access waits for install/restore/migrate (exclusive) to finish.
+            # Every database access, opening included, waits for install/restore/migrate
+            # (exclusive) to finish.
             with file_lock(lock_path(self.cfg.home, "workspace"), blocking=True, timeout=self.lock_timeout,
                            shared=True):
-                if not self.schema_ok():
+                if not self.open() or not self.schema_ok():
+                    self.keep(first)
                     return None
                 return self._cycle(first)
         except LockBusy:
-            if first is not None:
-                self.events.put(first)
+            self.keep(first)
             return None
         except sqlite3.Error as exc:
             self.last_error = f"{type(exc).__name__}: {str(exc)[:300]}"
             self.close()           # opened again (and the schema checked) on the next loop
+            self.keep(first)       # submitting it again is harmless
             return {"error": self.last_error}
+
+    def keep(self, event: webhook.Event | None) -> None:
+        """An event taken off the queue but not turned into due work yet: back on the queue."""
+        if event is not None:
+            self.events.put(event)
 
     def schema_ok(self) -> bool:
         """Under the workspace lock: the schema is still the one this code expects (a restore or
@@ -426,6 +435,8 @@ class Daemon:
         except Exception as exc:  # noqa: BLE001 - the daemon outlives any one failure
             self.last_error = f"{type(exc).__name__}: {str(exc)[:300]}"
             self.done(keys, failed=True)
+            if isinstance(exc, sqlite3.Error):
+                self.close()       # opened again (and the schema checked) on the next loop
             return {"error": self.last_error}
         failed = bool(summary.get("problems")) or any(
             isinstance(v, dict) and (v.get("errors") or v.get("error")) for v in summary.values())
@@ -436,18 +447,17 @@ class Daemon:
 
     def done(self, keys: list[Key], *, failed: bool) -> None:
         """Due work ran. A failed step (an acknowledged event's read included) runs it again after
-        ``RETRY_SECONDS``, up to ``MAX_RETRIES`` times; the work is idempotent."""
+        ``RETRY_SECONDS``, ``MAX_RETRIES`` times, then every ``daemon.reconcile_minutes`` until it
+        succeeds: some work (a deleted page's read) no full pass would do. The work is idempotent."""
+        slow = float(self.setting("reconcile_minutes", 30)) * 60
         for key in keys:
             self.pending.pop(key, None)
             if not failed:
                 self.retries.pop(key, None)
                 continue
             attempt = self.retries.get(key, 0) + 1
-            if attempt > MAX_RETRIES:
-                self.retries.pop(key, None)
-                continue
             self.retries[key] = attempt
-            self.due(key, RETRY_SECONDS)
+            self.due(key, RETRY_SECONDS if attempt <= MAX_RETRIES else slow)
 
     def work(self, keys: list[Key]) -> dict[str, Any]:
         from . import gate_feedback
@@ -489,6 +499,11 @@ class Daemon:
             pages = [k[1] for k in keys if k[0] == "page"]
             if pages:
                 step("event_pages", lambda: {"read": [notion.refresh_page(p) for p in pages]})
+            if notion.problems and "home" not in names:
+                # The home step replaces the kept problems with a whole pass's; until then add these.
+                kept = json.loads(db.get_meta(conn, "health.problems.notion") or "{}").get("problems", [])
+                health.record_problems(conn, "notion", kept + notion.problems)
+                summary["notion_problems"] = notion.problems[:20]
         if kanban is not None:
             if names & {"local", "kanban", "claims"}:
                 gate_feedback.kanban_send_steps(step, conn, cfg, kanban)
@@ -526,6 +541,7 @@ class Daemon:
             return False
         except sqlite3.Error as exc:
             self.last_error = f"wake check failed: {type(exc).__name__}: {str(exc)[:200]}"
+            self.close()
             return False
         if not ready:
             return False
@@ -550,11 +566,14 @@ class Daemon:
                             "bad_signatures": self.stats.bad_signatures, "silent": self.silent},
                 "last_write_at": clock.iso(self.last_write_at) if self.last_write_at else None,
                 "unanswered_since": clock.iso(self.unanswered_since) if self.unanswered_since else None,
+                "retrying": sorted("/".join(k) for k, n in self.retries.items() if n > MAX_RETRIES),
                 "last_summary": self.last_summary}
 
     def heartbeat(self, force: bool = False) -> None:
         with self.status_lock:
-            write_status(self.cfg.home, self.status())
+            status = self.status()
+            write_status(self.cfg.home, status)
+            self.stamped_state = status["state"]
 
     def touch(self) -> None:
         """The main thread made progress."""
@@ -579,8 +598,7 @@ class Daemon:
             self.events = receiver.events
             self.stats = receiver.stats
             receiver.start()
-        self.open()
-        self.heartbeat(force=True)
+        self.heartbeat(force=True)   # the first cycle opens the database, under the workspace lock
         sd_notify("READY=1")
         stop = threading.Event()
 
@@ -600,6 +618,8 @@ class Daemon:
                 except queue.Empty:
                     first = None
                 self.cycle(first)
+                if self.state != self.stamped_state:
+                    self.heartbeat(force=True)   # running / waiting_install shown at once
                 self.maybe_wake()
                 if time.monotonic() >= next_code_check:
                     next_code_check = time.monotonic() + self.code_check_seconds
