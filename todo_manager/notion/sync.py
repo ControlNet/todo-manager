@@ -1113,6 +1113,21 @@ class NotionSync:
             health.record_channel(self.conn, "notion", "comments", failure)
         return stats
 
+    def refresh_page(self, page_id: str) -> str:
+        """One known page a webhook named as deleted, restored or moved, read directly: a data
+        source query leaves trashed pages out. Returns what ``import_page`` did, or missing."""
+        row = self.page_row(page_id)
+        if row is None or row["entity_type"] not in ("task", "project"):
+            return "ignored"
+        try:
+            page = self.client.retrieve_page(page_id)
+        except NotionError as exc:
+            if exc.not_found:
+                self.problems.append(f"page {page_id} is no longer accessible (deleted or unshared)")
+                return "missing"
+            raise
+        return self.import_page(row["entity_type"], page)
+
     def _check_missing(self, page_id: str) -> str | None:
         """A task page whose comments are not found: trashed (imported as such), or gone
         (a problem of that page). Returns the error when that could not be told."""

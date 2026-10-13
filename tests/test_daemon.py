@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 
 from todo_manager import clock, daemon, db, delegation, feedback, gate_feedback, health, store, webhook
+from todo_manager.locks import file_lock, lock_path
+from todo_manager.net import HttpError
 from todo_manager.notion.sync import NotionSync, load_state
 from tests.fake_notion import USER_ID
 from tests.test_feedback import GateCase
@@ -121,6 +123,53 @@ class EventTests(DaemonCase):
         self.d.cycle()
         self.assertEqual([f["kind"] for f in feedback.pending(self.conn)], ["comment"],
                          "the page is not in the pass's selection, yet the event is not dropped")
+
+
+    def test_a_page_deleted_in_notion_is_read_directly(self):
+        self.fake.user_trash(self.page)   # a data source query no longer returns it
+        self.deliver()
+        self.loop()
+        row = self.conn.execute("SELECT trashed FROM notion_pages WHERE page_id=?", (self.page,)).fetchone()
+        self.assertEqual(row["trashed"], 1)
+
+    def test_a_failed_event_read_is_retried_without_another_event(self):
+        self.fake.fail_next[("GET", "/comments")] = HttpError(400, "boom", body={"code": "validation_error"})
+        self.fake.user_comment(self.page, "周五前给我")
+        self.deliver()
+        self.loop()
+        self.assertEqual(feedback.pending(self.conn), [])
+        clock.advance(seconds=daemon.RETRY_SECONDS)
+        self.d.cycle()
+        self.assertEqual([f["kind"] for f in feedback.pending(self.conn)], ["comment"])
+
+
+class MaintenanceTests(DaemonCase):
+    def test_while_install_or_restore_holds_the_workspace_the_daemon_touches_no_database(self):
+        self.d.lock_timeout = 0.1
+        self.fake.user_comment(self.page, "x")
+        self.deliver()
+        queries = []
+        self.d.conn.set_trace_callback(queries.append)
+        with file_lock(lock_path(self.cfg.home, "workspace")):          # exclusive, as install takes it
+            self.assertIsNone(self.d.cycle())
+            clock.advance(seconds=5)
+            self.assertIsNone(self.d.cycle())
+            self.assertFalse(self.d.maybe_wake())
+        self.d.conn.set_trace_callback(None)
+        self.assertEqual(queries, [])
+        self.loop()
+        self.assertEqual([f["kind"] for f in feedback.pending(self.conn)], ["comment"], "the event was kept")
+
+    def test_a_schema_changed_under_the_daemon_makes_it_wait_for_install(self):
+        other = db.open_existing(self.cfg.db_path)
+        self.addCleanup(other.close)
+        other.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(db.SCHEMA_VERSION + 1),))
+        self.assertIsNone(self.d.cycle())
+        self.assertFalse(self.d.maybe_wake())
+        self.assertEqual(self.d.state, "waiting_install")
+        other.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(db.SCHEMA_VERSION),))
+        self.d.cycle()
+        self.assertEqual(self.d.state, "running")
 
 
 class LocalChangeTests(DaemonCase):

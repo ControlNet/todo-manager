@@ -47,7 +47,8 @@ Notion ──HTTPS (Cloudflare Tunnel)──▶ receiver thread (127.0.0.1) ─�
 main thread, about once a second:                                                  ▼
   events → due work per page (debounced)       PRAGMA data_version changed → local push
   board kanban.db / -wal mtime changed → card read (rate-limited)     timers → claims, home, passes
-  due work, under the shared `workspace` lock and the `sync` lock, through gate_feedback's steps:
+  every database access under the shared `workspace` lock (schema checked first), due work also
+  under the `sync` lock, through gate_feedback's steps (a failed step: again after 60 s, 5 times):
     ├─ Notion → local: pull of that kind (with body reads), comments of the named pages
     ├─ local → board: messages, cards of new delegations, parked starts
     ├─ board → local: card events
@@ -63,7 +64,7 @@ for it). Events and the work they cause:
 | Event | Work |
 |---|---|
 | `comment.created` / `updated` / `deleted` | comments of `data.page_id` only (not aggregated: arrives in seconds) |
-| `page.properties_updated` / `content_updated` / `created` / `moved` / `deleted` / `undeleted` | `pull` of that page's kind (task or project), which also reads edited bodies (aggregated: usually < 1 min) |
+| `page.properties_updated` / `content_updated` / `created` / `moved` / `deleted` / `undeleted` | `pull` of that page's kind (task or project), which also reads edited bodies (aggregated: usually < 1 min); `deleted` / `undeleted` / `moved` of a known page also read that page directly (a data source query leaves trashed pages out) |
 | anything else | acknowledged and dropped |
 
 Rules:
@@ -201,7 +202,9 @@ follows the same model: its unit runs the checkout, and it picks up new code by 
   itself; meanwhile the gate syncs. No outage.
 - **Schema upgrade**: the daemon never migrates. When the code expects another schema it stays
   up as `waiting_install`, does nothing and tries again every minute; after `todo-manager
-  install` migrates (with its backup) it continues.
+  install` migrates (with its backup) it continues. While `install` or `restore` holds the
+  workspace lock the daemon does not touch the database at all; afterwards it checks the schema
+  again before any access, so a restore of an older backup also puts it in `waiting_install`.
 - **Unit change**: `todo-manager install` rewrites the unit when it differs, reloads systemd and
   restarts the daemon (it also starts a stopped one); `todo-manager daemon restart` restarts it
   alone.
@@ -232,7 +235,9 @@ behaves as before except for the smaller set of pages read every run.
   method, body cap) on an ephemeral loopback port.
 - `tests/test_daemon.py`: a comment reads only its page and wakes once; a burst is one read; own
   writes are not work; property edits and pages created in Notion are pulled; unknown pages
-  ignored; a comment event due with a full pass is not dropped; a local write reaches Notion
+  ignored; a comment event due with a full pass is not dropped; a page deleted in Notion is read
+  directly; a failed event read is retried without another event; no database access while
+  install holds the workspace; a schema changed underneath → waiting for install and back; a local write reaches Notion
   and a new delegation gets its card without the gate; a commit by another process during a
   cycle is not swallowed; idle means no request; board changes rate-limited; wake rate limit;
   webhook silence → polling and back (steady writes do not postpone it, only a delivery ends it;

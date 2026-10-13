@@ -54,6 +54,9 @@ UNCLAIMED_WAKE_MINUTES = 5   # the same feedback still unclaimed after a wake: a
 CLAIMS_MINUTES = 1
 HOME_MINUTES = 5
 REVIVE_MINUTES = 10
+RETRY_SECONDS = 60     # a cycle with a failed step runs its work again after this
+MAX_RETRIES = 5        # then the timers and the full pass cover it
+LOCK_TIMEOUT_SECONDS = 30
 LOCAL_DEBOUNCE_SECONDS = 1
 
 
@@ -246,6 +249,8 @@ class Daemon:
         self._progress_seen: tuple[Any, ...] | None = None
         self._progress_at: float | None = None
         self.status_lock = threading.Lock()
+        self.retries: dict[Key, int] = {}
+        self.lock_timeout = LOCK_TIMEOUT_SECONDS
         self.last_error: str | None = None
         self.last_summary: dict[str, Any] = {}
         self.silent = False
@@ -313,6 +318,8 @@ class Daemon:
                 self.due(("comments", event.page_id), debounce)
             return
         kinds = [row["entity_type"]] if row else (["task", "project"] if event.type == "page.created" else [])
+        if row and event.type in ("page.deleted", "page.undeleted", "page.moved"):
+            self.due(("page", event.page_id), debounce)
         for kind in kinds:
             self.due(("pull", kind), debounce)
 
@@ -364,6 +371,40 @@ class Daemon:
         due. Returns the summary, None when idle."""
         if not self.open():
             return None
+        try:
+            # Every database access waits for install/restore/migrate (exclusive) to finish.
+            with file_lock(lock_path(self.cfg.home, "workspace"), blocking=True, timeout=self.lock_timeout,
+                           shared=True):
+                if not self.schema_ok():
+                    return None
+                return self._cycle(first)
+        except LockBusy:
+            if first is not None:
+                self.events.put(first)
+            return None
+        except sqlite3.Error as exc:
+            self.last_error = f"{type(exc).__name__}: {str(exc)[:300]}"
+            self.close()           # opened again (and the schema checked) on the next loop
+            return {"error": self.last_error}
+
+    def schema_ok(self) -> bool:
+        """Under the workspace lock: the schema is still the one this code expects (a restore or
+        an install may have changed it since the connection was opened)."""
+        assert self.conn is not None
+        try:
+            row = self.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+            version = int(row[0]) if row else 0
+            error = None if version == db.SCHEMA_VERSION else \
+                f"workspace schema {version}; run todo-manager install to upgrade (expected {db.SCHEMA_VERSION})"
+        except sqlite3.Error as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        if error is None:
+            return True
+        self.close()
+        self.state, self.last_error = "waiting_install", error
+        return False
+
+    def _cycle(self, first: webhook.Event | None) -> dict[str, Any] | None:
         if first is not None:
             self.submit(first)
         while True:
@@ -377,23 +418,36 @@ class Daemon:
         keys = sorted(k for k, when in self.pending.items() if when <= now)
         if not keys:
             return None
-        home = self.cfg.home
         try:
-            with file_lock(lock_path(home, "workspace"), blocking=True, timeout=30, shared=True), \
-                    file_lock(lock_path(home, "sync"), blocking=True, timeout=30):
+            with file_lock(lock_path(self.cfg.home, "sync"), blocking=True, timeout=self.lock_timeout):
                 summary = self.work(keys)
         except LockBusy:
             return None
         except Exception as exc:  # noqa: BLE001 - the daemon outlives any one failure
             self.last_error = f"{type(exc).__name__}: {str(exc)[:300]}"
-            for key in keys:
-                self.pending.pop(key, None)
+            self.done(keys, failed=True)
             return {"error": self.last_error}
-        for key in keys:
-            self.pending.pop(key, None)
+        failed = bool(summary.get("problems")) or any(
+            isinstance(v, dict) and (v.get("errors") or v.get("error")) for v in summary.values())
+        self.done(keys, failed=failed)
         self.last_error = None
         self.last_summary = summary
         return summary
+
+    def done(self, keys: list[Key], *, failed: bool) -> None:
+        """Due work ran. A failed step (an acknowledged event's read included) runs it again after
+        ``RETRY_SECONDS``, up to ``MAX_RETRIES`` times; the work is idempotent."""
+        for key in keys:
+            self.pending.pop(key, None)
+            if not failed:
+                self.retries.pop(key, None)
+                continue
+            attempt = self.retries.get(key, 0) + 1
+            if attempt > MAX_RETRIES:
+                self.retries.pop(key, None)
+                continue
+            self.retries[key] = attempt
+            self.due(key, RETRY_SECONDS)
 
     def work(self, keys: list[Key]) -> dict[str, Any]:
         from . import gate_feedback
@@ -432,6 +486,9 @@ class Daemon:
                         step(f"pull_{kind}s", lambda kind=kind: notion.pull(kind))
             if targets:   # also with a full pass: its selection may leave the event's page out
                 step("event_comments", lambda: notion.poll_comments(targets=targets))
+            pages = [k[1] for k in keys if k[0] == "page"]
+            if pages:
+                step("event_pages", lambda: {"read": [notion.refresh_page(p) for p in pages]})
         if kanban is not None:
             if names & {"local", "kanban", "claims"}:
                 gate_feedback.kanban_send_steps(step, conn, cfg, kanban)
@@ -459,7 +516,17 @@ class Daemon:
         restarted every minute, each run reporting the failure)."""
         if self.conn is None:
             return False
-        ready = self.ready_feedback()
+        try:
+            with file_lock(lock_path(self.cfg.home, "workspace"), blocking=True, timeout=self.lock_timeout,
+                           shared=True):
+                if not self.schema_ok():
+                    return False
+                ready = self.ready_feedback()
+        except LockBusy:
+            return False
+        except sqlite3.Error as exc:
+            self.last_error = f"wake check failed: {type(exc).__name__}: {str(exc)[:200]}"
+            return False
         if not ready:
             return False
         last = self.last.get("wake")
