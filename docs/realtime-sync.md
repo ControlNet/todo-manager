@@ -40,7 +40,7 @@ keeps the model runs and becomes the fallback and reconciliation path. The daemo
 model.
 
 ```text
-Notion ──HTTPS (Tailscale Funnel)──▶ receiver (127.0.0.1) ── verify ──▶ event queue
+Notion ──HTTPS (Cloudflare Tunnel)──▶ receiver (127.0.0.1) ── verify ──▶ event queue
 local DB writes (CLI, agents)  ── PRAGMA data_version, every 1–2 s ──▶ event queue
 board kanban.db / -wal mtime   ── stat, every 1–2 s ─────────────────▶ event queue
                                                                           │
@@ -138,9 +138,12 @@ it bounds the fallback latency when the daemon is down.
 Security bar agreed with the user: no unauthenticated access; no further hardening.
 
 - `ThreadingHTTPServer` on `127.0.0.1:<daemon.port>`, `POST /notion` only, body cap 1 MiB.
-- Public URL through Tailscale Funnel (1.102.2 on this host supports `--set-path`), run by the
-  user because it is outward-facing; `install` prints the exact command and `health` checks
-  `tailscale funnel status --json`.
+- Public URL through a Cloudflare Tunnel (remotely managed connector), set up by the user
+  because it is outward-facing: `cloudflared` as its own system service (`cloudflared service
+  install <token>`; the token stays in its unit, never in this repo) and a public hostname on a
+  Cloudflare domain with path `^/notion$` → `http://127.0.0.1:<daemon.port>`. No Cloudflare
+  Access in front (Notion cannot authenticate to it); the signature is the key. `health` checks
+  that the `cloudflared` service is active. Tailscale Funnel (`--set-path`) is the alternative.
 - Handshake: while no token is stored, the first POST carrying `verification_token` is accepted
   and the token saved (`state/notion-webhook-token`, mode 0600, excluded from exports and logs);
   `todo-manager daemon status` shows it for the user to paste into Notion's Verify dialog.
@@ -160,8 +163,9 @@ Security bar agreed with the user: no unauthenticated access; no further hardeni
 4. The feedback gate is the outer watchdog: the daemon stamps `daemon.alive_at` every 30 s; a
    stale stamp makes the gate try `systemctl --user restart todo-manager-daemon`, report it in
    `health` and the home callout, and take over the Notion steps.
-5. End to end: our own Notion writes produce events. Writes in the last
-   `daemon.webhook_silence_minutes` with no event at all mean the Funnel or the subscription is
+5. End to end: our own Notion writes produce events (to be confirmed at go-live; if they do
+   not, user activity without events is the signal). Writes in the last
+   `daemon.webhook_silence_minutes` with no event at all mean the tunnel or the subscription is
    broken; reported, and the gate takes over comment polling.
 
 Down for minutes: Notion retries, nothing is lost. Down for longer: the gate's polling covers it.
@@ -196,7 +200,9 @@ Down for minutes: Notion retries, nothing is lost. Down for longer: the gate's p
   event → action mapping, own-author drop, unknown page ignore, debounce, dedupe by event id,
   `data_version` trigger, gate skips Notion steps while healthy and takes over when stale,
   wake rate limit.
-- A real webhook check uses a separate test integration and test pages, never the production
-  workspace.
+- Development and acceptance run against the fake Notion (`tests/fake_notion.py`, extended with
+  signed webhook deliveries); no test integration is used for now. The first real webhook is
+  the go-live: subscription, handshake and the unverified assumptions (own writes produce
+  events, payload fields as documented) are checked then, with the gate still polling.
 - Targets after phase 2: drag applied ≤ ~1 min (Notion aggregation), comment noticed ≤ ~10 s,
   agent reply visible ≤ ~10 s after the agent's command, idle feedback gate a few seconds.
