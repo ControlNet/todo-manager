@@ -263,6 +263,46 @@ Keys that no longer have an effect (`status --details` names them while `config.
 | `wake.over_budget`, `feedback.over_budget` | an over-budget context is clipped with pointers and the run goes ahead |
 | `wake.max_questions_per_run` | when to ask is a preference in the workspace `PREFERENCES.md` |
 
+## Real-time sync daemon
+
+Optional and off by default. With it, Notion comments and drags are picked up within seconds
+(property events within about a minute), local writes and card events reach Notion at once, and
+the feedback gate only claims feedback. Design: [realtime-sync.md](realtime-sync.md).
+
+Turn it on:
+
+```bash
+# 1. The unit and the receiver (loopback only); the daemon polls Notion until step 3 is done.
+todo-manager config set daemon.enabled true
+todo-manager install                 # shows and then writes ~/.config/systemd/user/todo-manager-daemon.service
+todo-manager daemon status           # expect "healthy": true, "unit": "active", "token": false, "mode": "polling"
+
+# 2. Public entry (outward-facing: run it yourself). Cloudflare Tunnel connector:
+#    install cloudflared and `sudo cloudflared service install <TUNNEL_TOKEN>`, then add a public
+#    hostname with path ^/notion$ -> http://127.0.0.1:8655
+systemctl is-active cloudflared      # expect: active
+
+# 3. Notion: integration settings -> Webhooks -> Create subscription
+#    URL https://<your hostname>/notion; events: comment created/updated/deleted, page created /
+#    properties updated / content updated / moved / deleted / undeleted (the integration needs
+#    the "read comments" capability). Notion sends the verification token to the daemon:
+todo-manager daemon token            # paste it into Verify
+todo-manager daemon status           # expect "token": true, "mode": "webhook"; comment on a task:
+                                     # "accepted" grows and the comment is read within seconds
+```
+
+Turn it off: `todo-manager config set daemon.enabled false && todo-manager install` (stops and
+removes the unit; the gate syncs again at its next run). `pause` stops the two cron jobs only:
+the daemon keeps syncing but no longer starts the feedback job; stop it as well with
+`systemctl --user stop todo-manager-daemon`.
+
+Checks: `todo-manager daemon status` (state, mode, last delivery, bad signatures, last error);
+`journalctl --user -u todo-manager-daemon` (start-up line and crashes; requests are not logged).
+`health` and the home callout report the `daemon` channels: `alive` (the gate found the daemon
+stale, on other code or waiting for install, and synced itself) and `webhook` (our writes
+produced no deliveries: tunnel or subscription broken; the daemon polls meanwhile). After code
+updates the daemon restarts itself; after a schema upgrade it waits for `todo-manager install`.
+
 ## Migrating an older Notion todo system
 
 The migration is proposal-based and read-only on the old pages:

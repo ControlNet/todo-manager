@@ -21,6 +21,7 @@ source show|search|dismiss|defer
 feedback list|show|record|resolve
 delegate list|show|create|message|answer|approve
 run show|done
+daemon run|status|token|reset-token|restart
 ```
 
 Business responses are JSON, including list/show. `run show --context` deliberately returns the
@@ -274,3 +275,13 @@ The original Notion list remains available as another tab; the new property/boar
 unused without deleting tasks. Remote UI changes are not reverted by SQLite restore. The saved
 schema/view JSON records the original structure for a deliberate native Notion restoration.
 No credentials or private task text belong in source-control migration reports.
+
+## Real-time sync daemon
+
+`daemon run` is what the systemd unit runs; it refuses while `daemon.enabled` is false and never
+takes the workspace lock for its lifetime (only per cycle), so `install` is not blocked. `daemon
+status` prints health, unit and `cloudflared` state, whether a webhook token is stored and the
+daemon's last status, never the token itself; `daemon token` prints the token for Notion's
+Verify dialog; `daemon reset-token` forgets it for a recreated subscription; `daemon restart`
+restarts the unit. `sync` and the feedback gate share the `sync` lock with the daemon. See
+[realtime-sync.md](realtime-sync.md).

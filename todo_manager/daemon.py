@@ -44,6 +44,7 @@ STALE_SECONDS = 90
 CODE_CHECK_SECONDS = 10
 CODE_SETTLE_SECONDS = 10
 WAKE_INTERVAL_SECONDS = 60
+UNCLAIMED_WAKE_MINUTES = 5   # the same feedback still unclaimed after a wake: as often as the cron job
 CLAIMS_MINUTES = 1
 HOME_MINUTES = 5
 REVIVE_MINUTES = 10
@@ -219,6 +220,7 @@ class Daemon:
         self.last_error: str | None = None
         self.last_summary: dict[str, Any] = {}
         self.silent = False
+        self.woken_for: frozenset[str] = frozenset()
 
     # ------------------------------------------------------------ settings
     def setting(self, key: str, default: Any) -> Any:
@@ -404,18 +406,26 @@ class Daemon:
             summary["problems"] = problems
         return summary
 
-    def ready_feedback(self) -> int:
+    def ready_feedback(self) -> frozenset[str]:
         assert self.conn is not None
         items = feedback.pending(self.conn, stale_minutes=int(self.cfg.get("feedback.stale_claim_minutes", 60)))
-        return sum(1 for f in items if not ops.not_ready(self.conn, self.cfg, f))
+        return frozenset(f["id"] for f in items if not ops.not_ready(self.conn, self.cfg, f))
 
     def maybe_wake(self) -> bool:
-        if self.conn is None or not self.ready_feedback():
+        """Start the feedback job for claimable feedback: at most once a minute, and no more
+        often than its own schedule while the same items stay unclaimed (a failing gate is not
+        restarted every minute, each run reporting the failure)."""
+        if self.conn is None:
+            return False
+        ready = self.ready_feedback()
+        if not ready:
             return False
         last = self.last.get("wake")
-        if last is not None and clock.now() - last < timedelta(seconds=WAKE_INTERVAL_SECONDS):
+        gap = timedelta(minutes=UNCLAIMED_WAKE_MINUTES) if ready <= self.woken_for \
+            else timedelta(seconds=WAKE_INTERVAL_SECONDS)
+        if last is not None and clock.now() - last < gap:
             return False
-        self.last["wake"] = clock.now()
+        self.last["wake"], self.woken_for = clock.now(), ready
         try:
             return bool(self.waker(self.cfg))
         except Exception as exc:  # noqa: BLE001 - the gate's own schedule still runs the job

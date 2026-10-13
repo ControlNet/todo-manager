@@ -72,7 +72,8 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
 
 ## Behaviour
 
-- Notion is polled, not pushed: edits are imported within ~5 minutes; comments on pages
+- Without the real-time sync daemon (off by default, [realtime-sync.md](realtime-sync.md)),
+  Notion is polled, not pushed: edits are imported within ~5 minutes; comments on pages
   without recent activity are polled round-robin (default hourly), so a comment there can take
   up to that long to be noticed. Read every run (one request per page): agent work, a user
   comment in the last 7 days, a user edit of the page in the last 2 hours. Read every 30 minutes:
@@ -202,8 +203,14 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
   are handled by the existing feedback sync; there is no custom task-graph executor.
 - The migration importer knows one legacy schema (`migration.LEGACY`); other legacy databases
   need that mapping adapted.
-- Not supported by design: Zoom transcripts, Notion webhooks, paid Notion features, a model
-  call per commit, reading chat logs as cron input.
+- Not supported by design: Zoom transcripts, paid Notion features, a model call per commit,
+  reading chat logs as cron input.
+- The daemon's Notion webhook is tested against the fake Notion only. That our own writes produce
+  deliveries (its liveness signal), payload fields beyond the documented examples and the
+  Cloudflare Tunnel mapping are checked only at go-live. Property and page events are aggregated
+  by Notion (usually under a minute, up to 5); comment events arrive in seconds. A webhook
+  reaches only pages the integration can access. While the subscription is unverified or
+  silent the daemon polls Notion like the gate.
 
 ## Security
 

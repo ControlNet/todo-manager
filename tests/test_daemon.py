@@ -163,15 +163,53 @@ class WakeTests(DaemonCase):
         self.assertFalse(self.d.maybe_wake())
         self.assertEqual(self.wakes, [])
 
-    def test_at_most_one_wake_a_minute(self):
-        feedback.record(self.conn, kind="direct", origin="cli", source_id="c1", text="把截止日期改到周五",
+    def record(self, source_id):
+        feedback.record(self.conn, kind="direct", origin="cli", source_id=source_id, text="把截止日期改到周五",
                         author_is_user=True, scope_type="task", scope_id=self.task)
+
+    def test_at_most_one_wake_a_minute(self):
+        self.record("c1")
         self.assertTrue(self.d.maybe_wake())
         clock.advance(seconds=30)
+        self.record("c2")
         self.assertFalse(self.d.maybe_wake())
         clock.advance(seconds=31)
-        self.assertTrue(self.d.maybe_wake())
+        self.assertTrue(self.d.maybe_wake(), "new feedback since the last wake")
         self.assertEqual(len(self.wakes), 2)
+
+    def test_feedback_that_stays_unclaimed_is_not_woken_for_every_minute(self):
+        self.record("c1")
+        self.assertTrue(self.d.maybe_wake())
+        clock.advance(minutes=2)
+        self.assertFalse(self.d.maybe_wake(), "the gate did not claim it: wait for the job's own schedule")
+        clock.advance(minutes=3)
+        self.assertTrue(self.d.maybe_wake())
+
+
+class HermesWakeTests(DaemonCase):
+    def jobs(self, **feedback_job):
+        path = self.tmp / "hermes" / "cron" / "jobs.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"jobs": [{"id": "j1", "name": "todo-manager-feedback", "enabled": True,
+                                              "state": "scheduled", **feedback_job}]}))
+
+    def wake_with(self):
+        from unittest import mock
+        from todo_manager import hermes_install
+        with mock.patch.object(hermes_install.Installer, "hermes", autospec=True, return_value="") as run:
+            woke = daemon.hermes_wake(self.cfg)
+        return woke, [c.args[1:] for c in run.call_args_list]
+
+    def test_the_feedback_job_is_run_by_id(self):
+        self.jobs()
+        self.assertEqual(self.wake_with(), (True, [("cron", "run", "j1")]))
+
+    def test_a_paused_job_is_not_resumed_by_a_wake(self):
+        self.jobs(enabled=False, state="paused", paused_at="2026-10-13T00:00:00Z")
+        self.assertEqual(self.wake_with(), (False, []))
+
+    def test_no_job_no_wake(self):
+        self.assertEqual(self.wake_with(), (False, []))
 
 
 class WebhookSilenceTests(DaemonCase):

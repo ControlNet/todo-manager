@@ -27,8 +27,11 @@ Notion edits, comments, next_actor=Agent
 ```
 
 There are exactly two scheduled agent entry points. Feedback owns delegation and result sync.
-No delegation cron, execution cron, resident coordinator, model client, dependency executor or
-notification service is introduced. Source quiet windows and minimum model wake intervals are
+No delegation cron, execution cron, model client, dependency executor or notification service is
+introduced. The optional real-time sync daemon ([realtime-sync.md](realtime-sync.md), off by
+default) is the one resident process: it runs the feedback job's deterministic sync steps on
+Notion webhook events, local database changes and board changes, never a model, and asks Hermes
+to run the feedback job when feedback is waiting; while it is healthy the gate only claims. Source quiet windows and minimum model wake intervals are
 independent of cron schedules. Waiting on a person or a future retry does not by itself wake a model.
 
 ## Responsibilities

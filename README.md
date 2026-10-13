@@ -79,8 +79,8 @@ never commit `.env` / `.env.local` files.
   sync rules
 - [docs/board-protocol.md](docs/board-protocol.md) – how delegations use the Hermes Kanban board
 - [docs/acceptance.md](docs/acceptance.md) – acceptance criteria and how each is verified
-- [docs/realtime-sync.md](docs/realtime-sync.md) – proposal: a resident daemon for low-latency
-  two-way Notion sync (webhooks, local change detection)
+- [docs/realtime-sync.md](docs/realtime-sync.md) – optional real-time sync daemon: Notion
+  webhooks, local and board changes synced at once (off by default)
 - [docs/open-decisions.md](docs/open-decisions.md) – proposed defaults and user decisions
 - [docs/limitations.md](docs/limitations.md) – known limitations
 

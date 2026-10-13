@@ -24,11 +24,13 @@ when you ask it in chat, e.g. "wait an hour of Slack silence before analysing" s
 | `feedback.max_attempts` | 3 | Model runs before an unapplied feedback item is marked failed (with a task comment) |
 | `kanban.max_retries` | 1 | A failed worker run parks the card for you instead of a respawn (always 1 for cards allowed an external action) |
 | `health.gate_idle_minutes` | 60 | A gate that has not run this long is reported |
+| `daemon.debounce_seconds` / `kanban_min_interval_seconds` / `reconcile_minutes` / `webhook_silence_minutes` | 3 / 15 / 30 / 10 | Engineering defaults of the daemon: a burst is one read; board changes read cards at most every 15 s; a full Notion pass every 30 min while webhooks arrive; our write without a delivery for 10 min means the webhook is broken |
 
 ## Agreed defaults
 
 | Setting | Default | Effect |
 |---|---|---|
+| `daemon.enabled` | false | The real-time sync daemon ([realtime-sync.md](realtime-sync.md)); public entry through a Cloudflare Tunnel the user runs; authentication is Notion's webhook signature only (no further hardening, 2026-10-13) |
 | `notion.user_edit_hot_hours` / `notion.warm_comment_poll_minutes` | 2 / 30 | Comments on a page you edited are read every run for 2 hours, then every 30 minutes until 48 hours after the edit; new open tasks and change notes every 30 minutes for 48 hours. Agent work and pages with your comment of the last week stay every run (2026-10-13: all of a day's comments were on pages with agent work, while new tasks made up most of the 55 pages read every run) |
 | `slack.quiet_minutes` | 30 | A Slack conversation matures only after 30 quiet minutes (change it freely; no floor) |
 | `slack.active_hours` / `slack.quiet_poll_minutes` | 168 / 30 | A Slack conversation with a human (non-bot) message in the last 7 days is read every run; quieter ones about every 30 minutes (staggered), so all DMs and channels stay within Slack's rate limits. A new message in a long-quiet conversation is seen within ~30 minutes, before the 30 quiet minutes of batching |
