@@ -6,17 +6,23 @@ share a timestamp; no precision of the real API is assumed), property ids, selec
 markdown body search-and-replace, unresolved-comment listing, ``in_trash``) and can
 inject faults (errors, lost write responses). It is NOT evidence that the real API
 behaves the same; real behaviour is checked separately against a sandbox page.
+
+Every change also records the webhook event Notion would send (``events``; ``deliveries``
+signs them), shaped after the documented payloads: ``entity``, ``authors`` (person or bot),
+``data.page_id`` for comments. Aggregation and delivery delays of the real service are not
+imitated.
 """
 
 from __future__ import annotations
 
 import copy
 import itertools
+import json
 import re
 import uuid
 from typing import Any
 
-from todo_manager import clock
+from todo_manager import clock, webhook
 from todo_manager.net import HttpError, HttpTimeout
 
 BOT_ID = "bot-0000"
@@ -66,6 +72,7 @@ class FakeNotion:
         self.uploads: dict[str, dict[str, Any]] = {}   # file upload id -> {filename, content_type, data, status}
         self.max_upload_bytes: int | None = None        # bot workspace limit (None: not reported)
         self.people: list[dict[str, Any]] = [{"object": "user", "id": USER_ID, "type": "person", "name": "Me"}]
+        self.events: list[dict[str, Any]] = []   # webhook events, oldest first
         self._ids = itertools.count(1)
 
     # ------------------------------------------------------------------ helpers
@@ -93,9 +100,24 @@ class FakeNotion:
             at = len(blocks)
         blocks[at:at] = new
 
-    def _touch(self, page: dict[str, Any], who: str) -> None:
+    def _touch(self, page: dict[str, Any], who: str, event: str = "page.properties_updated") -> None:
         page["last_edited_time"] = clock.iso() if self.precise_times else _minute(clock.iso())
         page["last_edited_by"] = {"object": "user", "id": who}
+        self._event(event, page["id"], "page", who, {"parent": copy.deepcopy(page["parent"])})
+
+    def _event(self, kind: str, entity_id: str, entity_type: str, who: str, data: dict[str, Any]) -> None:
+        self.events.append({"id": str(uuid.uuid4()), "timestamp": clock.iso(), "workspace_id": "ws-fake",
+                            "subscription_id": "sub-fake", "integration_id": "int-fake", "type": kind,
+                            "authors": [{"id": who, "type": "bot" if who == BOT_ID else "person"}],
+                            "entity": {"id": entity_id, "type": entity_type}, "data": data, "attempt_number": 1})
+
+    def deliveries(self, token: str, since: int = 0) -> list[tuple[bytes, dict[str, str]]]:
+        """The webhook requests for ``events[since:]``: raw body and headers, signed with ``token``."""
+        out = []
+        for event in self.events[since:]:
+            body = json.dumps(event).encode()
+            out.append((body, {"Content-Type": "application/json", webhook.SIGNATURE_HEADER: webhook.sign(token, body)}))
+        return out
 
     def _prop_id(self, ds: dict[str, Any], key: str) -> str:
         if key in ds["by_id"]:
@@ -175,6 +197,7 @@ class FakeNotion:
             if c["id"] == comment_id:
                 c["rich_text"] = [{"type": "text", "text": {"content": text}, "plain_text": text}]
                 c["last_edited_time"] = _minute(clock.iso())
+                self._event("comment.updated", c["id"], "comment", USER_ID, self._comment_data(c))
 
     def resolve_discussion(self, discussion_id: str, resolved: bool = True) -> None:
         for c in self.comments:
@@ -184,15 +207,18 @@ class FakeNotion:
     def user_delete_comment(self, comment_id: str) -> None:
         """ASSUMPTION (not verified against the real API): a deleted comment disappears from the
         list and ``GET /v1/comments/{id}`` answers 404; a resolved one is unlisted but retrievable."""
+        for c in self.comments:
+            if c["id"] == comment_id:
+                self._event("comment.deleted", c["id"], "comment", USER_ID, self._comment_data(c))
         self.comments = [c for c in self.comments if c["id"] != comment_id]
 
     def user_set_markdown(self, page_id: str, markdown: str, author: str = USER_ID) -> None:
         self.markdown[page_id] = markdown
-        self._touch(self.pages[page_id], author)
+        self._touch(self.pages[page_id], author, "page.content_updated")
 
     def user_trash(self, page_id: str, trashed: bool = True, author: str = USER_ID) -> None:
         self.pages[page_id]["in_trash"] = trashed
-        self._touch(self.pages[page_id], author)
+        self._touch(self.pages[page_id], author, "page.deleted" if trashed else "page.undeleted")
 
     def prop(self, page_id: str, name: str) -> Any:
         raw = self.pages[page_id]["properties"].get(name)
@@ -237,8 +263,8 @@ class FakeNotion:
                 elif schema["type"] != "last_edited_time":
                     page["properties"][name] = {"id": schema["id"], "type": schema["type"], schema["type"]: None}
             self._set_props(page, ds, props)
-        self._touch(page, who)
         self.pages[pid] = page
+        self._touch(page, who, "page.created")
         self.markdown[pid] = markdown or ""
         return page
 
@@ -250,7 +276,13 @@ class FakeNotion:
                    "last_edited_time": _minute(clock.iso()), "created_by": {"object": "user", "id": author},
                    "rich_text": [{"type": "text", "text": {"content": text}, "plain_text": text}], "resolved": False}
         self.comments.append(comment)
+        self._event("comment.created", comment["id"], "comment", author, self._comment_data(comment))
         return comment
+
+    @staticmethod
+    def _comment_data(comment: dict[str, Any]) -> dict[str, Any]:
+        page_id = comment["parent"]["page_id"]
+        return {"page_id": page_id, "parent": {"id": page_id, "type": "page"}}
 
     # ------------------------------------------------------------------ transport
     def __call__(self, method: str, path: str, params: dict[str, Any] | None, body: Any) -> Any:
@@ -519,7 +551,7 @@ class FakeNotion:
             elif kind == "replace_content":
                 current = body["replace_content"]["new_str"]
             self.markdown[pid] = autolinked(current) if self.autolink else current
-            self._touch(page, BOT_ID)
+            self._touch(page, BOT_ID, "page.content_updated")
             text = current                    # the response shows the content as sent
         else:
             text = self.markdown[pid]
