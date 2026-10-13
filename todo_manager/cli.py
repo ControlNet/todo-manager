@@ -163,23 +163,16 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         print(token)
         return 0
     if args.action == "enroll":
-        try:
-            until = webhook.enroll(cfg.home, args.minutes or webhook.ENROLL_MINUTES)
-        except LockBusy:
-            return _fail("BUSY", "the daemon is storing a token right now; retry shortly")
-        except webhook.TokenExists:
+        if webhook.load_token(cfg.home) is not None:
             return _fail("TOKEN_EXISTS", "a verification token is stored; `todo-manager daemon reset-token` first"
                                          " if the subscription was recreated")
-        _print({"enroll_until": until,
+        _print({"enroll_until": webhook.open_enrollment(cfg.home, args.minutes or webhook.ENROLL_MINUTES),
                 "next": "create the subscription in Notion (or press Resend) before then; its first request"
                         " stores the token, then `todo-manager daemon token`"})
         return 0
     if args.action == "reset-token":
-        try:
-            reset, until = webhook.reset_and_enroll(cfg.home)
-        except LockBusy:
-            return _fail("BUSY", "the daemon is storing a token right now; retry shortly")
-        _print({"reset": reset, "enroll_until": until,
+        reset = webhook.reset_token(cfg.home)
+        _print({"reset": reset, "enroll_until": webhook.open_enrollment(cfg.home),
                 "next": "recreate the subscription in Notion before then; its first request stores the new token"})
         return 0
     if args.action == "restart":

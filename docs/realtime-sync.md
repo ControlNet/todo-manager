@@ -157,8 +157,7 @@ signature; the handshake that delivers the signing key is only accepted while en
   The accepted handshake saves the token (`state/notion-webhook-token`, mode 0600, not printed by
   `status` or logs) and closes enrollment; `todo-manager daemon token` prints it for Notion's
   Verify dialog. Once stored, a second handshake is refused; `todo-manager daemon reset-token`
-  clears it and opens enrollment for a recreated subscription. Token and enrollment change
-  under one lock shared by the daemon and the CLI (`state/locks/webhook-token.lock`). If a token you did not expect was
+  clears it and opens enrollment for a recreated subscription. If a token you did not expect was
   stored (Notion's Verify rejects it), run `daemon reset-token` and press Resend in Notion.
 - Every other request must carry `X-Notion-Signature: sha256=<hex HMAC-SHA256 of the raw body,
   keyed with the token>` (constant-time compare); otherwise 401, counted in the status.
@@ -240,7 +239,7 @@ behaves as before except for the smaller set of pages read every run.
 
 - `tests/test_comment_polling.py`: which pages are read every run, every warm interval, round-robin.
 - `tests/test_webhook.py`: handshake only during open enrollment (refused before, after expiry,
-  after the accepted one; a reset during a handshake keeps its window), owner-only token, a second handshake refused (also two at once), signature
+  after the accepted one), owner-only token, a second handshake refused (also two at once), signature
   accept/reject, tampered body, retries deduplicated, bot-only marking, HTTP surface (path,
   method, body cap) on an ephemeral loopback port.
 - `tests/test_daemon.py`: a comment reads only its page and wakes once; a burst is one read; own
