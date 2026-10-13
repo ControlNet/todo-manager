@@ -123,6 +123,21 @@ DEFAULTS: dict[str, Any] = {
     "health": {
         "gate_idle_minutes": 60,  # a gate that has not run this long is reported
     },
+    # The real-time sync daemon (docs/realtime-sync.md). Off until the Notion webhook and the
+    # tunnel are set up; `install` writes and starts its systemd user unit when on.
+    "daemon": {
+        "enabled": False,
+        "webhook": True,  # serve the Notion webhook (false: local changes and Kanban only, Notion polled)
+        "host": "127.0.0.1",
+        "port": 8655,
+        "path": "/notion",
+        "debounce_seconds": 3,  # per page and kind of read: a burst of events is one read
+        "kanban_min_interval_seconds": 15,  # board changes read the cards at most this often
+        "kanban_poll_minutes": 5,  # cards read on a timer as well
+        "reconcile_minutes": 30,  # full Notion pass while webhooks arrive
+        "webhook_silence_minutes": 10,  # our write without any event this long: webhook reported broken
+        "unit_dir": "",  # "" = ~/.config/systemd/user
+    },
     # The Hermes installation and what `install` sets on new cron jobs ("" = Hermes' default).
     # A model, provider or reasoning effort changed on a job in Hermes is kept by later upgrades.
     "hermes": {

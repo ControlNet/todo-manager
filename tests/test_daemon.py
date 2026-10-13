@@ -292,6 +292,21 @@ class StatusTests(DaemonCase):
         self.assertTrue(text.startswith(daemon.UNIT_MARK))
 
 
+class CodeChangeTests(DaemonCase):
+    def test_the_daemon_exits_once_a_source_change_has_settled(self):
+        import threading
+        versions = iter(["v1"] + ["v2"] * 3 + ["v3"] * 1000)   # a pull touches files over a few checks
+        d = daemon.Daemon(self.cfg, notion_factory=lambda conn, cfg: None, kanban_factory=lambda cfg: None,
+                          waker=self.wake, board_db=None, fingerprint=lambda: next(versions))
+        d.code_check_seconds, d.code_settle_seconds = 0, 0.5
+        result = []
+        thread = threading.Thread(target=lambda: result.append(d.run_forever()), daemon=True)
+        thread.start()
+        thread.join(timeout=15)
+        self.assertEqual(result, [0])
+        self.assertEqual(daemon.read_status(self.cfg.home)["state"], "restarting")
+
+
 del GateCase   # imported only as a base
 
 if __name__ == "__main__":

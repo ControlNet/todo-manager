@@ -229,6 +229,7 @@ class Installer:
     paths: Paths
     runner: Runner = subprocess.run
     log: list[str] = field(default_factory=list)
+    systemd: Runner = subprocess.run    # systemctl --user (the sync daemon's unit)
 
     def hermes(self, *args: str) -> str:
         cmd = [self.cfg.get("hermes.bin", "hermes"), *args]
@@ -414,7 +415,60 @@ class Installer:
         actions.append(self.agents_action())
         for entry in JOBS:
             actions += self.job_action(entry, jobs, manifest)
+        actions += self.daemon_actions()
         return actions
+
+    # ---------------------------------------------------------------- sync daemon unit
+
+    def _systemctl(self, *args: str) -> Any:
+        return self.systemd(["systemctl", "--user", *args], capture_output=True, text=True, timeout=60)
+
+    def _unit_active(self) -> bool:
+        from . import daemon
+        try:
+            proc = self._systemctl("is-active", daemon.UNIT_NAME)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return (getattr(proc, "stdout", "") or "").strip() == "active"
+
+    def _start_unit(self) -> None:
+        from . import daemon
+        for args in (("daemon-reload",), ("enable", daemon.UNIT_NAME), ("restart", daemon.UNIT_NAME)):
+            proc = self._systemctl(*args)
+            if getattr(proc, "returncode", 0) != 0:
+                raise RuntimeError(f"systemctl --user {' '.join(args)} failed: {(proc.stderr or proc.stdout or '')[-300:]}")
+
+    def _remove_unit(self, path: Path) -> None:
+        from . import daemon
+        self._systemctl("disable", "--now", daemon.UNIT_NAME)
+        path.unlink(missing_ok=True)
+        self._systemctl("daemon-reload")
+
+    def _own_unit(self) -> Path | None:
+        from . import daemon
+        path = daemon.unit_path(self.cfg)
+        text = _read(path)
+        if text and generated_mark(text, daemon.UNIT_MARK) and repr(str(self.paths.todo_home)) in text:
+            return path
+        return None
+
+    def daemon_actions(self) -> list[Action]:
+        """The systemd user unit of the sync daemon: written and (re)started while
+        ``daemon.enabled``, stopped and removed when it is turned off."""
+        from . import daemon
+        if not self.cfg.get("daemon.enabled"):
+            own = self._own_unit()
+            return [Action("remove", str(own), "stop and remove the sync daemon (daemon.enabled is false)",
+                           run=lambda: self._remove_unit(own))] if own else []
+        path = daemon.unit_path(self.cfg)
+        unit = self.file_action(path, daemon.unit_text(self.paths.launcher, self.paths.todo_home), daemon.UNIT_MARK)
+        if unit.kind == "conflict":
+            return [unit]
+        if unit.kind == "noop" and self._unit_active():
+            return [unit]
+        verb = "restart" if unit.kind == "update" else "start"
+        return [unit, Action("update", daemon.UNIT_NAME, f"systemctl --user daemon-reload, enable and {verb}"
+                                                         " the sync daemon", run=self._start_unit)]
 
     def apply(self, actions: list[Action]) -> list[str]:
         """Carry out the plan (the caller confirmed the actions that ``changes``) and record what
@@ -485,6 +539,10 @@ class Installer:
                 actions.append(Action("remove", str(path), "remove generated file", run=path.unlink))
             else:
                 actions.append(Action("keep", str(path), "not written by todo-manager; left in place"))
+        own = self._own_unit()
+        if own is not None:
+            actions.append(Action("remove", str(own), "stop and remove the sync daemon unit",
+                                  run=lambda: self._remove_unit(own)))
         up, path = skill_upgrade(self.paths, jobs)
         if path is not None:
             installed = self.paths.store.baseline(SKILL_FILE, self.paths.legacy_skill_baseline)

@@ -137,6 +137,9 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
                     + config.removed_keys(cfg.home))
     out["conventions_problems"] = prefs.problems(cfg.home) + hermes_install.context_problems(cfg)
     out["notion_ready"] = bool(get_meta(conn, "notion.tasks_data_source_id") or cfg.get("notion.tasks_data_source_id"))
+    if cfg.get("daemon.enabled"):
+        from . import daemon   # its problems are the "daemon" channels above (alive, webhook)
+        out["daemon"] = daemon.health_of(cfg)
     if cfg.get('kanban.enabled'):
         from .kanban import BridgeKanban, KanbanError
         try:

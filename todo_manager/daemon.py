@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import queue
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -107,6 +108,7 @@ def unit_path(cfg: Config) -> Path:
 
 def unit_text(launcher: Path, todo_home: Path) -> str:
     return f"""{UNIT_MARK}
+# workspace: {str(todo_home)!r}
 [Unit]
 Description=Todo Manager real-time sync (Notion webhooks, local changes, Kanban)
 After=network-online.target
@@ -194,7 +196,7 @@ class Daemon:
     def __init__(self, cfg: Config, *, notion_factory: Callable[[sqlite3.Connection, Config], Any] | None = None,
                  kanban_factory: Callable[[Config], Any] | None = None,
                  waker: Callable[[Config], bool] | None = None, board_db: Path | None = None,
-                 stats: webhook.Stats | None = None) -> None:
+                 stats: webhook.Stats | None = None, fingerprint: Callable[[], str] = code_fingerprint) -> None:
         from . import wiring
         self.cfg = cfg
         self.events: "queue.Queue[webhook.Event]" = queue.Queue()
@@ -205,7 +207,9 @@ class Daemon:
         self.stats = stats or webhook.Stats()
         self.conn: sqlite3.Connection | None = None
         self.state = "starting"
-        self.code = code_fingerprint()
+        self.fingerprint = fingerprint
+        self.code = fingerprint()
+        self.code_check_seconds, self.code_settle_seconds = CODE_CHECK_SECONDS, CODE_SETTLE_SECONDS
         self.started_at = clock.iso()
         self.pending: dict[Key, datetime] = {}
         self.last: dict[str, datetime] = {}
@@ -455,11 +459,11 @@ class Daemon:
                 self.heartbeat()
                 sd_notify("WATCHDOG=1")
                 if time.monotonic() >= next_code_check:
-                    next_code_check = time.monotonic() + CODE_CHECK_SECONDS
-                    current = code_fingerprint()
+                    next_code_check = time.monotonic() + self.code_check_seconds
+                    current = self.fingerprint()
                     if current != seen_code:
                         seen_code, changed_at = current, time.monotonic()
-                    elif changed_at is not None and time.monotonic() - changed_at >= CODE_SETTLE_SECONDS:
+                    elif changed_at is not None and time.monotonic() - changed_at >= self.code_settle_seconds:
                         self.state = "restarting"
                         self.heartbeat(force=True)
                         return 0
@@ -473,6 +477,9 @@ class Daemon:
 
 
 def run(cfg: Config) -> int:
+    # systemd stops the unit with SIGTERM: leave through the ``finally`` blocks (an open
+    # transaction rolls back; all work is idempotent and is done again later).
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     receiver = None
     if cfg.get("daemon.webhook", True):
         receiver = webhook.Receiver(cfg.home, queue.Queue(), host=str(cfg.get("daemon.host", "127.0.0.1")),

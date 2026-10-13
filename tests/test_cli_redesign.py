@@ -24,7 +24,7 @@ class SurfaceTests(unittest.TestCase):
     def test_surface(self):
         parser = cli.build_parser()
         choices = next(a.choices for a in parser._actions if a.dest == 'command')
-        self.assertEqual(set(choices), set('install status config pause resume sync export restore uninstall task project source feedback delegate run'.split()))
+        self.assertEqual(set(choices), set('install status config pause resume sync export restore uninstall task project source feedback delegate run daemon'.split()))
 
     def test_absent_read_does_not_initialize(self):
         with tempfile.TemporaryDirectory() as tmp:

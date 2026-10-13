@@ -17,6 +17,7 @@ import argparse
 import json
 import sys
 import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -142,6 +143,46 @@ def cmd_sync(args: argparse.Namespace) -> int:
         return _fail("BUSY", "a sync is in progress (feedback gate or daemon); retry shortly")
     _print(summary)
     return 1 if problems else 0
+
+
+def cmd_daemon(args: argparse.Namespace) -> int:
+    """The real-time sync daemon (docs/realtime-sync.md)."""
+    from . import daemon, webhook
+    cfg = config.load(args.home)
+    if args.action == "run":
+        if not cfg.get("daemon.enabled"):
+            return _fail("DISABLED", "daemon.enabled is false: the feedback gate syncs; turn it on with"
+                                     " `todo-manager config set daemon.enabled true` and `todo-manager install`")
+        return daemon.run(cfg)
+    if args.action == "token":
+        token = webhook.load_token(cfg.home)
+        if token is None:
+            return _fail("NO_TOKEN", "no verification token yet: create the subscription in Notion; its first"
+                                     " request stores the token here")
+        print(token)
+        return 0
+    if args.action == "reset-token":
+        _print({"reset": webhook.reset_token(cfg.home),
+                "next": "recreate the subscription in Notion; its first request stores the new token"})
+        return 0
+    if args.action == "restart":
+        proc = daemon.systemctl("restart", daemon.UNIT_NAME)
+        if proc.returncode != 0:
+            return _fail("SYSTEMD", (proc.stderr or proc.stdout or "").strip()[-300:])
+        _print({"restarted": daemon.UNIT_NAME})
+        return 0
+    state = daemon.health_of(cfg)
+    try:
+        unit = daemon.systemctl("is-active", daemon.UNIT_NAME).stdout.strip()
+        tunnel = subprocess.run(["systemctl", "is-active", "cloudflared"], capture_output=True, text=True,
+                                timeout=30).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        unit = tunnel = "unknown"
+    _print({**state, "unit": unit, "unit_file": str(daemon.unit_path(cfg)), "cloudflared": tunnel,
+            "token": webhook.load_token(cfg.home) is not None,
+            "listen": f"{cfg.get('daemon.host')}:{cfg.get('daemon.port')}{cfg.get('daemon.path')}",
+            "status": daemon.read_status(cfg.home)})
+    return 0
 
 
 # --------------------------------------------------------------------------- where things are
@@ -619,6 +660,15 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("sync", help="run the Notion/Kanban/outbox sync now (no model)")
     s.set_defaults(fn=cmd_sync)
 
+    s = sub.add_parser("daemon", help="the real-time sync daemon: run, status, webhook token, restart")
+    dms = s.add_subparsers(dest="action", required=True)
+    dms.add_parser("run", help="run in the foreground (what its systemd unit runs)")
+    dms.add_parser("status", help="health, unit, tunnel, webhook token present, last status")
+    dms.add_parser("token", help="print the Notion webhook verification token to paste into Notion's Verify")
+    dms.add_parser("reset-token", help="forget the token (for a recreated subscription)")
+    dms.add_parser("restart", help="systemctl --user restart the daemon")
+    s.set_defaults(fn=cmd_daemon)
+
     s = sub.add_parser("config", help="show or change config.toml settings (sources, quiet windows, sizes)")
     cs = s.add_subparsers(dest="action", required=True)
     x = cs.add_parser("show")
@@ -830,7 +880,9 @@ def main(argv: list[str] | None = None) -> int:
                 return _fail('RESTORE', str(exc))
             if populated and not args.yes:
                 return cmd_restore(args)  # Preview does not even create a lock file.
-        lock = (contextlib.nullcontext() if _inspection(args) or not populated else
+        # The daemon takes the workspace lock per cycle itself: held for its lifetime it would
+        # block `install` forever.
+        lock = (contextlib.nullcontext() if _inspection(args) or not populated or args.command == 'daemon' else
                 file_lock(lock_path(cfg.home, 'workspace'), blocking=True, timeout=120,
                           shared=args.command not in ('restore', 'install')))
         with lock:
