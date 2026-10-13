@@ -1065,15 +1065,24 @@ class NotionSync:
             (closed_since, closed_before, cold_limit)).fetchall(), "closed")
         return list(targets.values())
 
-    def poll_comments(self, cold_limit: int = 30) -> dict[str, int]:
-        """Read the comments of the pages due. A page that is gone is a problem of that page
-        (``problems``); any other failure marks the ``comments`` channel failing until a run
-        reads every due page."""
+    def comment_target(self, page_id: str) -> dict[str, Any] | None:
+        """The comment-poll target of one page we know (a task, a project or the home page)."""
+        if page_id == self.state.home_page_id:
+            return {"page_id": page_id, "entity_type": "home", "entity_id": None, "reason": "event"}
+        row = self.conn.execute("SELECT page_id, entity_type, entity_id FROM notion_pages WHERE page_id=?"
+                                " AND entity_type IN ('task','project') AND trashed=0", (page_id,)).fetchone()
+        return {**dict(row), "reason": "event"} if row else None
+
+    def poll_comments(self, cold_limit: int = 30, targets: list[dict[str, Any]] | None = None) -> dict[str, int]:
+        """Read the comments of the pages due, or of ``targets`` (``comment_target``: pages a
+        webhook named). A page that is gone is a problem of that page (``problems``); any other
+        failure marks the ``comments`` channel failing until a run reads every due page (a run
+        over ``targets`` only reports failures: it did not read every due page)."""
         stats = {"pages": 0, "new": 0, "edited": 0, "errors": 0, "missing": 0, "deleted": 0, "held": 0}
         user_ids = set(self.cfg.get("identity.notion_user_ids") or [])
         failure: str | None = None
         try:
-            for target in self.comment_targets(cold_limit):
+            for target in (self.comment_targets(cold_limit) if targets is None else targets):
                 page_id = target["page_id"]
                 try:
                     comments = self.client.list_comments(page_id)
@@ -1100,7 +1109,8 @@ class NotionSync:
         except Exception as exc:
             health.record_channel(self.conn, "notion", "comments", _describe(exc))
             raise
-        health.record_channel(self.conn, "notion", "comments", failure)
+        if targets is None or failure is not None:
+            health.record_channel(self.conn, "notion", "comments", failure)
         return stats
 
     def _check_missing(self, page_id: str) -> str | None:

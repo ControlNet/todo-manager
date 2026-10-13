@@ -20,6 +20,7 @@ that keeps failing with nothing else to do wakes a short report at most once a d
 from __future__ import annotations
 
 import sqlite3
+import subprocess
 from datetime import timedelta
 from typing import Any, Callable
 
@@ -27,10 +28,11 @@ from . import clock, context, delegation, feedback, health, i18n, ops, outbox, p
 from .config import Config
 from .db import tx
 from .gate_intake import IDLE, GateError, problems_due
+from .locks import LockBusy, file_lock, lock_path
 from .notion import schema
 
 Step = Callable[[], Any]
-SOURCE_SCOPES = ("gmail", "slack", "github", "commit", "notion", "kanban")
+SOURCE_SCOPES = ("gmail", "slack", "github", "commit", "notion", "kanban", "daemon")
 # Steps whose failures are kept as channel health here (``health.record_channel``). The Notion
 # pulls and the comment poll record their own (``notion``/``projects``, ``tasks``, ``bodies``,
 # ``comments``) since a partly failed pass does not raise.
@@ -78,7 +80,8 @@ def freshness_sections(conn: sqlite3.Connection, cfg: Config, lang: str | None =
     local = clock.local_dt(cfg.tz)
     lines: list[tuple[str, str]] = []
     for source, scopes in health.stale_sources(conn, SOURCE_SCOPES).items():
-        label = t("home.kanban_label") if source == "kanban" else schema.label("source", source, lang)
+        label = (t("home.kanban_label") if source == "kanban" else t("home.daemon_label") if source == "daemon"
+                 else schema.label("source", source, lang))
         for r in scopes:
             when = (f"{clock.local_dt(cfg.tz, clock.parse(r['last_success_at'])):%m-%d %H:%M}"
                     if r["last_success_at"] else t("home.never_succeeded"))
@@ -102,6 +105,44 @@ def freshness_sections(conn: sqlite3.Connection, cfg: Config, lang: str | None =
     return {"extra": [(t("home.status"), status), *lines, (t("home.last_checked"), f"{local:%Y-%m-%d %H}:00")]}
 
 
+def notion_pull_steps(step: Callable[[str, Step], Any], notion: Any, cfg: Config) -> None:
+    """Notion -> local: property edits (projects, then tasks, with body reads) and comments."""
+    step("pull_projects", lambda: notion.pull("project"))
+    step("pull_tasks", lambda: notion.pull("task"))
+    step("comments", lambda: notion.poll_comments(int(cfg.get("notion.cold_comment_pages_per_run", 30))))
+
+
+def kanban_send_steps(step: Callable[[str, Step], Any], conn: sqlite3.Connection, cfg: Config, kanban: Any) -> None:
+    """Local -> board: queued messages, cards of new delegations, parked cards whose time has come."""
+    step("kanban_messages", lambda: delegation.send_messages(conn, cfg, kanban))
+    step("kanban_submit", lambda: delegation.submit_pending(conn, cfg, kanban))
+    step("kanban_start", lambda: delegation.start_due(conn, cfg, kanban))
+
+
+def kanban_read_steps(step: Callable[[str, Step], Any], conn: sqlite3.Connection, cfg: Config, kanban: Any) -> None:
+    """Board -> local: card events (questions, deliveries, failures) and the board's switches."""
+    step("kanban_cards", lambda: delegation.sync_cards(conn, cfg, kanban))
+    step("kanban_settings", lambda: delegation.observe_settings(conn, kanban))
+
+
+def push_steps(step: Callable[[str, Step], Any], conn: sqlite3.Connection, notion: Any | None) -> None:
+    """Local -> Notion: the dirty scan, then the outbox."""
+    handlers: dict[tuple[str, str], Any] = {}
+    if notion is not None:
+        step("dirty", notion.enqueue_dirty)
+        handlers.update(notion.handlers())
+    step("outbox", lambda: outbox.process(conn, handlers))
+
+
+def home_step(step: Callable[[str, Step], Any], conn: sqlite3.Connection, cfg: Config, notion: Any,
+              summary: dict[str, Any]) -> None:
+    step("home", lambda: notion.sync_home(freshness_sections(conn, cfg, notion.state.language)))
+    # Kept until the next run replaces them: shown by `health` and the next home page refresh.
+    health.record_problems(conn, "notion", notion.problems)
+    if notion.problems:
+        summary["notion_problems"] = notion.problems[:20]
+
+
 def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None,
              kanban: Any | None) -> tuple[dict[str, Any], list[str]]:
     """Steps 1-4 (no model). ``notion``: a NotionSync or None; ``kanban``: a Kanban client or None."""
@@ -113,29 +154,38 @@ def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None,
 
     step("claims", lambda: fail_exhausted_claims(conn, cfg))
     if notion is not None:
-        step("pull_projects", lambda: notion.pull("project"))
-        step("pull_tasks", lambda: notion.pull("task"))
-        step("comments", lambda: notion.poll_comments(int(cfg.get("notion.cold_comment_pages_per_run", 30))))
+        notion_pull_steps(step, notion, cfg)
     if kanban is not None:
-        step("kanban_messages", lambda: delegation.send_messages(conn, cfg, kanban))
-        step("kanban_submit", lambda: delegation.submit_pending(conn, cfg, kanban))
-        step("kanban_start", lambda: delegation.start_due(conn, cfg, kanban))
-        step("kanban_cards", lambda: delegation.sync_cards(conn, cfg, kanban))
-        step("kanban_settings", lambda: delegation.observe_settings(conn, kanban))
-    handlers: dict[tuple[str, str], Any] = {}
+        kanban_send_steps(step, conn, cfg, kanban)
+        kanban_read_steps(step, conn, cfg, kanban)
+    push_steps(step, conn, notion)
     if notion is not None:
-        step("dirty", notion.enqueue_dirty)
-        handlers.update(notion.handlers())
-    step("outbox", lambda: outbox.process(conn, handlers))
-    if notion is not None:
-        step("home", lambda: notion.sync_home(freshness_sections(conn, cfg, notion.state.language)))
-        # Kept until the next run replaces them: shown by `health` and the next home page refresh.
-        health.record_problems(conn, "notion", notion.problems)
-        if notion.problems:
-            summary["notion_problems"] = notion.problems[:20]
+        home_step(step, conn, cfg, notion, summary)
     if problems:
         summary["problems"] = problems
     return summary, problems
+
+
+def sync_or_leave(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None, kanban: Any | None,
+                  runner: Callable[..., Any] = subprocess.run) -> dict[str, Any]:
+    """Steps 1-4, unless a healthy daemon does them (docs/realtime-sync.md). A daemon that is
+    enabled but unhealthy is reported (and its unit restarted) and the gate syncs as before. The
+    ``sync`` lock keeps the gate, the daemon and ``todo-manager sync`` from syncing at once."""
+    from . import daemon
+    state = daemon.health_of(cfg)
+    if state["healthy"]:
+        health.record_channel(conn, "daemon", "alive", None)
+        return {"sync": "daemon"}
+    if state["enabled"]:
+        daemon.revive(conn, cfg, state["reason"], runner)
+    try:
+        with file_lock(lock_path(cfg.home, "sync")):
+            summary, _ = sync_all(conn, cfg, notion=notion, kanban=kanban)
+    except LockBusy:
+        return {"sync": "busy"}
+    if state["enabled"]:
+        summary["daemon"] = state["reason"]
+    return summary
 
 
 def fit_context(conn: sqlite3.Connection, cfg: Config, run_id: str, items: list[dict[str, Any]],
@@ -157,7 +207,7 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None,
     run_id = runs.start(conn, "feedback")
     summary: dict[str, Any] = {}
     try:
-        summary, _ = sync_all(conn, cfg, notion=notion, kanban=kanban)
+        summary = sync_or_leave(conn, cfg, notion=notion, kanban=kanban)
         problems = problems_due(conn, cfg, "feedback", ("notion", "kanban", "gate"))
         if problems:
             summary["problems_reported"] = [f"{p['source']}:{p['scope']}" for p in problems]

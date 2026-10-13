@@ -136,10 +136,10 @@ def cmd_sync(args: argparse.Namespace) -> int:
     from .locks import LockBusy, file_lock, lock_path
     cfg, conn = _open(args)
     try:
-        with file_lock(lock_path(cfg.home, "feedback"), blocking=True, timeout=120):
+        with file_lock(lock_path(cfg.home, "sync"), blocking=True, timeout=120):
             summary, problems = sync_all(conn, cfg, notion=wiring.notion_sync(conn, cfg), kanban=wiring.kanban(cfg))
     except LockBusy:
-        return _fail("BUSY", "a feedback gate run is in progress; retry shortly")
+        return _fail("BUSY", "a sync is in progress (feedback gate or daemon); retry shortly")
     _print(summary)
     return 1 if problems else 0
 

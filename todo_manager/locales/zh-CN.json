@@ -102,6 +102,7 @@
   "home.failed_feedback": "⚠️ 反馈未处理",
   "home.failed_feedback_detail": "近 7 天有 {n} 条反馈处理失败",
   "home.kanban_label": "Hermes 看板",
+  "home.daemon_label": "同步守护进程",
   "home.last_checked": "最近确认",
   "home.marker": "数据新鲜度（由 Todo Manager 维护）",
   "home.never_succeeded": "从未成功",
