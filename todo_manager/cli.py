@@ -85,7 +85,7 @@ def _parse_set(pairs: list[str] | None) -> dict[str, Any]:
         if not sep:
             raise ops.OpError("INVALID", f"--set expects field=value, got {pair!r}")
         key = key.strip()
-        if value == "":
+        if value == "" or value.strip().lower() == "null":
             out[key] = None
         elif key == "focus":
             out[key] = value.lower() in ("1", "true", "yes", "y")
@@ -717,7 +717,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_ctx(x)
     x = ts.add_parser("update")
     x.add_argument("id")
-    x.add_argument("--set", action="append", metavar="FIELD=VALUE", help="repeatable; an empty value clears")
+    x.add_argument("--set", action="append", metavar="FIELD=VALUE", help="repeatable; an empty value (or null) clears")
     x.add_argument("--note", help="change note shown in Notion")
     x.add_argument("--based-on", type=int, help="the task version you read (required in a run)")
     _evidence(x, "context")

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Iterable
 
 from . import clock, ids
@@ -63,6 +64,20 @@ def normalize_state(status: str, next_actor: str | None) -> tuple[str, str]:
         # "someone else acts next" is the definition of waiting.
         return "waiting", "external"
     return status, actor
+
+
+DATE_FIELDS = ("due_date", "follow_up_date", "snooze_until")
+
+
+def _check_dates(values: dict[str, Any]) -> None:
+    for name in DATE_FIELDS:
+        value = values.get(name)
+        if value is None:
+            continue
+        try:
+            datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            raise StoreError(f"{name} must be a date such as 2026-10-15 (empty to clear), got {value!r}") from None
 
 
 @dataclass
@@ -173,6 +188,7 @@ def create_task(conn: sqlite3.Connection, title: str, *, origin: str, actor: str
     status, next_actor = normalize_state(status, next_actor)
     if fields.get("decision") not in (None, "pending", "agree", "decline", "agent"):
         raise StoreError("invalid decision")
+    _check_dates(fields)
     if project_id and conn.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone() is None:
         raise StoreError(f"project {project_id} not found")
     tid = task_id or ids.new_id("task")
@@ -235,6 +251,7 @@ def update_task(conn: sqlite3.Connection, task_id: str, changes: dict[str, Any],
         changes = dict(changes)
         if changes.get("decision") not in (None, "pending", "agree", "decline", "agent"):
             raise StoreError("invalid decision")
+        _check_dates(changes)
         if "focus" in changes:
             changes["focus"] = 1 if changes["focus"] else 0
         if "project_id" in changes and changes["project_id"]:

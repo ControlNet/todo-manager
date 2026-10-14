@@ -41,8 +41,8 @@ def enqueue(conn: sqlite3.Connection, *, target: str, op: str, dedupe_key: str, 
             entity_type: str | None = None, entity_id: str | None = None, supersede_prefix: str | None = None) -> str | None:
     """Queue an effect. Returns the outbox id, or None if the dedupe key already exists.
 
-    ``supersede_prefix`` marks older *pending* effects with that key prefix as superseded
-    (e.g. an older full re-render of the same Notion block that was never sent).
+    ``supersede_prefix`` marks older *pending* or given-up effects with that key prefix as
+    superseded (e.g. an older full re-render of the same Notion block that was never sent).
     """
     now = clock.iso()
     with tx(conn):
@@ -55,7 +55,7 @@ def enqueue(conn: sqlite3.Connection, *, target: str, op: str, dedupe_key: str, 
                 next_attempt = delayed
         if supersede_prefix:
             conn.execute(
-                "UPDATE outbox SET status='superseded', updated_at=? WHERE status IN ('pending','failed')"
+                "UPDATE outbox SET status='superseded', updated_at=? WHERE status IN ('pending','failed','dead')"
                 " AND dedupe_key LIKE ? AND dedupe_key != ?",
                 (now, supersede_prefix + "%", dedupe_key))
         oid = ids.new_id("outbox")
