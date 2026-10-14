@@ -81,9 +81,10 @@ clears the column; so does handling the delivery (accepting it, or Done / My to-
 progress board).
 
 Agent progress (`agent_progress`), the column of the Agent work board: `answer` Needs my answer /
-等我回答 (a question), `review` To review / 待我验收 (a version under review or a delivered result
-not yet handled), `working` In progress / 处理中 (queued, running, paused or a problem: "Agent
-work" tells which), and the user's drags `done` Done / 已完成, `todo` My to-do / 设为待办,
+等我回答 (a question, also on a hand-over the run did not start), `review` To review / 待我验收 (a
+version under review or a delivered result not yet handled), `working` In progress /
+处理中 (a hand-over not yet processed, queued, running, paused or a problem: "Agent work" tells
+which), and the user's drags `done` Done / 已完成, `todo` My to-do / 设为待办,
 `cancel` Cancel / 取消. Empty when the task has no agent work for you to see.
 
 Source: Email / 邮件, Slack, GitHub (issues, PRs and the commit digest), Notion, Matrix, Manual /
@@ -215,6 +216,9 @@ Cancel, Done and My to-do are applied by the import itself (the status changes; 
 the same edit wins; Cancel and Done record "chosen on the decision board" as the closing reason).
 Assign to Agent sets the status to-do and next by Agent and queues a delegation request for the
 feedback run. In every case the choice is then cleared, so the handled card leaves the board.
+A task handed to the agent is on the Agent work board at once: In progress until the run has
+started agent work, or Needs my answer when the run asked a question in a comment instead
+(answering there puts it back to In progress).
 Moving a card never sends RSVPs or other external messages. The older Agree / Decline choices
 are still read and go to the feedback run as before.
 

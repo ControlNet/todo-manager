@@ -7,7 +7,7 @@ Kanban is ``FakeKanban`` and Notion is ``FakeNotion`` (test doubles).
 
 import json
 
-from todo_manager import delegation, store
+from todo_manager import clock, delegation, feedback, ops, store
 from todo_manager.db import get_meta, loads, set_meta
 from todo_manager.kanban import FakeKanban
 from todo_manager.notion import setup
@@ -143,6 +143,58 @@ class DragTests(Board):
         delegation.create(self.conn, self.cfg, task_id=self.task, title="再改一版", goal="Revise")
         self.tick()
         self.assertEqual(self.column(), "处理中")
+
+
+class HandedOverTests(Board):
+    """Assign to Agent on the To decide board: the task is on the Agent board at once, before a
+    run has turned the request into agent work, and stays there if the run asks instead."""
+
+    def setUp(self):
+        super().setUp()
+        self.task = store.create_task(self.conn, "确定组会时间", origin="intake", status="decision")
+        self.push(self.task)
+        self.page = self.page_of(self.task)
+
+    def hand_over(self):
+        self.fake.user_edit(self.page, **{"决定": "交给 Agent"})
+        self.tick()
+        return next(f for f in feedback.pending(self.conn) if f["kind"] == "delegate_request")
+
+    def test_handed_over_task_is_in_progress_before_any_agent_work(self):
+        self.hand_over()
+        self.assertEqual(self.column(), "处理中")
+
+    def test_a_question_instead_of_agent_work_waits_for_my_answer(self):
+        request = self.hand_over()
+        ops.feedback_resolve(self.conn, self.cfg, request["id"], outcome="clarify", reply="要 Agent 做什么？")
+        self.tick()
+        self.assertEqual(self.column(), "等我回答")
+        self.fake.user_comment(self.page, "整理一份选项清单")
+        clock.advance(minutes=31)   # comments of a task without agent work are read every warm interval
+        self.new_sync().poll_comments()
+        self.tick()
+        self.assertEqual(self.column(), "处理中", "my answer waits for a run")
+        answer = next(f for f in feedback.pending(self.conn) if f["kind"] == "comment")
+        delegation.create(self.conn, self.cfg, task_id=self.task, title="整理清单", goal="List the options")
+        ops.feedback_resolve(self.conn, self.cfg, answer["id"], outcome="applied")
+        self.tick()
+        self.assertEqual(self.column(), "处理中")
+
+    def test_a_question_then_the_task_taken_back_leaves_the_board(self):
+        request = self.hand_over()
+        ops.feedback_resolve(self.conn, self.cfg, request["id"], outcome="clarify", reply="要 Agent 做什么？")
+        self.tick()
+        self.drag("设为待办")
+        self.assertEqual(store.get_task(self.conn, self.task)["next_actor"], "me")
+        self.assertIsNone(self.column())
+
+    def test_a_request_set_aside_is_not_on_the_board(self):
+        request = self.hand_over()
+        store.update_task(self.conn, self.task, {"status": "waiting"}, actor="agent", origin="intake",
+                          based_on_version=store.get_task(self.conn, self.task)["version"])
+        ops.feedback_resolve(self.conn, self.cfg, request["id"], outcome="ignored", reason="the user said to wait")
+        self.tick()
+        self.assertIsNone(self.column())
 
 
 class ViewTests(NotionCase):

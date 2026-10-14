@@ -944,11 +944,29 @@ def task_label(conn: sqlite3.Connection, task_id: str) -> str | None:
     for status in LABEL_ORDER:
         if status in statuses:
             return status
-    row = conn.execute("SELECT id, status, handled_at FROM delegations WHERE task_id=?"
+    row = conn.execute("SELECT id, status, handled_at, created_at FROM delegations WHERE task_id=?"
                        " ORDER BY created_at DESC, rowid DESC LIMIT 1", (task_id,)).fetchone()
     if row is not None and row["status"] == "ended" and not row["handled_at"] \
             and _latest_result(conn, row["id"]) is not None:
         return "delivered"
+    return _handover_label(conn, task, row["created_at"] if row is not None else None)
+
+
+def _handover_label(conn: sqlite3.Connection, task: dict[str, Any], last_work_at: str | None) -> str | None:
+    """A Task handed to the agent with no agent work yet: "queued" while the hand-over (or the
+    user's later word on the task) waits for a run, "blocked" when the run asked the user a
+    question instead of starting work."""
+    if task["next_actor"] != "agent":
+        return None
+    if conn.execute("SELECT 1 FROM feedback WHERE scope_type='task' AND scope_id=? AND status='pending'",
+                    (task["id"],)).fetchone():
+        return "queued"
+    request = conn.execute("SELECT status, applied_at FROM feedback WHERE scope_type='task' AND scope_id=?"
+                           " AND kind='delegate_request' AND status!='superseded'"
+                           " ORDER BY received_at DESC, rowid DESC LIMIT 1", (task["id"],)).fetchone()
+    if request is not None and request["status"] == "clarify" \
+            and (last_work_at is None or last_work_at < (request["applied_at"] or "")):
+        return "blocked"
     return None
 
 
