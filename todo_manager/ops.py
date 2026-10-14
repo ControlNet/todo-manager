@@ -833,6 +833,13 @@ def delegate_create(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, *, task_id:
                                     actor="human", op_key=key, parallel=parallel, start_after=start_after)
         except delegation.DelegationError as exc:
             raise OpError("INVALID", str(exc)) from None
+        task = store.get_task(conn, task_id)
+        if task["status"] == "decision" or task["decision"]:
+            # Asked for in a comment on the To decide board: the same choice as a drag to Assign
+            # to Agent, so the card leaves the board.
+            store.update_task(conn, task_id, {"status": "todo", "next_actor": "agent", "decision": None},
+                              actor="human", origin=ctx.origin, cause_ref=did)
+            effects.task_push(conn, task_id)
         return {"delegation": did}
 
     result = perform(conn, ctx, "delegate create", args, apply)

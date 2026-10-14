@@ -183,6 +183,39 @@ class BoardChoiceTests(NotionCase):
         self.assertEqual((task['status'], task['next_actor'], task['decision']), ('todo', 'agent', None))
         self.assertEqual([f['kind'] for f in feedback.pending(self.conn)], ['delegate_request'])
 
+    def test_agent_work_asked_for_in_a_comment_takes_the_card_off_the_board(self):
+        """Asking the agent in a comment is enough: no drag to Assign to Agent is needed."""
+        tid = store.create_task(self.conn, 'Offered work', origin='cli', status='decision')
+        self.push(tid)
+        self.fake.user_comment(self.page_of(tid), '帮我整理一份可选方案清单')
+        clock.advance(minutes=31)   # comments of a task without agent work are read every warm interval
+        self.new_sync().poll_comments()
+        fb = next(f for f in feedback.pending(self.conn) if f['kind'] == 'comment')
+        ctx = ops.context(self.conn, self.cfg, feedback_id=fb['id'])
+        ops.delegate_create(self.conn, self.cfg, ctx, task_id=tid, title='整理方案', goal='List the options',
+                            allowed=['read', 'analyze', 'draft'], submit=False)
+        task = store.get_task(self.conn, tid)
+        self.assertEqual((task['status'], task['next_actor'], task['decision']), ('todo', 'agent', None))
+        self.drain()
+        props = self.fake.pages[self.page_of(tid)]['properties']
+        self.assertIsNone(props['决定']['select'])
+        self.assertEqual(props['Agent 进展']['select']['name'], '处理中')
+        self.pull()
+        self.assertFalse([f for f in feedback.pending(self.conn) if f['kind'] == 'delegate_request'],
+                         'the work already exists: no second request')
+
+    def test_agent_work_on_a_task_off_the_board_keeps_its_status(self):
+        tid = store.create_task(self.conn, 'Waiting work', origin='cli', status='waiting', next_actor='external')
+        self.push(tid)
+        self.fake.user_comment(self.page_of(tid), '先帮我起草催办邮件')
+        clock.advance(minutes=31)
+        self.new_sync().poll_comments()
+        fb = next(f for f in feedback.pending(self.conn) if f['kind'] == 'comment')
+        ctx = ops.context(self.conn, self.cfg, feedback_id=fb['id'])
+        ops.delegate_create(self.conn, self.cfg, ctx, task_id=tid, title='起草', goal='Draft only',
+                            allowed=['read', 'draft'], submit=False)
+        self.assertEqual(store.get_task(self.conn, tid)['status'], 'waiting')
+
     def test_a_status_set_in_the_same_edit_wins(self):
         tid = self.drag('设为待办', **{'状态': '等待'})
         self.assertEqual(store.get_task(self.conn, tid)['status'], 'waiting')

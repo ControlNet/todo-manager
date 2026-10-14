@@ -218,7 +218,8 @@ Assign to Agent sets the status to-do and next by Agent and queues a delegation 
 feedback run. In every case the choice is then cleared, so the handled card leaves the board.
 A task handed to the agent is on the Agent work board at once: In progress until the run has
 started agent work, or Needs my answer when the run asked a question in a comment instead
-(answering there puts it back to In progress).
+(answering there puts it back to In progress). Asking for agent work in a comment on the task does
+the same without a drag: once the run starts the work, the card leaves the To decide board.
 Moving a card never sends RSVPs or other external messages. The older Agree / Decline choices
 are still read and go to the feedback run as before.
 
