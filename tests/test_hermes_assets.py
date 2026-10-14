@@ -106,3 +106,37 @@ class OptionalInvitationTests(unittest.TestCase):
         self.assertIn("third-party app or OAuth access granted", text)
         self.assertIn("GitHub, Google", text)
         self.assertIn("the user sees them directly", text)
+
+
+class ExistingCommitmentTests(unittest.TestCase):
+    """Observer reviews 2026-10-11..14: progress from another thread or channel was dismissed
+    instead of linked (a status report in Slack, "you were added" notices of a research system, a deadline
+    reminder dismissed as "no commitment"); backfilled older mail recreated requests later mail had
+    settled; a follow-up task lost its earlier conditions; a finished stage kept its date; a field
+    the user set stayed out of date after plain evidence (the user chose to let evidence update it,
+    with a change note, 2026-10-14)."""
+
+    def test_existing_tasks_are_searched_across_conversations_before_create_or_dismiss(self):
+        text = flat("cron/intake.md")
+        self.assertIn("whatever conversation or channel the news comes from", text)
+        self.assertIn("Before you create a task or dismiss an item", text)
+        self.assertIn("Progress on an existing task is linked to it, never dismissed", text)
+        self.assertIn('never "no commitment"', text)
+
+    def test_later_material_that_settles_a_request_is_looked_for(self):
+        text = flat("cron/intake.md")
+        self.assertIn("later material already settles it", text)
+        self.assertIn("handled_elsewhere", text)
+
+    def test_a_continuing_task_keeps_the_earlier_conditions(self):
+        self.assertIn("keeps the conditions still in force", flat("cron/intake.md"))
+
+    def test_a_new_stage_replaces_the_finished_stage_date(self):
+        self.assertIn("A passed date of a finished stage is not the task's due date", flat("cron/intake.md"))
+
+    def test_plain_newer_evidence_may_update_a_field_the_user_set(self):
+        text = flat("cron/intake.md")
+        self.assertIn("--override-human --evidence", text)
+        self.assertIn("never on inference alone", text)
+        self.assertIn("do not close a task whose status the user set", text)
+        self.assertIn("Do not reopen a task the user closed", text)

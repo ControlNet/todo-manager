@@ -17,8 +17,30 @@ If the Script Output is a Script Error, or the context only reports problems, ma
   a new sign-in or device, password or MFA changes, login codes, a third-party app or OAuth access
   granted, keys or tokens added or expiring, storage or licence alerts. They are not tasks; the
   user sees them directly: dismiss them as `automated`.
-- One task per commitment. Later messages about it update or link to the existing task: search
-  first (`todo-manager task list --search "<words>"`) instead of creating a duplicate.
+- One task per commitment, whatever conversation or channel the news comes from. Before you
+  create a task or dismiss an item, search the user's open tasks for the same matter
+  (`todo-manager task list --search "<words>"` with the people, project, paper, system or
+  organisation names): a message in another thread, channel or from another sender may be
+  progress on a task the user already has.
+- Progress on an existing task is linked to it, never dismissed: a step someone took, a
+  confirmation, an automatic notice that something happened ("you were added", "submitted",
+  "approved"), a reminder of its deadline. Link it (`--evidence <item>:follow_up`, `:reminder`,
+  `:completion`, ...) and update the fields it changes. A dismissal reason must agree with the
+  user's open tasks: never "no commitment" when the user has one for it.
+- Material can be older than what settles it, above all when earlier mail is read late. Before
+  creating a task for a request, booking, application or approval, check with
+  `todo-manager source search "<words>"` (it also finds dismissed and context material) whether
+  later material already settles it: approved, cancelled, moved, received, done. Then make no
+  task for the settled step: dismiss the item as `handled_elsewhere` naming the later item, or
+  create the task for what remains.
+- A task that continues an earlier one (a follow-up, the next stage, a new approval or booking for
+  the same thing) keeps the conditions still in force from the earlier task and its material:
+  deadlines, spending and settlement rules, budgets, required recipients. Read the earlier task
+  (`todo-manager task show <task>`) and carry them into `summary`, `done_criteria` and, with
+  their source in `due_basis`, `due_date`.
+- When a stage finishes and the next begins (submitted, now awaiting a decision; drafted, now
+  under review), move the task to the new stage: its `next_step`, status and `due_date`. A passed
+  date of a finished stage is not the task's due date.
 - Keep provenance: link the messages a task is based on (`--evidence <item>:origin` for the
   message the commitment comes from; later ones as `context`, `follow_up`, `completion`, ...).
 - Read, expired, silence and "no reply" do not mean done. Close a task only on evidence that the
@@ -32,8 +54,13 @@ If the Script Output is a Script Error, or the context only reports problems, ma
   something the user owes for it (a report, slides, a reply) is a task.
 - Waiting for someone: status `waiting`, `waiting_on` and a `follow_up_date`.
 - Dates only when stated or clearly implied; say where they come from in `due_basis`.
-- The user's edits win. A field the user set is kept (the command lists it under `rejected`);
-  do not reopen a task the user closed: create a follow-up task (`--follow-up-of <task>`).
+- The user's edits win over your judgement: a field the user set is kept (the command lists it
+  under `rejected`). Exception: material newer than the user's edit shows plainly that the field
+  is out of date (the step it names was done, the date was moved, the awaited reply came). Then
+  change that field with `--override-human --evidence <item>:<role>` and a `--note` saying what
+  the material shows; never on inference alone. Even then do not close a task whose status the
+  user set: link the evidence as `completion` and say so in the `--note`. Do not reopen a task
+  the user closed: create a follow-up task (`--follow-up-of <task>`).
 - Unsure, and missing it could cost the user (a direct request from a person, a deadline,
   money, a role given to them): create the task with status `decision` and the one question in
   `next_step`. Unsure and low-stakes: dismiss it with the reason, or defer it.
