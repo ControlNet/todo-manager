@@ -418,7 +418,10 @@ class GmailSource:
         sender_name, sender = parseaddr(headers.get("from", ""))
         sender = sender.lower()
         author_is_me = "SENT" in labels or sender in self.me
-        recipients = [a.lower() for _, a in getaddresses([headers.get("to", ""), headers.get("cc", "")]) if a]
+        to = [a.lower() for _, a in getaddresses([headers.get("to", "")]) if a]
+        cc = [a.lower() for _, a in getaddresses([headers.get("cc", "")]) if a]
+        recipients = to + cc
+        me_in = "to" if self.me & set(to) else "cc" if self.me & set(cc) else None
         occurred = datetime.fromtimestamp(int(msg.get("internalDate", "0")) / 1000, tz=timezone.utc)
         thread_id = msg.get("threadId", "")
         conversation = f"gmail:{self.account}:{thread_id}"
@@ -439,7 +442,8 @@ class GmailSource:
             author_is_me=author_is_me, title=headers.get("subject", "(no subject)"),
             url=f"https://mail.google.com/mail/?authuser={self.address}#all/{thread_id}",
             body=body, route=route,
-            meta={"to": recipients[:20], "labels": sorted(labels), "attachments": attachments,
+            meta={"to": recipients[:20], "recipients": len(recipients), "me_in": me_in,
+                  "labels": sorted(labels), "attachments": attachments,
                   "bulk_hint": bulk and not author_is_me, "github_ref": github_ref,
                   "github_sender": headers.get("x-github-sender") if github_ref else None,
                   "github_event": event,

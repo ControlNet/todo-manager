@@ -39,6 +39,10 @@ agent work and recent thread.
 - Explicitly specify the authorized actions, normally `read,analyze,draft`. External actions (`send_email`,
   `comment_github`, `push_branch`, `open_pr`, `merge_pr`, `close_issue`, `edit_notion_doc`,
   `post_public`) only when the user said so for this work.
+- Keep the medium the user asked for (a copy in Google Slides, a Gmail draft, a branch): "do not
+  send" limits sending, not the format. A new private copy or draft in the user's own account is
+  drafting: name it in the allowed action (`draft:<what exactly>`). Sharing, sending or editing
+  the original stays an external action.
 - One active delegation per task. More information or changes go to it:
   `todo-manager delegate message <delegation> --kind supplement|revision|pause|resume|cancel --body "..."`.
 - The agent asked a question: `todo-manager delegate answer <delegation> --body "..."` (it goes

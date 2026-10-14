@@ -151,6 +151,24 @@ def run_batches(conn: sqlite3.Connection, run_id: str) -> list[dict[str, Any]]:
         "SELECT * FROM batches WHERE claimed_run=? AND state='claimed' ORDER BY source, first_item_at", (run_id,))]
 
 
+RECIPIENTS_SHOWN = 8
+WHERE_THE_USER_IS = {"to": "the user is in To", "cc": "the user is in Cc", None: "the user is not a recipient"}
+
+
+def _recipients(cfg: Config, meta: dict[str, Any]) -> str:
+    """The first recipients, how many more, and whether the user is one of them (a long list once
+    hid the user, and the run judged the mail not addressed to them)."""
+    to = meta["to"]
+    total = meta.get("recipients", len(to))
+    text = ", ".join(to[:RECIPIENTS_SHOWN]) + (f" (+{total - RECIPIENTS_SHOWN} more)" if total > RECIPIENTS_SHOWN else "")
+    if "me_in" in meta:
+        where = WHERE_THE_USER_IS.get(meta["me_in"])
+    else:   # stored before the user's place was recorded
+        mine = {e.lower() for e in cfg.section("identity").get("emails", [])}
+        where = "the user is a recipient" if mine & set(to) else None
+    return text + (f"; {where}" if where else "")
+
+
 def _item_header(item: dict[str, Any]) -> str:
     more = f"todo-manager source show {item['id']}"
     who = "the user" if item["author_is_me"] else field(item.get("author") or "?", more)
@@ -317,7 +335,7 @@ def _conversation(conn: sqlite3.Connection, cfg: Config, batch: dict[str, Any], 
         limit = bulk_chars(cfg) if item["meta"].get("bulk_hint") else item_chars(cfg)
         extras = []
         if item["meta"].get("to"):
-            extras.append("to: " + field(", ".join(item["meta"]["to"][:8]), more))
+            extras.append("to: " + field(_recipients(cfg, item["meta"]), more))
         if item["meta"].get("attachments"):
             extras.append("attachments: " + field(", ".join(a["filename"] for a in item["meta"]["attachments"]), more))
         if item.get("title") and item["source"] == "gmail":

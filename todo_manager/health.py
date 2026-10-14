@@ -118,7 +118,8 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
     out["batches"] = {r["state"]: r["n"] for r in conn.execute("SELECT state, COUNT(*) n FROM batches GROUP BY state")}
     out["followups_failed"] = [r["task_id"] for r in conn.execute(
         "SELECT f.task_id FROM followup_checks f JOIN tasks t ON t.id=f.task_id WHERE f.state='failed'"
-        " AND t.status IN ('todo','in_progress','waiting') AND f.due=substr(t.follow_up_date,1,10)"
+        " AND ((t.status IN ('todo','in_progress','waiting') AND f.due=substr(t.follow_up_date,1,10))"
+        " OR (t.status IN ('todo','in_progress','waiting','decision') AND f.due='due:'||substr(t.due_date,1,10)))"
         " ORDER BY f.updated_at DESC LIMIT 20")]
     out["runs"] = {}
     for entry in ENTRIES:
@@ -212,7 +213,8 @@ def problem_items(rep: dict[str, Any], cfg: Config) -> list[tuple[str, str]]:
         add("approval_outcome_unknown", f"approved external actions with unknown outcome (paused, check manually): "
             f"{', '.join(attention['approval_outcome_unknown'])}")
     if rep.get("followups_failed"):
-        add("followups_failed", f"follow-ups no run handled (set a new follow-up date to retry): "
+        add("followups_failed", f"follow-ups or passed due dates no run handled (set a new date to retry,"
+            f" or close the task): "
             f"{', '.join(rep['followups_failed'])}")
     for entry, info in rep["runs"].items():
         last = info["last"]
