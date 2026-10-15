@@ -61,7 +61,9 @@ you wrote them, and the agent reads them as context.
   with a reason.
 - **Agents ask before acting outside.** An agent may send an email or take a similar external
   action only when you allowed it for that task or approve it in a comment.
-- **Todo Manager only reads** your mail, Slack and GitHub. It never posts there itself.
+- **Todo Manager only reads** your mail, Slack and GitHub. It never posts there itself. The one
+  exception is opt-in: Gmail labels that show which project a mail belongs to and whether its
+  task is still open.
 - **Quiet when nothing happens.** Every five minutes plain code checks for news; the AI model is
   woken only when there is something new to judge.
 - **English or Simplified Chinese**, for everything you read.
@@ -85,7 +87,7 @@ you wrote them, and the agent reads them as context.
   update content, insert content, read comments and insert comments capabilities.
 - **Sources** (`install` finds what Hermes already has):
   - Gmail: a himalaya account in Hermes whose `gmail.auth.token.command` prints an OAuth access
-    token (read-only Gmail access is enough);
+    token (read-only Gmail access is enough; the optional Gmail labels need `gmail.modify`);
   - Slack: a user token (`SLACK_USER_TOKEN`, or `$HERMES_HOME/credentials/slack_user_token`)
     that can call `users.conversations`, `conversations.history`, `conversations.replies` and
     `users.info` for the conversation types you include;
@@ -126,6 +128,11 @@ todo-manager pause                                        # stop the scheduled j
 todo-manager resume
 todo-manager config set slack.quiet_minutes 60 --human    # e.g. wait an hour of Slack silence
 ```
+
+**Optional: Gmail labels.** Mail linked to a task can carry `Todo/<project>` and
+`Todo/<project>/<Open|Done|Cancelled>` in Gmail. `todo-manager gmail-labels show` lists the
+labels and how many mails each would get; `todo-manager config set email.labels true --human`
+turns it on. See [docs/operations.md](docs/operations.md#gmail-labels).
 
 You can also ask Hermes in chat to change a setting or a convention. Problems (a source that
 stopped syncing, an agent that got stuck) show up in the *Data freshness* box on the home page

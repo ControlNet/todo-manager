@@ -255,5 +255,9 @@
   "dlv.text_cut": "（内容过长，只显示前 {n} 个字符；完整文件在服务器 {path}）",
   "dlv.why.missing": "（文件缺失）",
   "dlv.why.too_large": "（超过 Notion 上传上限，未上传）",
-  "dlv.why.too_long": "（文字过长，未放进本页）"
+  "dlv.why.too_long": "（文字过长，未放进本页）",
+  "gmail_labels.other": "其他",
+  "gmail_labels.open": "进行中",
+  "gmail_labels.done": "已完成",
+  "gmail_labels.cancelled": "已取消"
 }

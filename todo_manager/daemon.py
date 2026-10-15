@@ -529,6 +529,7 @@ class Daemon:
                 self.last["kanban_board"] = clock.now()
                 gate_feedback.kanban_read_steps(step, conn, cfg, kanban)
         gate_feedback.push_steps(step, conn, notion)
+        gate_feedback.label_step(step, conn, cfg)
         if notion is not None and notion.imported:
             with self.shared_lock:
                 for page in notion.imported:

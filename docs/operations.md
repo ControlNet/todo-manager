@@ -255,6 +255,8 @@ Values are set with `todo-manager config set <key> <value>` (comments and other 
 | `notion.body_reads_per_run` | 10 | page bodies read per feedback run after an edit by someone other than the bot |
 | `kanban.max_retries` | 1 | Hermes per-card failure breaker; cards allowed an external action always get 1 |
 | `hermes.model`, `hermes.provider`, `hermes.reasoning_effort` | unset (Hermes' defaults) | set on the cron jobs by `install`; a value you change in Hermes is kept |
+| `email.labels` | false | label mail linked to tasks in Gmail (see below) |
+| `email.label_root` | `Todo` | top-level Gmail label they go under |
 
 Keys that no longer have an effect (`status --details` names them while `config.toml` still sets them):
 
@@ -263,6 +265,32 @@ Keys that no longer have an effect (`status --details` names them while `config.
 | `kanban.max_running` | Hermes schedules agent work; its dispatcher limits apply (`hermes config get kanban.max_in_progress`) |
 | `wake.over_budget`, `feedback.over_budget` | an over-budget context is clipped with pointers and the run goes ahead |
 | `wake.max_questions_per_run` | when to ask is a preference in the workspace `PREFERENCES.md` |
+
+## Gmail labels
+
+With `email.labels` on, every mail linked to a task carries two Gmail labels: its project,
+`Todo/<project>`, and the state of its tasks there, `Todo/<project>/<Open|Done|Cancelled>`
+(Chinese: 进行中 / 已完成 / 已取消). Open wins while one of the mail's tasks in that project is
+open, then Done, then Cancelled. Tasks without a project are under `Todo/Other` (其他); mail of
+two projects carries the labels of both. Dismissed mail and mail never read get no label.
+
+The labels follow the tasks: closing a task, moving it to another project or renaming the
+project changes them at the next sync (a renamed project renames its labels; the mail keeps
+them). They are plain code, no model, and are sent with the sync (daemon or feedback gate);
+only differences are sent, nothing when nothing changed. Todo Manager adds and removes only
+the labels it created or found under these names; it never archives, marks read or deletes
+mail. A label you delete in Gmail comes back with the next change. A failing pass shows as
+`gate/gmail_labels` in `status` and is retried by the next sync.
+
+```bash
+todo-manager gmail-labels show                        # labels and mail counts; no request to Gmail
+todo-manager config set email.labels true --human     # turn on; the next sync labels the mail
+todo-manager sync                                     # or do it now
+todo-manager config set email.labels false --human    # turn off (labels already set stay)
+```
+
+Each mailbox's token needs the `gmail.modify` (or full `mail.google.com`) scope; with a
+read-only token the pass fails and `status` shows the Gmail error.
 
 ## Real-time sync daemon
 

@@ -22,6 +22,7 @@ feedback list|show|record|resolve
 delegate list|show|create|message|answer|approve
 run show|done
 daemon run|status|enroll|token|reset-token|restart
+gmail-labels show
 ```
 
 Business responses are JSON, including list/show. `run show --context` deliberately returns the

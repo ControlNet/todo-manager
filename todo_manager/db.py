@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -627,6 +627,20 @@ CREATE TABLE delivery_pages (
   url TEXT,
   created_at TEXT NOT NULL,
   done_at TEXT
+);
+""",
+    16: """
+CREATE TABLE gmail_labels (
+  account TEXT NOT NULL,
+  key TEXT NOT NULL,
+  label_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  PRIMARY KEY (account, key)
+);
+CREATE TABLE gmail_message_labels (
+  item_id TEXT PRIMARY KEY REFERENCES source_items(id),
+  keys TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 """,
 }

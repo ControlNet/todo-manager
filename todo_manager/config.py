@@ -49,6 +49,10 @@ DEFAULTS: dict[str, Any] = {
         "initial_lookback_days": 14,  # PROPOSED initial backfill window
         "quiet_minutes": 15,  # PROPOSED: thread must be quiet this long before analysis
         "min_wake_interval_minutes": 60,  # PROPOSED: email alone wakes the model at most hourly
+        # Label mail linked to tasks in Gmail: <label_root>/<project>/<open|done|cancelled> (gmail_labels).
+        # Off by default: it is the only write to the mailboxes; needs the gmail.modify scope.
+        "labels": False,
+        "label_root": "Todo",
     },
     "slack": {
         "enabled": False,

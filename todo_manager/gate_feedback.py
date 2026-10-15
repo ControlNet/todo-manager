@@ -7,7 +7,8 @@ Deterministic steps, each isolated so one failing system does not stall the othe
    delegations, let parked cards go once the start time the user gave has passed, read card
    events (questions, deliveries, failures). The cards themselves run in Hermes whether or not
    this job runs; their results are read when it runs again.
-3. Dirty scan + outbox: push local changes to Notion, post bot comments.
+3. Dirty scan + outbox: push local changes to Notion, post bot comments; with ``email.labels``,
+   the Gmail labels of mail linked to tasks (``gmail_labels``).
 4. Home page freshness callout (rewritten only when its content changes).
 5. Claim the feedback that needs interpretation and print it as the run's context
    (``context.feedback``); nothing to interpret -> ``{"wakeAgent": false}``.
@@ -24,7 +25,7 @@ import subprocess
 from datetime import timedelta
 from typing import Any, Callable
 
-from . import clock, context, delegation, feedback, health, i18n, ops, outbox, prefs, runs
+from . import clock, context, delegation, feedback, gmail_labels, health, i18n, ops, outbox, prefs, runs
 from .config import Config
 from .db import tx
 from .gate_intake import IDLE, GateError, problems_due
@@ -40,7 +41,7 @@ CHANNELS = {"claims": ("gate", "claims"),
             "kanban_messages": ("kanban", "messages"), "kanban_submit": ("kanban", "submit"),
             "kanban_start": ("kanban", "start"),
             "kanban_cards": ("kanban", "cards"), "dirty": ("notion", "dirty"),
-            "outbox": ("gate", "outbox"), "home": ("notion", "home")}
+            "outbox": ("gate", "outbox"), "gmail_labels": ("gate", "gmail_labels"), "home": ("notion", "home")}
 
 
 def _step(conn: sqlite3.Connection, summary: dict[str, Any], problems: list[str], name: str, fn: Step) -> Any:
@@ -134,6 +135,12 @@ def push_steps(step: Callable[[str, Step], Any], conn: sqlite3.Connection, notio
     step("outbox", lambda: outbox.process(conn, handlers))
 
 
+def label_step(step: Callable[[str, Step], Any], conn: sqlite3.Connection, cfg: Config) -> None:
+    """Local -> Gmail: labels of the mail linked to tasks, when ``email.labels`` is on."""
+    if gmail_labels.enabled(cfg):
+        step("gmail_labels", lambda: gmail_labels.sync(conn, cfg))
+
+
 def home_step(step: Callable[[str, Step], Any], conn: sqlite3.Connection, cfg: Config, notion: Any,
               summary: dict[str, Any]) -> None:
     step("home", lambda: notion.sync_home(freshness_sections(conn, cfg, notion.state.language)))
@@ -159,6 +166,7 @@ def sync_all(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None,
         kanban_send_steps(step, conn, cfg, kanban)
         kanban_read_steps(step, conn, cfg, kanban)
     push_steps(step, conn, notion)
+    label_step(step, conn, cfg)
     if notion is not None:
         home_step(step, conn, cfg, notion, summary)
     if problems:

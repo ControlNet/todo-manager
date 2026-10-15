@@ -145,6 +145,14 @@ def cmd_sync(args: argparse.Namespace) -> int:
     return 1 if problems else 0
 
 
+def cmd_gmail_labels(args: argparse.Namespace) -> int:
+    """The labels the tasks give their mail (``email.labels``), counted locally; no request."""
+    from . import gmail_labels
+    cfg, conn = _open(args)
+    _print(gmail_labels.preview(conn, cfg))
+    return 0
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
     """The real-time sync daemon (docs/realtime-sync.md)."""
     from . import daemon, webhook
@@ -670,6 +678,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("sync", help="run the Notion/Kanban/outbox sync now (no model)")
     s.set_defaults(fn=cmd_sync)
+
+    s = sub.add_parser("gmail-labels", help="Gmail labels of mail linked to tasks (email.labels)")
+    gls = s.add_subparsers(dest="action", required=True)
+    gls.add_parser("show", help="each label and how many mails carry it, and how many mails the next sync changes")
+    s.set_defaults(fn=cmd_gmail_labels)
 
     s = sub.add_parser("daemon", help="the real-time sync daemon: run, status, webhook token, restart")
     dms = s.add_subparsers(dest="action", required=True)

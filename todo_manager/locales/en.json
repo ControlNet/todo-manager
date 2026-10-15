@@ -255,5 +255,9 @@
   "dlv.text_cut": "(Too long: the first {n} characters; the full file is on the server at {path})",
   "dlv.why.missing": "(file missing)",
   "dlv.why.too_large": "(over the Notion upload limit, not uploaded)",
-  "dlv.why.too_long": "(text too long for this page)"
+  "dlv.why.too_long": "(text too long for this page)",
+  "gmail_labels.other": "Other",
+  "gmail_labels.open": "Open",
+  "gmail_labels.done": "Done",
+  "gmail_labels.cancelled": "Cancelled"
 }
