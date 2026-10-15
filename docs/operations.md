@@ -268,11 +268,15 @@ Keys that no longer have an effect (`status --details` names them while `config.
 
 ## Gmail labels
 
-With `email.labels` on, every mail linked to a task carries two Gmail labels: its project,
-`Todo/<project>`, and the state of its tasks there, `Todo/<project>/<Open|Done|Cancelled>`
-(Chinese: 进行中 / 已完成 / 已取消). Open wins while one of the mail's tasks in that project is
-open, then Done, then Cancelled. Tasks without a project are under `Todo/Other` (其他); mail of
-two projects carries the labels of both. Dismissed mail and mail never read get no label.
+With `email.labels` on, every mail linked to a task carries the Gmail label
+`Todo/<project>/<Open|Done|Cancelled>` (Chinese: 进行中 / 已完成 / 已取消): Open while one of the
+mail's tasks in that project is open, then Done, then Cancelled. Tasks without a project are
+under `Todo/Other` (其他); mail of two projects carries the labels of both. `Todo` and
+`Todo/<project>` only group the labels in Gmail's list; no mail carries them. Dismissed mail and
+mail never read get no label.
+
+Colours: the hue is the colour of the project's Notion icon (grey without one, and for Other),
+strong for Open and light for Done; Cancelled is grey. A new icon colour recolours the labels.
 
 The labels follow the tasks: closing a task, moving it to another project or renaming the
 project changes them at the next sync (a renamed project renames its labels; the mail keeps

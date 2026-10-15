@@ -129,8 +129,8 @@ todo-manager resume
 todo-manager config set slack.quiet_minutes 60 --human    # e.g. wait an hour of Slack silence
 ```
 
-**Optional: Gmail labels.** Mail linked to a task can carry `Todo/<project>` and
-`Todo/<project>/<Open|Done|Cancelled>` in Gmail. `todo-manager gmail-labels show` lists the
+**Optional: Gmail labels.** Mail linked to a task can carry `Todo/<project>/<Open|Done|Cancelled>`
+in Gmail, coloured like the project's Notion icon. `todo-manager gmail-labels show` lists the
 labels and how many mails each would get; `todo-manager config set email.labels true --human`
 turns it on. See [docs/operations.md](docs/operations.md#gmail-labels).
 

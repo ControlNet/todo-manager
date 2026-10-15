@@ -1,11 +1,16 @@
 """Gmail labels that show which tasks a mail belongs to (opt-in: ``email.labels``).
 
-A mail linked to a task as evidence carries ``<root>/<project>`` and
-``<root>/<project>/<state>``. The state is open while one of its tasks in that project is
-open, else done when one of them is done, else cancelled. Tasks without a project are under
-``<root>/<other>``; mail of several projects carries the labels of each. Dismissed mail and
-mail never read get no label. Names follow the project titles and the workspace language: a
-renamed project renames its labels, and mail keeps them.
+A mail linked to a task as evidence carries ``<root>/<project>/<state>``. The state is open
+while one of its tasks in that project is open, else done when one of them is done, else
+cancelled. Tasks without a project are under ``<root>/<other>``; mail of several projects
+carries the label of each. ``<root>`` and ``<root>/<project>`` exist only to nest the labels in
+Gmail's list; no mail carries them. Dismissed mail and mail never read get no label. Names
+follow the project titles and the workspace language: a renamed project renames its labels,
+and mail keeps them.
+
+Colours: the hue is the colour of the project's Notion icon (grey without one, and for
+``<other>``), strong for open and light for done; cancelled is grey. A changed name or colour
+(project title or icon, language, root) is applied to the labels in Gmail, not to the mail.
 
 Only labels kept in ``gmail_labels`` (created here, or found under their name) are added,
 removed or renamed; mail is never archived, marked read or deleted. What was applied is kept
@@ -22,12 +27,25 @@ from typing import Any, Callable
 
 from . import clock, i18n, store
 from .config import Config
-from .db import dumps, loads, tx
+from .db import dumps, get_meta, loads, set_meta, tx
 from .net import HttpError, request_json
 from .sources.gmail import API, TokenProvider
 
 BATCH = 1000                  # ids per messages.batchModify (the API's limit)
 STATES = ("open", "done", "cancelled")
+# Notion colour -> (strong, light) Gmail label colours; Gmail accepts only its own palette.
+PALETTE = {
+    "red": (("#fb4c2f", "#ffffff"), ("#f6c5be", "#ac2b16")),
+    "orange": (("#ffad47", "#ffffff"), ("#ffe6c7", "#a46a21")),
+    "yellow": (("#fad165", "#000000"), ("#fef1d1", "#aa8831")),
+    "green": (("#16a766", "#ffffff"), ("#b9e4d0", "#076239")),
+    "blue": (("#4a86e8", "#ffffff"), ("#c9daf8", "#1c4587")),
+    "purple": (("#a479e2", "#ffffff"), ("#e4d7f5", "#41236d")),
+    "pink": (("#f691b3", "#ffffff"), ("#fcdee8", "#83334c")),
+    "brown": (("#cf8933", "#ffffff"), ("#ffd6a2", "#a46a21")),
+    "gray": (("#666666", "#ffffff"), ("#cccccc", "#434343")),
+}
+CANCELLED = ("#efefef", "#999999")
 
 
 def enabled(cfg: Config) -> bool:
@@ -45,15 +63,15 @@ class LabelsApi:
         return self.http(method, f"{API}/{path}", headers={"Authorization": f"Bearer {self.token()}"},
                          body=body, timeout=45)
 
-    def labels(self) -> dict[str, str]:
-        return {label["id"]: label["name"] for label in (self._call("GET", "labels") or {}).get("labels", [])}
+    def labels(self) -> dict[str, dict[str, Any]]:
+        return {label["id"]: label for label in (self._call("GET", "labels") or {}).get("labels", [])}
 
-    def create(self, name: str) -> str:
-        return self._call("POST", "labels", {"name": name, "labelListVisibility": "labelShow",
-                                             "messageListVisibility": "show"})["id"]
+    def create(self, name: str, color: dict[str, str] | None) -> str:
+        body = {"name": name, "labelListVisibility": "labelShow", "messageListVisibility": "show"}
+        return self._call("POST", "labels", {**body, "color": color} if color else body)["id"]
 
-    def rename(self, label_id: str, name: str) -> None:
-        self._call("PATCH", f"labels/{label_id}", {"name": name})
+    def update(self, label_id: str, name: str, color: dict[str, str] | None) -> None:
+        self._call("PATCH", f"labels/{label_id}", {"name": name, "color": color} if color else {"name": name})
 
     def batch_modify(self, ids: list[str], add: list[str], remove: list[str]) -> None:
         self._call("POST", "messages/batchModify", {"ids": ids, "addLabelIds": add, "removeLabelIds": remove})
@@ -86,8 +104,8 @@ def _state(statuses: set[str]) -> str:
 
 def wanted(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     """Item id -> {account, message, keys} for every Gmail mail linked to a task. Keys name
-    labels independently of their names: ``root``, ``p:<project>``, ``p:<project>:<state>``,
-    ``other``, ``other:<state>``."""
+    labels independently of their names: ``p:<project>:<state>`` and ``other:<state>`` on mail;
+    their parents ``root``, ``p:<project>`` and ``other`` only nest them."""
     found: dict[str, dict[str, Any]] = {}
     for r in conn.execute("SELECT s.id, s.account, s.external_id, t.project_id, t.status FROM evidence_links e"
                           " JOIN source_items s ON s.id=e.source_item_id JOIN tasks t ON t.id=e.entity_id"
@@ -96,8 +114,7 @@ def wanted(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
         group = f"p:{r['project_id']}" if r["project_id"] else "other"
         entry["groups"].setdefault(group, set()).add(r["status"])
     for entry in found.values():
-        entry["keys"] = {k for group, statuses in entry.pop("groups").items()
-                         for k in (group, f"{group}:{_state(statuses)}")}
+        entry["keys"] = {f"{group}:{_state(statuses)}" for group, statuses in entry.pop("groups").items()}
     return found
 
 
@@ -115,20 +132,31 @@ def _segment(text: str) -> str:
     return " ".join(text.replace("/", "-").split())[:80] or "-"
 
 
-def namer(conn: sqlite3.Connection, cfg: Config) -> Callable[[str], str]:
+Look = Callable[[str], tuple[str, "dict[str, str] | None"]]
+
+
+def looks(conn: sqlite3.Connection, cfg: Config) -> Look:
+    """Key -> (label name, Gmail colour or None)."""
     root = _segment(cfg.get("email.label_root") or "Todo")
-    titles = {r["id"]: r["title"] for r in conn.execute("SELECT id, title FROM projects")}
+    projects = {r["id"]: (r["title"], r["icon"]) for r in conn.execute("SELECT id, title, icon FROM projects")}
     lang = cfg.language
 
-    def name(key: str) -> str:
+    def look(key: str) -> tuple[str, dict[str, str] | None]:
         if key == "root":
-            return root
+            return root, None
         parts = key.split(":")
-        head, rest = (titles.get(parts[1], parts[1]), parts[2:]) if parts[0] == "p" else \
-            (i18n.t("gmail_labels.other", lang), parts[1:])
+        if parts[0] == "p":
+            title, icon = projects.get(parts[1], (parts[1], None))
+            head, rest = title, parts[2:]
+            hue = (icon or "").partition(":")[2].replace("lightgray", "gray")
+        else:
+            head, rest, hue = i18n.t("gmail_labels.other", lang), parts[1:], "gray"
+        strong, light = PALETTE.get(hue, PALETTE["gray"])
+        background, text = CANCELLED if rest == ["cancelled"] else light if rest == ["done"] else strong
         label = f"{root}/{_segment(head)}"
-        return label + (f"/{i18n.t('gmail_labels.' + rest[0], lang)}" if rest else "")
-    return name
+        return (label + (f"/{i18n.t('gmail_labels.' + rest[0], lang)}" if rest else ""),
+                {"backgroundColor": background, "textColor": text})
+    return look
 
 
 def changes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -149,8 +177,8 @@ def changes(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 def preview(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
     """The labels and how many mails carry each, and how many mails a pass would change (no request)."""
-    name = namer(conn, cfg)
-    counts = Counter(name(k) for entry in wanted(conn).values() for k in entry["keys"])
+    look = looks(conn, cfg)
+    counts = Counter(look(k)[0] for entry in wanted(conn).values() for k in entry["keys"])
     return {"enabled": enabled(cfg), "labels": [{"name": n, "mail": c} for n, c in sorted(counts.items())],
             "mail_to_change": len(changes(conn))}
 
@@ -183,10 +211,20 @@ def _record(conn: sqlite3.Connection, todo: list[dict[str, Any]]) -> None:
                 conn.execute("DELETE FROM gmail_message_labels WHERE item_id=?", (c["item"],))
 
 
-def _check(conn: sqlite3.Connection, api: LabelsApi, account: str, name: Callable[[str], str],
-           stats: dict[str, int]) -> tuple[dict[str, str], dict[str, str]]:
+def _same(label: dict[str, Any], name: str, color: dict[str, str] | None) -> bool:
+    have = {k: v.lower() for k, v in (label.get("color") or {}).items() if k in ("backgroundColor", "textColor")}
+    return label.get("name") == name and (color is None or have == color)
+
+
+def _digest(conn: sqlite3.Connection, account: str, look: Look) -> str:
+    """What the account's labels should look like; a pass checks them again when it changes."""
+    return dumps(sorted([key, *look(key)] for key in _registry(conn, account)))
+
+
+def _check(conn: sqlite3.Connection, api: LabelsApi, account: str, look: Look,
+           stats: dict[str, int]) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
     """The mailbox's labels, and key -> label id of those kept here: a label deleted in Gmail is
-    forgotten, one whose name changed (project title, language, root) is renamed."""
+    forgotten, one whose name or colour should change is updated."""
     existing = api.labels()
     ids: dict[str, str] = {}
     for key, row in _registry(conn, account).items():
@@ -194,33 +232,38 @@ def _check(conn: sqlite3.Connection, api: LabelsApi, account: str, name: Callabl
             with tx(conn):
                 _forget(conn, account, key)
             continue
-        if row["name"] != name(key):
-            api.rename(row["label_id"], name(key))
+        name, color = look(key)
+        if not _same(existing[row["label_id"]], name, color):
+            api.update(row["label_id"], name, color)
             with tx(conn):
-                conn.execute("UPDATE gmail_labels SET name=? WHERE account=? AND key=?", (name(key), account, key))
-            stats["renamed"] += 1
+                conn.execute("UPDATE gmail_labels SET name=? WHERE account=? AND key=?", (name, account, key))
+            stats["updated"] += 1
         ids[key] = row["label_id"]
     return existing, ids
 
 
-def _ensure(conn: sqlite3.Connection, api: LabelsApi, account: str, name: Callable[[str], str], needed: set[str],
-            existing: dict[str, str], ids: dict[str, str], stats: dict[str, int]) -> None:
+def _ensure(conn: sqlite3.Connection, api: LabelsApi, account: str, look: Look, needed: set[str],
+            existing: dict[str, dict[str, Any]], ids: dict[str, str], stats: dict[str, int]) -> None:
     """Labels for ``needed`` and their parents (parents first): found by name, else created."""
-    by_name = {n.casefold(): i for i, n in existing.items()}
+    by_name = {label["name"].casefold(): i for i, label in existing.items()}
     chain = set()
     for key in needed:
         while key is not None:
             chain.add(key)
             key = _parent(key)
     for key in sorted(chain - set(ids), key=lambda k: (k != "root", k.count(":"), k)):
-        label_id = by_name.get(name(key).casefold())
+        name, color = look(key)
+        label_id = by_name.get(name.casefold())
         if label_id is None:
-            label_id = api.create(name(key))
+            label_id = api.create(name, color)
             stats["created"] += 1
+        elif not _same(existing[label_id], name, color):
+            api.update(label_id, name, color)
+            stats["updated"] += 1
         with tx(conn):
             conn.execute("INSERT INTO gmail_labels(account, key, label_id, name) VALUES (?,?,?,?)"
                          " ON CONFLICT(account, key) DO UPDATE SET label_id=excluded.label_id, name=excluded.name",
-                         (account, key, label_id, name(key)))
+                         (account, key, label_id, name))
         ids[key] = label_id
 
 
@@ -257,21 +300,23 @@ def sync(conn: sqlite3.Connection, cfg: Config, apis: Callable[[str], LabelsApi 
          ) -> dict[str, int]:
     """Bring the labels of linked mail in Gmail to what their tasks say (``wanted``)."""
     get = apis or api_for(cfg)
-    name = namer(conn, cfg)
-    stats = {"labelled": 0, "created": 0, "renamed": 0, "gone": 0, "unconfigured": 0}
+    look = looks(conn, cfg)
+    stats = {"labelled": 0, "created": 0, "updated": 0, "gone": 0, "unconfigured": 0}
     accounts = {c["account"] for c in changes(conn)}
-    accounts |= {r["account"] for r in conn.execute("SELECT account, key, name FROM gmail_labels")
-                 if r["name"] != name(r["key"])}
+    accounts |= {r["account"] for r in conn.execute("SELECT DISTINCT account FROM gmail_labels")
+                 if get_meta(conn, "gmail_labels.look:" + r["account"]) != _digest(conn, r["account"], look)}
     for account in sorted(accounts):
         api = get(account)
         if api is None:
             stats["unconfigured"] += sum(1 for c in changes(conn) if c["account"] == account)
             continue
-        existing, ids = _check(conn, api, account, name, stats)
+        existing, ids = _check(conn, api, account, look, stats)
         todo = [c for c in changes(conn) if c["account"] == account]
-        _ensure(conn, api, account, name, {k for c in todo for k in c["add"]}, existing, ids, stats)
+        _ensure(conn, api, account, look, {k for c in todo for k in c["add"]}, existing, ids, stats)
         done, gone = _send(api, todo, ids)
         _record(conn, done)
+        with tx(conn):
+            set_meta(conn, "gmail_labels.look:" + account, _digest(conn, account, look))
         stats["labelled"] += len(done) - gone
         stats["gone"] += gone
     return stats
