@@ -8,6 +8,14 @@ source is `~/.hermes/hermes-agent`, commit
 `105568c1558e1cb494e6edf1a2998d524ebe809e`, install stamp base version **0.21.5**,
 display version **0.21.5+4108.g105568c**. No Hermes source patch is part of this change.
 
+Re-checked 2026-10-15 against `ca069e1223` (installed 2026-10-15 01:05Z): `_worker_argv` no
+longer builds `hermes -p <profile> chat`; it starts `hermes_cli.kanban_worker_client`, which
+submits the claim to the profile owner (the gateway, `kanban.run`). The owner refuses any
+profile but the card's assignee and preloads only the card's own skills
+(`gateway/session_kanban.py`, `build_kanban_policy`), so the contract the probe checks (assignee
+profile, no extra skills) holds; `tests/integration/native_contract_probe.py` checks either form.
+The full suite passes against this commit; no card has run through the owner yet.
+
 Official documents were read from that exact checkout under `website/docs/`: features/cron,
 features/context-files, features/memory, features/kanban, features/kanban-worker-lanes and
 related implementation files. These are official repository documents, not assumptions about

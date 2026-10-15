@@ -1,4 +1,5 @@
 """Real Hermes kernel + simulated worker, synthetic data and no network/model calls."""
+import inspect
 import json
 import os
 from pathlib import Path
@@ -80,7 +81,15 @@ with connect_closing(board=board) as conn:
     from hermes_cli.kanban_specify import _task_prompt_fields
     assert len(_task_prompt_fields(kb.get_task(conn, long_id))['body']) < len(worker_context)
     argv = dispatch._worker_argv(kb.get_task(conn, long_id), 'default', str(home))
-    assert '-p' in argv and '--skills' not in argv
+    if argv[-1] == 'hermes_cli.kanban_worker_client':
+        # Since 2026-10 (ca069e1) the profile owner (gateway) runs the card: it refuses any profile
+        # but the assignee's and preloads only the card's own skills (gateway.session_kanban).
+        from gateway.session_kanban import build_kanban_policy
+        assert kb.get_task(conn, long_id).assignee == 'default' and not kb.get_task(conn, long_id).skills
+        assert 'resolve_profile_env(task.assignee)' in inspect.getsource(build_kanban_policy)
+        assert 'skills = list(task.skills or ())' in inspect.getsource(build_kanban_policy)
+    else:
+        assert '-p' in argv and '--skills' not in argv
     report['worker_protocol_survives_clipping_and_decomposer_is_shorter'] = True
 
 workspace = home / 'workspace'
