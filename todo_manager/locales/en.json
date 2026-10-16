@@ -259,5 +259,6 @@
   "gmail_labels.other": "Other",
   "gmail_labels.open": "Open",
   "gmail_labels.done": "Done",
-  "gmail_labels.cancelled": "Cancelled"
+  "gmail_labels.cancelled": "Cancelled",
+  "dlg.failed_note": "Agent run failed: retry or cancel"
 }

@@ -196,19 +196,24 @@ def due_checks(conn: sqlite3.Connection, cfg: Config) -> list[tuple[str, str, st
     it is claimed by a run and done when that run updates the task or reports it checked; a run
     that ends without either (``run done``) or never reports back (lease) leaves it due again, for
     a bounded number of attempts, then it is marked failed (reported by health). A new date is a
-    new check. A task offered for its follow-up is offered for its due date at a later run."""
+    new check. A task offered for its follow-up is offered for its due date at a later run.
+    A task with agent work in progress (also parked until a start time) is left to that work:
+    its checks come due again once the work has ended."""
+    from .delegation import ACTIVE
     today = clock.local_date(cfg.tz).isoformat()
+    busy = (" AND NOT EXISTS (SELECT 1 FROM delegations d WHERE d.task_id=t.id AND d.status IN (%s))"
+            % ",".join(f"'{s}'" for s in ACTIVE))
     cutoff = clock.iso(clock.now() - timedelta(minutes=STALE_CLAIM_MINUTES))
     rows = conn.execute(
         "SELECT t.id, substr(t.follow_up_date,1,10) AS due, 'followup' AS kind, f.state, f.claimed_at, f.attempts"
         " FROM tasks t LEFT JOIN followup_checks f ON f.task_id=t.id AND f.due=substr(t.follow_up_date,1,10)"
         " WHERE t.status IN ('todo','in_progress','waiting') AND t.follow_up_date IS NOT NULL"
         " AND substr(t.follow_up_date,1,10) <= ? AND (t.snooze_until IS NULL OR substr(t.snooze_until,1,10) <= ?)"
-        " UNION ALL"
+        + busy + " UNION ALL"
         " SELECT t.id, ? || substr(t.due_date,1,10), 'due', f.state, f.claimed_at, f.attempts"
         " FROM tasks t LEFT JOIN followup_checks f ON f.task_id=t.id AND f.due=? || substr(t.due_date,1,10)"
         " WHERE t.status IN ('todo','in_progress','waiting','decision') AND t.due_date IS NOT NULL"
-        " AND substr(t.due_date,1,10) < ? AND (t.snooze_until IS NULL OR substr(t.snooze_until,1,10) <= ?)",
+        " AND substr(t.due_date,1,10) < ? AND (t.snooze_until IS NULL OR substr(t.snooze_until,1,10) <= ?)" + busy,
         (today, today, DUE_CHECK, DUE_CHECK, today, today)).fetchall()
     due: dict[str, tuple[str, str, str]] = {}
     for r in rows:

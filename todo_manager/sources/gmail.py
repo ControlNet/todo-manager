@@ -5,6 +5,8 @@
   including the user's own sent replies (commitments / reply evidence).
 * Label/read-state changes create no items: "read" or "archived" is never completion and
   never a new task signal.
+* A mail is the user's when its sender is one of the identity addresses, or it is SENT from one
+  of the mailbox's send-as addresses (``send_as``); SENT alone is not authorship.
 * If the stored historyId has expired, falls back to a paginated ``messages.list`` over the
   window since the last success minus an overlap, capturing the profile historyId first.
 * Large backlogs are worked through a persisted thread queue; nothing is silently capped.
@@ -187,6 +189,7 @@ class GmailSource:
         self.max_seconds = max_seconds_per_run
         self._deadline = None
         self._parts = None
+        self._send_as: set[str] | None = None
 
     @property
     def scope(self) -> str:
@@ -391,6 +394,21 @@ class GmailSource:
                 return f"gmail:{self.account}:{thread}"
         return None
 
+    def send_as(self) -> set[str]:
+        """Addresses this mailbox sends as (``settings.sendAs``), read once per run. Gmail puts
+        SENT on mail it sends for the user, e.g. a Google Forms receipt from forms-receipts-noreply,
+        so SENT alone does not make a mail the user's. A permanent refusal (scope) leaves only the
+        identity addresses; a transient one fails the fetch (retried)."""
+        if self._send_as is None:
+            try:
+                data = self._get("settings/sendAs")
+            except SourceError as exc:
+                if not any(f"HTTP {status}" in str(exc) for status in PERMANENT_STATUSES):
+                    raise
+                data = {}
+            self._send_as = {a["sendAsEmail"].lower() for a in data.get("sendAs", []) if a.get("sendAsEmail")}
+        return self._send_as
+
     def _body_part(self, message_id: str, attachment_id: str) -> str | None:
         """A text part stored by reference. A transient failure fails the fetch (it is retried
         and its checkpoint retains this message); a permanent one returns None (recorded as incomplete)."""
@@ -417,7 +435,7 @@ class GmailSource:
         body, attachments, notes = extract_body(payload, lambda att: self._body_part(msg["id"], att))
         sender_name, sender = parseaddr(headers.get("from", ""))
         sender = sender.lower()
-        author_is_me = "SENT" in labels or sender in self.me
+        author_is_me = sender in self.me or ("SENT" in labels and sender in self.send_as())
         to = [a.lower() for _, a in getaddresses([headers.get("to", "")]) if a]
         cc = [a.lower() for _, a in getaddresses([headers.get("cc", "")]) if a]
         recipients = to + cc

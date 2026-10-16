@@ -124,8 +124,10 @@ def report(conn: sqlite3.Connection, cfg: Config) -> dict[str, Any]:
     out["runs"] = {}
     for entry in ENTRIES:
         last = conn.execute("SELECT * FROM runs WHERE entry=? ORDER BY started_at DESC LIMIT 1", (entry,)).fetchone()
-        woke = conn.execute("SELECT * FROM runs WHERE entry=? AND wake=1 ORDER BY started_at DESC LIMIT 1",
-                            (entry,)).fetchone()
+        # A problems-only wake is told to make no changes: it reports no `run done`.
+        woke = conn.execute("SELECT * FROM runs WHERE entry=? AND wake=1"
+                            " AND wake_reasons NOT IN ('[\"problems\"]', '[\"source_problems\"]')"
+                            " ORDER BY started_at DESC LIMIT 1", (entry,)).fetchone()
         out["runs"][entry] = {
             "last": dict(id=last["id"], at=last["started_at"], status=last["status"], error=last["error"])
             if last else None,

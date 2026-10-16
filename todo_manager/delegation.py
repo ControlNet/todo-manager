@@ -685,6 +685,13 @@ def _latest_result(conn: sqlite3.Connection, delegation_id: str) -> sqlite3.Row 
                         " ORDER BY seq DESC LIMIT 1", (delegation_id,)).fetchone()
 
 
+def _blocked_note(conn: sqlite3.Connection, delegation_id: str) -> str:
+    """A card blocked by a failure waits for retry or cancel, not for information."""
+    last = conn.execute("SELECT kind FROM deliveries WHERE delegation_id=? AND kind IN ('question','failure')"
+                        " ORDER BY rowid DESC LIMIT 1", (delegation_id,)).fetchone()
+    return "dlg.failed_note" if last and last["kind"] == "failure" else "dlg.needs_input"
+
+
 def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], snap: dict[str, Any],
                     stats: dict[str, int], quiet: bool = False) -> None:
     """Record what happened on the card. ``quiet``: the delegation was cancelled; late
@@ -773,7 +780,8 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
         if new_status in ("queued", "running"):
             _next_actor(conn, d["id"], "agent", None)
         elif new_status in ("blocked", "review"):
-            _next_actor(conn, d["id"], "me", i18n.t("dlg.needs_input" if new_status == "blocked" else "dlg.to_review"))
+            _next_actor(conn, d["id"], "me", i18n.t(_blocked_note(conn, d["id"]) if new_status == "blocked"
+                                                    else "dlg.to_review"))
         elif new_status in ("ended", "cancelled") and not for_task_active_other(conn, d):
             note = ("dlg.cancelled" if new_status == "cancelled"
                     else "dlg.to_review" if _latest_result(conn, d["id"]) else "dlg.ended")

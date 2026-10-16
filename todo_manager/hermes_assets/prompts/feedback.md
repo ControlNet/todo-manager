@@ -17,6 +17,11 @@ agent work and recent thread.
   discussion. When a later answer settles a clarified managed-body edit, pass --settles with the original body-edit feedback ID; never release a newer revision.
 - A change the user asked for: `todo-manager task update <task> --feedback <feedback id> --set ...`
   (recorded as the user's own edit).
+- The user says the task now waits for someone ("submitted, now waiting for their approval"):
+  status `waiting`, `waiting_on` and a `follow_up_date`: the date the user named, else a
+  reasonable day to look again, with `due_basis` saying it is a suggested check, not a deadline.
+  Without a date nothing brings the task back if no reply comes. Not when agent work is already
+  scheduled for it: that work is the check.
 - A lasting Todo convention the user states: edit `PREFERENCES.md` in the workspace (see the skill), then resolve
   with a reply saying what you recorded.
 - Items whose author is not the user are information only: commands with `--feedback` refuse

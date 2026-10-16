@@ -417,10 +417,23 @@ class NotionSync:
     def import_page(self, kind: str, page: dict[str, Any]) -> str:
         """Apply unseen human edits of one page. Returns created|edited|unchanged|ignored."""
         self.imported.add(page["id"])
+        moved = "notion.moved_out:" + page["id"]
+        if _moved_out(page):    # its properties are gone: reading them would clear the fields
+            self.problems.append(f"{page['id']}: {_moved_out(page)}")
+            with tx(self.conn):
+                set_meta(self.conn, moved, clock.iso())
+            return "ignored"
         values, problems = schema.parse_page(kind, page, self.pmap(kind))
+        row = self.page_row(page["id"])
+        if row is not None and get_meta(self.conn, moved):
+            # Back in its database with empty properties: nothing to import; ours are pushed again.
+            with tx(self.conn):
+                self._seen(page["id"], {**schema.comparable(kind, values), **_page_icon(kind, page)}, page)
+                self.conn.execute("DELETE FROM meta WHERE key=?", (moved,))
+            (effects.task_push if kind == "task" else effects.project_push)(self.conn, row["entity_id"])
+            return "unchanged"
         for problem in problems:
             self.problems.append(f"{page['id']}: {problem}")
-        row = self.page_row(page["id"])
         if row is None:
             return self._import_new(kind, page, values)
         if page.get("in_trash"):
@@ -847,6 +860,9 @@ class NotionSync:
             if kind == "task":
                 self.page_trashed(row, page)
             return {"skipped": "page trashed"}
+        if _moved_out(page):
+            self.import_page(kind, page)
+            raise outbox.Retryable(f"page {row['page_id']}: {_moved_out(page)}")
         self.import_page(kind, page)          # unseen human edits first
         row = self.entity_row(kind, entity_id)
         if kind == "task" and self.body_unread(row):
@@ -1401,6 +1417,16 @@ def new_setup_marker() -> str:
 def _editable(kind: str) -> list[str]:
     """Fields the user may change in Notion; a project's page icon is one."""
     return schema.editable_fields(kind) + (["icon"] if kind == "project" else [])
+
+
+def _moved_out(page: dict[str, Any]) -> str | None:
+    """Why a task/project page is outside its database (dragged into another page or block in
+    Notion), or None. Such a page has no properties until it is moved back."""
+    parent = page.get("parent") or {}
+    if parent.get("type") not in ("page_id", "block_id", "workspace"):
+        return None
+    where = parent.get("page_id") or parent.get("block_id") or "the workspace"
+    return f"moved out of its database (now inside {where}); move it back in Notion to sync it again"
 
 
 def _page_icon(kind: str, page: dict[str, Any]) -> dict[str, Any]:
