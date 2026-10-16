@@ -20,11 +20,17 @@ def start(conn: sqlite3.Connection, entry: str) -> str:
 
 
 def finish(conn: sqlite3.Connection, run_id: str, *, status: str, wake: bool = False,
-           reasons: list[str] | None = None, summary: dict[str, Any] | None = None, error: str | None = None) -> None:
+           reasons: list[str] | None = None, summary: dict[str, Any] | None = None, error: str | None = None,
+           released: bool = False) -> None:
+    """``released``: the run claims nothing (a problems-only wake), so it is settled at once; it
+    does not wait for a `run done` that its prompt does not ask for."""
+    now = clock.iso()
     with tx(conn):
         conn.execute(
-            "UPDATE runs SET finished_at=?, status=?, wake=?, wake_reasons=?, summary=?, error=? WHERE id=?",
-            (clock.iso(), status, 1 if wake else 0, dumps(reasons or []), dumps(summary or {}), error, run_id))
+            "UPDATE runs SET finished_at=?, status=?, wake=?, wake_reasons=?, summary=?, error=?,"
+            " released_at=COALESCE(released_at, ?) WHERE id=?",
+            (now, status, 1 if wake else 0, dumps(reasons or []), dumps(summary or {}), error,
+             now if released else None, run_id))
 
 
 def get(conn: sqlite3.Connection, run_id: str) -> dict[str, Any] | None:

@@ -305,7 +305,8 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[
             summary["problems_reported"] = [f"{p['source']}:{p['scope']}" for p in problems]
         if not plan.wake:
             if problems:
-                runs.finish(conn, run_id, status="woke", wake=True, reasons=["source_problems"], summary=summary)
+                runs.finish(conn, run_id, status="woke", wake=True, reasons=["source_problems"], summary=summary,
+                            released=True)
                 shown = context.final_check(context.problems_only(cfg, run_id, "intake", problems))
                 runs.write_text(cfg.home, run_id, "context.md", shown)   # what the agent was shown
                 return shown, True

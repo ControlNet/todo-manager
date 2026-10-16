@@ -226,7 +226,8 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, *, notion: Any | None,
         items = [f for f in items if f["id"] not in waiting][: int(cfg.get("feedback.max_items_per_run", 20))]
         if not items:
             if problems:
-                runs.finish(conn, run_id, status="woke", wake=True, reasons=["problems"], summary=summary)
+                runs.finish(conn, run_id, status="woke", wake=True, reasons=["problems"], summary=summary,
+                            released=True)
                 shown = context.final_check(context.problems_only(cfg, run_id, "feedback", problems))
                 runs.write_text(cfg.home, run_id, "context.md", shown)   # what the agent was shown
                 return shown, True

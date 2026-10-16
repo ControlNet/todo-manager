@@ -72,6 +72,15 @@ class ProblemsOnlyWakeTests(WorkspaceCase):
         clock.advance(minutes=120)
         self.assertEqual(self.never_done(), [])
 
+    def test_a_problems_only_wake_does_not_block_install(self):
+        from todo_manager import gate_feedback
+        for _ in range(3):
+            health.record_channel(self.conn, "notion", "home", "Notion HTTP 400")
+        shown, woke = gate_feedback.run_gate(self.conn, self.cfg, notion=None, kanban=None)
+        self.assertTrue(woke)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM runs WHERE wake=1 AND released_at IS NULL")
+                         .fetchone()[0], 0, "install refuses while a woken run is unreleased")
+
     def test_a_business_wake_without_run_done_is_still_reported(self):
         run_id = self.wake("feedback", ["feedback:1"])
         self.wake("feedback", ["problems"])
