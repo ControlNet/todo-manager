@@ -149,18 +149,22 @@ class MovedPageTests(NotionCase):
         task = store.get_task(self.conn, self.task)
         self.assertEqual((task["status"], task["next_step"]), ("cancelled", "确认整理范围"))
 
-    def test_moved_back_its_properties_are_written_again_not_imported_as_cleared(self):
-        self.move_out()
+    def test_moved_back_with_its_properties_the_users_edit_is_imported_and_ours_pushed(self):
+        saved = __import__("copy").deepcopy(self.fake.pages[self.page]["properties"])
         clock.advance(minutes=3)
-        store.update_task(self.conn, self.task, {"status": "cancelled"}, actor="agent", origin="intake")
+        self.fake.user_edit(self.page, 状态="完成")        # the user's edit, then the card is dropped
+        saved["状态"] = __import__("copy").deepcopy(self.fake.pages[self.page]["properties"]["状态"])
+        self.move_out()
         self.push(self.task)
-        self.fake.pages[self.page]["parent"] = {"type": "data_source_id", "data_source_id": self.tasks_ds}
+        page = self.fake.pages[self.page]
+        page["parent"] = {"type": "data_source_id", "data_source_id": self.tasks_ds}
+        page["properties"] = saved                      # Notion restores them on the way back
         clock.advance(minutes=10)
+        self.pull()
         self.conn.execute("UPDATE outbox SET next_attempt_at=? WHERE status='failed'", (clock.iso(),))
         self.drain()
         task = store.get_task(self.conn, self.task)
-        self.assertEqual((task["status"], task["next_step"]), ("cancelled", "确认整理范围"))
-        self.assertEqual(self.fake.prop(self.page, "状态"), "取消")
+        self.assertEqual((task["status"], task["next_step"]), ("done", "确认整理范围"))
         self.assertEqual(self.fake.prop(self.page, "TM ID"), self.task)
 
     def test_a_direct_read_of_the_moved_page_imports_nothing(self):
