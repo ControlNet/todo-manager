@@ -839,6 +839,9 @@ def delegate_create(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, *, task_id:
             # to Agent, so the card leaves the board.
             store.update_task(conn, task_id, {"status": "todo", "next_actor": "agent", "decision": None},
                               actor="human", origin=ctx.origin, cause_ref=did)
+            # Part of starting the work, not a later choice of the user's: the baseline moves with it.
+            conn.execute("UPDATE delegations SET base_task_version=(SELECT version FROM tasks WHERE id=?) WHERE id=?",
+                         (task_id, did))
             effects.task_push(conn, task_id)
         return {"delegation": did}
 
