@@ -81,6 +81,18 @@ class SettlementContracts(WorkspaceCase):
         self.assertTrue(json.loads(text)['duplicate'])
         self.assertEqual(invoke(self.tmp, 'run', 'done', run)[0], 2)
 
+    def test_a_repeated_checked_option_adds_to_the_list(self):
+        # 2026-10-19: an intake run wrote `--checked A --checked B --checked C`; only C was kept,
+        # so A's follow-up was never confirmed and its retries ran out.
+        tasks = [store.create_task(self.conn, f'Follow up {n}', origin='cli', follow_up_date='2026-10-05')
+                 for n in range(3)]
+        run = runs.start(self.conn, 'intake')
+        for task in tasks:
+            self.claim(run, task)
+        code, text = invoke(self.tmp, 'run', 'done', run, '--checked', tasks[0], '--checked', tasks[1], tasks[2])
+        self.assertEqual(code, 0, text)
+        self.assertEqual([r[0] for r in self.conn.execute('SELECT state FROM followup_checks')], ['done'] * 3)
+
     def test_changed_followup_and_missing_digest_are_not_confirmed(self):
         task = store.create_task(self.conn, 'Changed follow up', origin='cli', follow_up_date='2026-10-06')
         run = runs.start(self.conn, 'intake')

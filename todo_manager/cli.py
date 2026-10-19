@@ -797,7 +797,7 @@ def build_parser() -> argparse.ArgumentParser:
     x = rs.add_parser("done", help="end of a run: what it left unhandled is offered again")
     x.add_argument("id")
     x.add_argument("--note")
-    x.add_argument("--checked", nargs="+", default=[])
+    x.add_argument("--checked", nargs="+", action="extend", default=[])
     x.add_argument("--digest-reviewed", action="store_true")
     s.set_defaults(fn=cmd_run)
 
