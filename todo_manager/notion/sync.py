@@ -429,6 +429,8 @@ class NotionSync:
         if page.get("in_trash"):
             if kind == "task" and not row["trashed"]:
                 self.page_trashed(row, page)
+            elif not row["trashed"]:
+                self._project_page_trashed(row)
             return "edited"
         if row["trashed"]:
             self._page_restored(kind, row, page)
@@ -740,6 +742,11 @@ class NotionSync:
                 store.set_closed_reason(self.conn, task["id"], reason)
                 delegation.on_task_closed(self.conn, task["id"], "cancelled", reason, fid)
 
+    def _project_page_trashed(self, row: dict[str, Any]) -> None:
+        """No more pushes to a project page in the trash (the project itself is unchanged)."""
+        with tx(self.conn):
+            self.conn.execute("UPDATE notion_pages SET trashed=1 WHERE page_id=?", (row["page_id"],))
+
     def _page_restored(self, kind: str, row: dict[str, Any], page: dict[str, Any]) -> None:
         with tx(self.conn):
             self.conn.execute("UPDATE notion_pages SET trashed=0 WHERE page_id=?", (row["page_id"],))
@@ -849,6 +856,8 @@ class NotionSync:
         if page.get("in_trash"):
             if kind == "task":
                 self.page_trashed(row, page)
+            else:
+                self._project_page_trashed(row)
             return {"skipped": "page trashed"}
         if _moved_out(page):
             raise outbox.Retryable(f"page {row['page_id']}: {_moved_out(page)}")

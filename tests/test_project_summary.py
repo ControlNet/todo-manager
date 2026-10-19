@@ -224,3 +224,32 @@ class ProjectTaskViewTests(ProjectCase):
         self.assertEqual(loads(get_meta(self.conn, "notion.project_views"), {}), {pid: view["id"]})
         self.assertFalse(self.conn.execute(
             "SELECT 1 FROM outbox WHERE op='project_view' AND status!='done'").fetchone())
+
+
+class TrashedProjectPageTests(ProjectCase):
+    def test_a_project_page_in_the_trash_is_not_pushed_again_and_again(self):
+        pid = self.project()
+        self.sync_now()
+        self.fake.user_trash(self.page(pid)["id"])
+        self.pull()                                 # a query does not return pages in the trash
+        self.task(pid, "New work")
+        self.sync_now()                             # the push finds the page in the trash
+        pushes = self.conn.execute("SELECT count(*) FROM outbox WHERE op='push_project' AND entity_id=?",
+                                   (pid,)).fetchone()[0]
+        self.task(pid, "More work")
+        self.sync_now()
+        self.sync_now()
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM outbox WHERE op='push_project' AND entity_id=?",
+                                           (pid,)).fetchone()[0], pushes)
+
+    def test_a_restored_project_page_is_updated_again(self):
+        pid = self.project()
+        self.sync_now()
+        self.fake.user_trash(self.page(pid)["id"])
+        self.pull()
+        self.task(pid, "New work")
+        self.sync_now()
+        self.fake.user_trash(self.page(pid)["id"], False)
+        self.pull()
+        self.sync_now()
+        self.assertEqual(self.prop(pid, "下一步"), "New work")
