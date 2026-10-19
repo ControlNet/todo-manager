@@ -110,14 +110,19 @@ Next step, blockers and recent progress are worked out from the project's tasks
 (`todo_manager/project_summary.py`) and rewritten whenever they change; an edit to them in
 Notion is put back. Change the tasks instead:
 
+Each is one short line for the project table; the tasks themselves are listed on the project
+page (below).
+
 - **Next step**: the open task whose next actor is you (not snoozed) with the earliest due date
-  (then focus, follow-up date, age), with its own next step and due date, and how many more are
-  yours. With none for you: how many the agent has, how many wait on others, how many are snoozed;
-  or "No open tasks".
-- **Blockers**: agent work waiting for your answer, tasks to decide, then tasks waiting on someone
-  (with the follow-up date, marked when it has passed). Empty when nothing blocks.
-- **Recent progress**: the last 14 days, newest first: tasks done, agent results delivered and
-  the commit digest (when it is on). At most five lines each.
+  (then focus, follow-up date, age): its title (clipped to 28 characters), its due date (marked
+  when passed) and how many more are yours, e.g. "Send the camera-ready · due 10/9 · 1 more". With
+  none for you: "Nothing for me" plus how many the agent has and how many are snoozed; or "No open
+  tasks".
+- **Blockers**: counts of agent work waiting for your answer, tasks to decide and tasks waiting on
+  others (with how many follow-ups have passed). Empty when nothing blocks.
+- **Recent progress**: the last 14 days: how many tasks were done, how many agent results were
+  delivered (one count per task), whether the commit digest saw code changes, and the latest one
+  with its date.
 - **Progress date**: the latest of those events, however old, so a quiet project shows when it
   last moved.
 

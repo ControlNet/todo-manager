@@ -46,14 +46,13 @@ class NextStepTests(ProjectCase):
         self.task(pid, "Collect reviews", status="waiting", waiting_on="the chairs")
         self.task(pid, "Run baselines", next_actor="agent")
         self.sync_now()
-        self.assertEqual(self.prop(pid, "下一步"),
-                         "Send the camera-ready：Ask Bob for the figures（截止 10-09）；另有 1 项待我处理")
+        self.assertEqual(self.prop(pid, "下一步"), "Send the camera-ready · 截止 10/9 · 另 1 项")
 
-    def test_a_long_next_step_is_clipped_and_a_passed_due_date_is_marked(self):
+    def test_a_long_title_is_clipped_and_a_passed_due_date_is_marked(self):
         pid = self.project()
-        self.task(pid, "Fix the server", due_date="2026-10-01", next_step="Take it to the shop " + "x" * 100)
+        self.task(pid, "Take the server to the shop " + "x" * 40, due_date="2026-10-01")
         self.sync_now()
-        self.assertEqual(self.prop(pid, "下一步"), "Fix the server：Take it to the shop " + "x" * 40 + "…（已过截止 10-01）")
+        self.assertEqual(self.prop(pid, "下一步"), "Take the server to the shop… · 已过期 10/1")
 
     def test_without_a_task_for_me_it_says_who_has_the_work(self):
         pid = self.project()
@@ -61,7 +60,7 @@ class NextStepTests(ProjectCase):
         self.task(pid, "Run baselines", next_actor="agent")
         self.task(pid, "Read later", snooze_until="2026-10-30")
         self.sync_now()
-        self.assertEqual(self.prop(pid, "下一步"), "Agent 处理中 1 项；等待别人 1 项；暂缓中 1 项")
+        self.assertEqual(self.prop(pid, "下一步"), "暂无我要做的 · Agent 处理中 1 · 暂缓 1")
 
     def test_a_project_without_open_tasks_says_so(self):
         pid = self.project()
@@ -71,25 +70,14 @@ class NextStepTests(ProjectCase):
 
 
 class BlockerTests(ProjectCase):
-    def test_questions_decisions_and_waiting_are_blockers(self):
+    def test_decisions_and_waiting_are_counted(self):
         pid = self.project()
         self.task(pid, "Pick a venue", status="decision")
         self.task(pid, "Collect reviews", status="waiting", waiting_on="the chairs", follow_up_date="2026-10-03")
         self.task(pid, "Get the GPU quota", status="waiting", follow_up_date="2026-10-12")
         self.task(pid, "Write the rebuttal")
         self.sync_now()
-        self.assertEqual(self.prop(pid, "阻碍").splitlines(), [
-            "待我决定：Pick a venue",
-            "等 the chairs：Collect reviews（跟进已过期：10-03）",
-            "等待中：Get the GPU quota（10-12 跟进）",
-        ])
-
-    def test_tasks_waiting_on_the_same_people_share_a_line(self):
-        pid = self.project()
-        for n, follow_up in ((1, "2026-10-23"), (2, "2026-10-04"), (3, None)):
-            self.task(pid, f"PR #{n}", status="waiting", waiting_on="the maintainers", follow_up_date=follow_up)
-        self.sync_now()
-        self.assertEqual(self.prop(pid, "阻碍"), "等 the maintainers：3 项（最早跟进已过期：10-04）")
+        self.assertEqual(self.prop(pid, "阻碍"), "待我决定 1 · 等别人 2（1 项跟进过期）")
 
     def test_no_blockers_leaves_the_column_empty(self):
         pid = self.project()
@@ -99,7 +87,7 @@ class BlockerTests(ProjectCase):
 
 
 class RecentProgressTests(ProjectCase):
-    def test_tasks_done_in_the_last_two_weeks_newest_first(self):
+    def test_tasks_done_in_the_last_two_weeks_and_the_latest(self):
         pid = self.project()
         old = self.task(pid, "Old milestone")
         self.close(old)
@@ -111,11 +99,10 @@ class RecentProgressTests(ProjectCase):
         clock.advance(days=2)                       # now 2026-10-27
         self.close(self.task(pid, "Submit the paper"))
         self.sync_now()
-        self.assertEqual(self.prop(pid, "近期进展").splitlines(),
-                         ["10-27 完成：Submit the paper", "10-25 完成：Draft the paper"])
+        self.assertEqual(self.prop(pid, "近期进展"), "14 天内：完成 2 项 · 最新：Submit the paper（10/27）")
         self.assertEqual(self.prop(pid, "进展时间"), "2026-10-27")
 
-    def test_one_line_per_task(self):
+    def test_one_count_per_task(self):
         pid = self.project()
         tid = self.task(pid, "Draft the poster", next_actor="agent")
         self.conn.execute("INSERT INTO delegations(id, task_id, title, goal, status, board, idem_key, base_task_version,"
@@ -124,17 +111,17 @@ class RecentProgressTests(ProjectCase):
         self.conn.execute("INSERT INTO deliveries(id, delegation_id, card_id, run_id, kind, seq, received_at)"
                           " VALUES ('v1', 'd1', 'c1', 'r1', 'result', 1, ?)", (clock.iso(),))
         self.sync_now()
-        self.assertEqual(self.prop(pid, "近期进展"), "10-05 Agent 交付：Draft the poster")
+        self.assertEqual(self.prop(pid, "近期进展"), "14 天内：Agent 交付 1 项 · 最新：Draft the poster（10/5）")
         clock.advance(days=1)
         self.close(tid)
         self.sync_now()
-        self.assertEqual(self.prop(pid, "近期进展"), "10-06 完成：Draft the poster")
+        self.assertEqual(self.prop(pid, "近期进展"), "14 天内：完成 1 项 · 最新：Draft the poster（10/6）")
 
     def test_the_commit_digest_still_counts(self):
         pid = self.project()
         ops.project_update(self.conn, self.cfg, self.ctx(), pid, changes={"recent_activity": "3 commits on the parser"})
         self.sync_now()
-        self.assertEqual(self.prop(pid, "近期进展"), "10-05 提交：3 commits on the parser")
+        self.assertEqual(self.prop(pid, "近期进展"), "14 天内：代码有更新 · 最新：3 commits on the parser（10/5）")
         clock.advance(days=15)
         self.sync_now()
         self.assertEqual(self.prop(pid, "近期进展"), "", "an old digest is no longer recent")
@@ -148,7 +135,7 @@ class RecentProgressTests(ProjectCase):
         self.close(tid)
         self.sync_now()
         self.assertEqual(self.prop(pid, "下一步"), "没有未完成任务")
-        self.assertEqual(self.prop(pid, "近期进展"), "10-05 完成：Draft the paper")
+        self.assertEqual(self.prop(pid, "近期进展"), "14 天内：完成 1 项 · 最新：Draft the paper（10/5）")
 
 
 class OwnershipTests(ProjectCase):
