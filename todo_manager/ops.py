@@ -458,16 +458,22 @@ def task_link(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, task_id: str,
 
 # --------------------------------------------------------------------------- projects
 
+# Shown in Notion from the project's tasks (``project_summary``); written by nobody.
+DERIVED_PROJECT_FIELDS = ("next_step", "blockers")
+DERIVED_NOTE = ("a project's next_step and blockers come from its tasks: change the tasks instead"
+                " (recent_activity takes the commit digest only)")
+
 def project_create(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, *, title: str, fields: dict[str, Any],
                    repos: list[str], evidence: list[tuple[str, str]] | None = None,
                    reason: str | None = None) -> dict[str, Any]:
     evidence = evidence or []
     if not (title or "").strip():
         raise OpError("INVALID", "--title is required")
-    unknown = set(fields) - {"domain", "goal", "next_step", "status", "icon"}
+    if set(fields) & set(DERIVED_PROJECT_FIELDS):
+        raise OpError("INVALID", DERIVED_NOTE)
+    unknown = set(fields) - {"domain", "goal", "status", "icon"}
     if unknown:
-        raise OpError("INVALID", f"unknown fields {sorted(unknown)} for a new project (domain, goal, next_step, status,"
-                                 " icon)")
+        raise OpError("INVALID", f"unknown fields {sorted(unknown)} for a new project (domain, goal, status, icon)")
     fields = _checked_icon(fields)
     args = {"title": title, "fields": fields, "repos": repos, "evidence": evidence}
 
@@ -511,6 +517,8 @@ def project_update(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, project_id: 
     evidence = evidence or []
     if store.get_project(conn, project_id) is None:
         raise OpError("NOT_FOUND", f"no project {project_id}")
+    if set(changes) & set(DERIVED_PROJECT_FIELDS):
+        raise OpError("INVALID", DERIVED_NOTE)
     unknown = set(changes) - set(store.PROJECT_FIELDS)
     if unknown:
         raise OpError("INVALID", f"unknown project fields {sorted(unknown)}; fields: {', '.join(store.PROJECT_FIELDS)}")

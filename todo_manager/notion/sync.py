@@ -49,10 +49,10 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from .. import clock, delegation, effects, feedback, health, i18n, ids, outbox, project_icons, store
+from .. import clock, delegation, effects, feedback, health, i18n, ids, outbox, project_icons, project_summary, store
 from ..config import Config
 from ..db import dumps, get_meta, loads, set_meta, tx
-from . import body, delivery_pages, schema
+from . import body, delivery_pages, project_views, schema
 from .client import NotionClient, NotionError, NotionUncertain, plain_text
 
 TRASH_REASON = "sync.trash_reason"    # catalog keys
@@ -215,10 +215,10 @@ class NotionSync:
         return values
 
     def project_values(self, project: dict[str, Any]) -> dict[str, Any]:
-        values = {f: project.get(f) for f in ("title", "status", "domain", "goal", "next_step", "blockers",
-                                              "recent_activity")}
+        values = {f: project.get(f) for f in ("title", "status", "domain", "goal")}
         values["repos"] = ", ".join(project.get("repos") or []) or None
-        values["recent_activity_at"] = project.get("recent_activity_at")
+        # Next step, blockers, recent progress and its date: from the project's tasks.
+        values.update(project_summary.summarize(self.conn, project, self.cfg.tz, self.state.language))
         values["tm_id"] = project["id"]
         return values
 
@@ -1358,11 +1358,15 @@ class NotionSync:
             if row is None or row["last_seen_props"] != {**row["last_seen_props"], **target}:
                 if effects.project_push(self.conn, p["id"]):
                     count += 1
-        return count
+        return count + project_views.enqueue_missing(self)
 
     def handlers(self) -> dict[tuple[str, str], Any]:
         return {("notion", "push_task"): self.push_task, ("notion", "push_project"): self.push_project,
-                ("notion", "comment"): self.post_comment, ("notion", "push_delivery"): self.push_delivery}
+                ("notion", "comment"): self.post_comment, ("notion", "push_delivery"): self.push_delivery,
+                ("notion", "project_view"): self.push_project_view}
+
+    def push_project_view(self, item: dict[str, Any], reconcile: bool) -> Any:
+        return project_views.push(self, item["payload"]["project_id"], reconcile)
 
     def push_delivery(self, item: dict[str, Any], reconcile: bool) -> Any:
         return delivery_pages.push(self, item["payload"]["delivery_id"])

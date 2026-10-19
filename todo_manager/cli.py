@@ -21,7 +21,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from . import clock, config, db, delegation, feedback, health, i18n, ops, prefs, store
+from . import clock, config, db, delegation, feedback, health, i18n, ops, prefs, project_summary, store
 from .db import dumps, loads
 from .locks import LockBusy
 
@@ -336,6 +336,7 @@ def cmd_project(args: argparse.Namespace) -> int:
         p = store.get_project(conn, args.id)
         if p is None:
             return _fail("NOT_FOUND", args.id)
+        p.update(project_summary.summarize(conn, p, cfg.tz, None))   # as shown in Notion
         p["tasks"] = [_task_line(t) for t in store.list_tasks(conn, store.TASK_STATUSES, project_id=args.id)]
         if args.history:
             p["history"] = store.history(conn, "project", args.id)

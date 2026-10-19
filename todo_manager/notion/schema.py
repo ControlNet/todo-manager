@@ -7,8 +7,8 @@ keys) in the language that was active at setup; option names of every language a
 accepted when reading.
 
 Editable properties are imported back as human edits. Program-owned properties
-(TM ID, agent work state, source) are rewritten from local state; manual edits to
-them are reverted on the next push.
+(TM ID, agent work state, source, a project's next step, blockers and recent progress) are
+rewritten from local state; manual edits to them are reverted on the next push.
 """
 
 from __future__ import annotations
@@ -98,9 +98,9 @@ PROJECT_PROPS: tuple[Prop, ...] = (
     Prop("project", "status", "select", group="project_status"),
     Prop("project", "domain", "select"),
     Prop("project", "goal", "rich_text"),
-    Prop("project", "next_step", "rich_text"),
-    Prop("project", "blockers", "rich_text"),
-    Prop("project", "recent_activity", "rich_text"),
+    Prop("project", "next_step", "rich_text", editable=False),
+    Prop("project", "blockers", "rich_text", editable=False),
+    Prop("project", "recent_activity", "rich_text", editable=False),
     Prop("project", "repos", "rich_text"),
     Prop("project", "recent_activity_at", "date", editable=False),
     Prop("project", "tm_id", "rich_text", editable=False),

@@ -54,11 +54,12 @@ class ProjectIconTests(NotionCase):
         ops.project_update(self.conn, self.cfg, self.ctx(), pid, changes={"icon": "robot:purple"})
         self.drain()
         self.assertEqual(self.page(pid)["icon"]["icon"], {"name": "robot", "color": "purple"})
-        writes = len(self.writes())
+        page_writes = lambda: [w for w in self.writes() if w[1] != "/views"]   # noqa: E731 (the project's task view)
+        writes = len(page_writes())
         self.pull()
         self.sync.enqueue_dirty()
         self.drain()
-        self.assertEqual(len(self.writes()), writes, "our own icon is not an edit")
+        self.assertEqual(len(page_writes()), writes, "our own icon is not an edit")
 
     def test_the_users_icon_in_notion_wins(self):
         pid = self.create(icon="robot:purple")

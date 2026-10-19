@@ -243,7 +243,8 @@ def intake(conn: sqlite3.Connection, cfg: Config, run_id: str, *, followups: lis
     for p in projects[:MAX_PROJECTS]:
         more = f"todo-manager project show {p['id']}"
         repos = f" repos={','.join(p['repos'])}" if p["repos"] else ""
-        out.append(f"- {p['id']} v{p['version']} [{p['status']}] {field(p['title'], more)}{repos}")
+        goal = "" if p.get("goal") else " (no goal yet)"
+        out.append(f"- {p['id']} v{p['version']} [{p['status']}] {field(p['title'], more)}{repos}{goal}")
     if len(projects) > MAX_PROJECTS:
         out.append(f"- ... {len(projects) - MAX_PROJECTS} more: `todo-manager project list`")
     if not projects:

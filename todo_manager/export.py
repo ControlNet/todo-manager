@@ -35,7 +35,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from . import clock, db, delegation, i18n, prefs, store
+from . import clock, db, delegation, i18n, prefs, project_summary, store
 from .db import loads
 from .config import Config
 from .files import sha256_file
@@ -118,7 +118,8 @@ def _task_md(conn: sqlite3.Connection, t: dict[str, Any], projects: dict[str, st
     return "\n".join(lines) + "\n"
 
 
-def _project_md(conn: sqlite3.Connection, p: dict[str, Any]) -> str:
+def _project_md(conn: sqlite3.Connection, cfg: Config, p: dict[str, Any]) -> str:
+    p = {**p, **project_summary.summarize(conn, p, cfg.tz, None)}
     lines = [f"# {p['title']}", "", f"- ID: `{p['id']}` · {_t('status')}: {option_label('project_status', p['status'])}"
              + (f" · {_t('domain')}: {p['domain']}" if p.get("domain") else "")]
     if p.get("repos"):
@@ -211,7 +212,7 @@ def _write_export(conn: sqlite3.Connection, cfg: Config, root: Path) -> None:
     for t in store.list_tasks(conn, store.TASK_STATUSES):
         (root / "tasks" / f"{t['id']}.md").write_text(_task_md(conn, t, projects), encoding="utf-8")
     for pid in projects:
-        (root / "projects" / f"{pid}.md").write_text(_project_md(conn, store.get_project(conn, pid)), encoding="utf-8")
+        (root / "projects" / f"{pid}.md").write_text(_project_md(conn, cfg, store.get_project(conn, pid)), encoding="utf-8")
     legacy = conn.execute("SELECT * FROM rules ORDER BY status, created_at, id").fetchall()
     if legacy:
         # Legacy rule records remain audit data; semantic import into native memory is separate.

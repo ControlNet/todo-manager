@@ -97,14 +97,38 @@ Source: Email / 邮件, Slack, GitHub (issues, PRs and the commit digest), Notio
 | `title` | title | you | Project | 项目 |
 | `status` | select | you | Status | 状态 |
 | `domain` | select (free options) | you | Area | 领域 |
-| `goal` | text | you | Goal | 目标 |
-| `next_step` | text | you | Next step | 下一步 |
-| `blockers` | text | you | Blockers | 阻碍 |
-| `recent_activity` | text | you | Recent progress | 近期进展 |
+| `goal` | text | you (the intake drafts it) | Goal | 目标 |
+| `next_step` | text | Todo Manager | Next step | 下一步 |
+| `blockers` | text | Todo Manager | Blockers | 阻碍 |
+| `recent_activity` | text | Todo Manager | Recent progress | 近期进展 |
 | `repos` | text (comma separated) | you | Repositories | 仓库 |
 | `recent_activity_at` | date | Todo Manager | Progress date | 进展时间 |
 | `tm_id` | text | Todo Manager | TM ID | TM ID |
 | `updated` | last edited time | Notion | Updated | 更新于 |
+
+Next step, blockers and recent progress are worked out from the project's tasks
+(`todo_manager/project_summary.py`) and rewritten whenever they change; an edit to them in
+Notion is put back. Change the tasks instead:
+
+- **Next step**: the open task whose next actor is you (not snoozed) with the earliest due date
+  (then focus, follow-up date, age), with its own next step and due date, and how many more are
+  yours. With none for you: how many the agent has, how many wait on others, how many are snoozed;
+  or "No open tasks".
+- **Blockers**: agent work waiting for your answer, tasks to decide, then tasks waiting on someone
+  (with the follow-up date, marked when it has passed). Empty when nothing blocks.
+- **Recent progress**: the last 14 days, newest first: tasks done, agent results delivered and
+  the commit digest (when it is on). At most five lines each.
+- **Progress date**: the latest of those events, however old, so a quiet project shows when it
+  last moved.
+
+The goal stays yours. The intake writes one sentence when it creates a project, and fills in
+an empty goal when new material explains the work; your own goal is never replaced.
+
+Each active or paused project page shows a linked table **Tasks in this project / 本项目任务**:
+the project's tasks except done and cancelled ones, by due date. It is added once per project
+(`notion.project_views`), so a view you change or delete is left as it is. Like the home page
+views, it shows the source database title above it until you hide it (`···` -> "Hide database
+title").
 
 Project status: `active` Active / 进行中, `paused` Paused / 暂停, `done` Done / 完成, `archived`
 Archived / 归档. The task relation adds a back-relation column "Tasks" / "任务" to Projects.
