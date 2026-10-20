@@ -30,7 +30,7 @@ class Base(WorkspaceCase):
 
 class ApplyOnceTests(Base):
     def digest_run(self):
-        clock.advance(hours=10, minutes=5)  # 21:05 local: digest time
+        clock.advance(hours=8, minutes=5)  # 21:05 local: digest time
         self.commits.push(Item(source="commit", account="o/r", external_id="abc", conversation_key="repo:o/r",
                                occurred_at=clock.iso(), author="me-gh", title="new loader", body="new loader",
                                route="digest"))

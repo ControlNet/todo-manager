@@ -76,7 +76,7 @@ class StartAfterTests(Base):
     def test_the_task_says_when_the_agent_starts(self):
         self.delegate(start_after=LATER)
         note = store.get_task(self.conn, self.task)["change_note"]
-        self.assertIn("10-05 17:00", note, "in the workspace time zone")
+        self.assertIn("10-05 19:00", note, "in the workspace time zone")
 
     def test_a_pause_holds_the_start_and_a_resume_lets_the_time_apply(self):
         did = self.delegate(start_after=LATER)

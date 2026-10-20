@@ -10,7 +10,7 @@ __pycache__/
 /backups/
 /PREFERENCES.md
 /.test-durations.json
-/.omo/reviews
+/.omo/
 # Machine-local editor settings (point pyright at your own Hermes venv)
 /pyrightconfig.json
 # Credentials and local environment files

@@ -1,7 +1,6 @@
 """Text that reaches a Hermes prompt: the checks Hermes applies, so ours never trip them.
 
-Hermes scans two surfaces (checked at hermes-agent 105568c, see
-``.omo/knowledges/hermes-prompt-surfaces.md``):
+Hermes scans two surfaces (checked at hermes-agent 105568c):
 
 * the assembled cron prompt (skill bodies + prompt + pre-run script output): a hit on one of
   ``CRON_PATTERNS`` blocks the whole run (``tools/cronjob_prompt_scan.py``);

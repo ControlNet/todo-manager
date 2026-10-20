@@ -2,7 +2,7 @@
 
 TEST DOUBLE: ``FakeSlack`` is an in-memory stand-in for the Slack Web API (conversations.history
 with oldest/latest/cursor paging, conversations.replies with oldest/cursor paging, 429 injection).
-It is not the real service; real read-only runs are recorded in .omo/knowledges/slack-web-api.md.
+It is not the real service.
 """
 
 import json

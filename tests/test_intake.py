@@ -168,7 +168,7 @@ class IntakeWakeTests(WorkspaceCase):
         self.conn.execute("DROP TABLE daily_jobs")
         self.commits.push(Item(source="commit", account="o/r", external_id="abc", conversation_key="repo:o/r",
                                occurred_at=clock.iso(), title="c", route="digest"))
-        clock.advance(hours=10, minutes=5)
+        clock.advance(hours=8, minutes=5)
         with self.assertRaises(gate_intake.GateError):
             self.gate(commits=True)
         self.assertEqual(self.conn.execute("SELECT status FROM runs ORDER BY started_at DESC LIMIT 1").fetchone()[0],
@@ -194,7 +194,7 @@ class IntakeWakeTests(WorkspaceCase):
                                route="digest"))
         self.assertFalse(wake_of(self.gate(commits=True)))
         self.assertEqual(self.commits.calls, 0)
-        clock.advance(hours=10, minutes=5)  # 21:05 local
+        clock.advance(hours=8, minutes=5)  # 21:05 local
         out = self.gate(commits=True)
         self.assertTrue(wake_of(out))
         self.assertIn("commit_digest:1", out)
@@ -216,7 +216,7 @@ class IntakeWakeTests(WorkspaceCase):
         self.assertEqual(state, "skipped")
 
     def test_unfinished_digest_retries_are_bounded(self):
-        clock.advance(hours=10, minutes=5)
+        clock.advance(hours=8, minutes=5)
         for n in range(4):
             self.commits.push(Item(source="commit", account="o/r", external_id=f"s{n}", conversation_key="repo:o/r",
                                    occurred_at=clock.iso(), title="c", route="digest"))
@@ -228,7 +228,7 @@ class IntakeWakeTests(WorkspaceCase):
         self.assertEqual(woke, 2)  # max_attempts_per_day
 
     def test_run_done_without_digest_done_offers_it_again_at_once(self):
-        clock.advance(hours=10, minutes=5)
+        clock.advance(hours=8, minutes=5)
         self.commits.push(Item(source="commit", account="o/r", external_id="s1", conversation_key="repo:o/r",
                                occurred_at=clock.iso(), title="c", route="digest"))
         run_id = run_id_of(self.gate(commits=True))

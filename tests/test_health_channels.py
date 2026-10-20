@@ -157,7 +157,7 @@ class CommitCadenceTests(WorkspaceCase):
         return health.stale_sources(self.conn).get("commit", [])
 
     def test_a_daily_source_is_not_stale_between_its_reads(self):
-        self.at(2026, 10, 5, 10, 0)            # 21:00 NZDT
+        self.at(2026, 10, 5, 8, 0)             # 21:00 NZDT
         self.src.push(commit("a1"))
         self.check()
         clock.advance(minutes=31)
@@ -166,26 +166,26 @@ class CommitCadenceTests(WorkspaceCase):
         self.assertEqual(self.stale(), [], "the next read is not due yet")
 
     def test_a_due_read_that_failed_is_stale_at_once(self):
-        self.at(2026, 10, 5, 10, 0)
+        self.at(2026, 10, 5, 8, 0)
         self.src.push(commit("a1"))
         self.check()
-        self.at(2026, 10, 6, 10, 0)            # next day 21:00: due
+        self.at(2026, 10, 6, 8, 0)             # next day 21:00: due
         self.src.fail("HTTP 502")
         self.check()
         [row] = self.stale()
         self.assertEqual(row["consecutive_failures"], 1)
 
     def test_a_due_read_that_never_happened_is_stale(self):
-        self.at(2026, 10, 5, 10, 0)
+        self.at(2026, 10, 5, 8, 0)
         self.src.push(commit("a1"))
         self.check()
-        self.at(2026, 10, 6, 10, 31)           # 21:31 next day, no read (gate stopped, digest blocked)
+        self.at(2026, 10, 6, 8, 31)            # 21:31 next day, no read (gate stopped, digest blocked)
         self.assertEqual(len(self.stale()), 1)
 
     def test_a_25_hour_day_is_not_reported_before_the_read_is_due(self):
-        self.at(2027, 4, 3, 10, 0)             # 21:00 NZDT; the clocks go back the next night
+        self.at(2027, 4, 3, 8, 0)              # 21:00 NZDT; the clocks go back the next night
         self.src.push(commit("a1"))
         self.check()
-        clock.set_now(datetime(2027, 4, 3, 10, 0, tzinfo=timezone.utc) + timedelta(hours=24, minutes=40))
+        clock.set_now(datetime(2027, 4, 3, 8, 0, tzinfo=timezone.utc) + timedelta(hours=24, minutes=40))
         self.assertEqual(clock.local_dt(self.cfg.tz).hour, 20, "20:40 NZST, before the 21:00 read")
         self.assertEqual(self.stale(), [])
