@@ -18,8 +18,24 @@ python3 -B -m tests.run --all                     # parallel; expect "OK" (Herme
 ./bin/todo-manager install                        # asks only what it cannot infer; every outside change needs a yes
 ```
 
-Requirements: see the [README](../README.md#requirements) (Linux, Python ≥ 3.11 with the
-standard library only, Hermes with cron and Kanban, a Notion integration, source credentials).
+Requirements (short version in the [README](../README.md#what-you-need)):
+
+- **Linux.** File locks use `fcntl`; the optional real-time sync runs as a `systemd --user`
+  service. Other systems are untested.
+- **Python ≥ 3.11**, standard library only; nothing to `pip install`.
+- **Hermes** with cron and Kanban, verified against Hermes 0.21.5 (commit `105568c`) and in daily
+  use with 0.22. The board bridge uses Hermes' Python modules, so other versions may need
+  changes; see [hermes-native-verification.md](hermes-native-verification.md).
+- **Notion:** an internal integration whose token is in `NOTION_API_KEY` (in Hermes' `.env`),
+  with the read content, update content, insert content, read comments and insert comments
+  capabilities.
+- **Sources** (`install` finds what Hermes already has):
+  - Gmail: a himalaya account in Hermes whose `gmail.auth.token.command` prints an OAuth access
+    token (read-only Gmail access is enough; the optional Gmail labels need `gmail.modify`);
+  - Slack: a user token (`SLACK_USER_TOKEN`, or `$HERMES_HOME/credentials/slack_user_token`)
+    that can call `users.conversations`, `conversations.history`, `conversations.replies` and
+    `users.info` for the conversation types you include;
+  - GitHub: the `gh` CLI, logged in (`gh auth login`).
 
 `install` discovers settings in a temporary workspace. It asks about source scope (selected
 mailboxes, Slack conversation types, GitHub participation), the Notion home page and identity,
