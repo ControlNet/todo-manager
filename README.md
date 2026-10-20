@@ -3,8 +3,10 @@
 **Your AI agent reads your email, Slack and GitHub, and keeps your todo list in Notion for you.
 When a task is something the agent can do, you hand it over with one drag.**
 
-Todo Manager is an add-on for [Hermes](https://github.com/NousResearch/hermes-agent), the
-self-hosted AI agent. You install it once; after that you mostly just open Notion.
+Todo Manager is a standalone tool that works with [Hermes](https://github.com/NousResearch/hermes-agent),
+the self-hosted AI agent. It is not a Hermes plugin: it runs next to Hermes as two scheduled jobs
+and a skill, and uses the AI model and agent board your Hermes already has. You install it once;
+after that you mostly just open Notion.
 
 ## What it does
 
