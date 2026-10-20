@@ -3,17 +3,16 @@
 **Your AI agent reads your email, Slack and GitHub, and keeps your todo list in Notion for you.
 When a task is something the agent can do, you hand it over with one drag.**
 
-Todo Manager is a standalone tool that works with [Hermes](https://github.com/NousResearch/hermes-agent),
-the self-hosted AI agent. It is not a Hermes plugin: it runs next to Hermes as two scheduled jobs
-and a skill, and uses the AI model and agent board your Hermes already has. You install it once;
-after that you mostly just open Notion.
+Todo Manager works with [Hermes](https://github.com/NousResearch/hermes-agent), the self-hosted
+AI agent. It adds two scheduled jobs and a skill to your Hermes and uses the AI model and agent
+board you already have there. Install it once, then you mostly just open Notion.
 
 ## What it does
 
 - **Finds your todos for you.** "Could you review this before Friday?" in an email becomes a
   task in Notion: due Friday, with a link back to the email. Newsletters and threads you were
   only copied on are skipped.
-- **Asks you only when it should.** Things only you can decide go to a *To decide* board. Drag
+- **Puts your decisions in one place.** Things only you can decide go to a *To decide* board. Drag
   the card to *Done*, *Cancel*, *My to-do* or *Assign to Agent*.
 - **Lets the agent do the work.** Drag a card to *Assign to Agent* and a Hermes agent works on
   it: drafting a reply, collecting information, writing a document. If it needs something, it
@@ -41,15 +40,15 @@ Each task page has a small box that Todo Manager keeps up to date (why it is you
 "done" means, links to the sources). Everything else on the page is yours: write notes there and
 the agent reads them.
 
-## Is it safe?
+## Your data and your say
 
-- **You have the last word.** If you change something in Notion, the AI never changes it back.
-- **It only reads** your email, Slack and GitHub. It never sends anything there by itself. An
-  agent may send an email only when you say so for that task.
-- **Your data stays with you.** Everything is kept on your own machine. The only outside
-  services involved are Notion and the AI model your Hermes already uses.
-- **It saves tokens.** Every five minutes a small script checks for news; the AI model is called
-  only when something new needs judging.
+- **Your edits stay.** A field you change in Notion keeps your value.
+- **It reads your email, Slack and GitHub.** An agent sends an email only after you approve it
+  for that task.
+- **Your data lives on your machine**, in a local database. Tasks go to your Notion, and new
+  messages go to the AI model your Hermes uses.
+- **Low token use.** A small script checks for news every five minutes and calls the AI model
+  only when there is something new.
 
 ## What you need
 
@@ -62,7 +61,7 @@ the agent reads them.
   - **Gmail**: the Gmail account your Hermes already uses (through himalaya);
   - **Slack**: a Slack user token saved in `~/.hermes/.env` as `SLACK_USER_TOKEN`;
   - **GitHub**: the `gh` command, logged in (`gh auth login`).
-- For *Assign to Agent*: Hermes' Kanban board. Without it, everything else still works.
+- Optional, for *Assign to Agent*: Hermes' Kanban board.
 
 ## Get started
 
@@ -120,10 +119,9 @@ at the top of your Notion page and in `todo-manager status`.
 
 ## Good to know
 
-- **The AI can be wrong** about what is yours. Anything it skips is kept with a one-line reason,
-  so nothing silently disappears. Tell it when it gets something wrong, and it learns your
-  preferences.
-- **It is built for one person on one machine.** It is not a team tool.
+- **The AI makes mistakes** about what is yours. Every message it skips is kept with a one-line
+  reason. Tell it what it got wrong and it learns your preferences.
+- **Built for one person on one machine.**
 - **Languages:** English and Simplified Chinese.
 - **Optional extras:** Gmail labels that show each mail's project and task state, and instant
   sync (seconds instead of minutes) through a small background service. See
