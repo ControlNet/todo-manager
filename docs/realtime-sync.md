@@ -101,9 +101,15 @@ After a cycle, if feedback is claimable the daemon starts `hermes cron run <job 
 minute, and the gate claims as before. `cron run` runs the job to its end (past the agent's `run
 done`), so the daemon leaves it running and does not start another until it ends, nor while a
 feedback run the schedule started is under way (claimed, no `run done`, within
-`feedback.stale_claim_minutes`): a second execution of the job makes Hermes interrupt one of the
+`feedback.stale_claim_minutes`), nor while Hermes still runs an execution of the job after `run
+done` (output, delivery, its bookkeeping): Hermes' execution ledger `cron/executions.db` keeps the
+attempt `claimed`/`running` until then, and the daemon reads it (read only; an attempt whose owner
+process is gone does not count; an unreadable ledger counts as running; a Hermes without the ledger
+gets 10 minutes after `run done`). A second execution of the job makes Hermes interrupt one of the
 two (2026-10-21: a 120 s timeout cut `cron run` short and the next wake started a second execution
-while the first was finishing). A source change waits for it too. `cron run` would resume a
+while the first was finishing). A source change waits for it too, and starts no new one meanwhile.
+A `cron run` still going after `feedback.stale_claim_minutes` is reported (`daemon:wake_stuck`)
+and left running: stopping it mid-run is the interruption this avoids. `cron run` would resume a
 paused job, so the daemon skips a job the user paused. Scheduled times (follow-ups, due dates) stay
 with cron. A woken run whose agent never reported `run done` is closed (released, with an error)
 by the claims step once its lease expired.
@@ -180,7 +186,8 @@ signature; the handshake that delivers the signing key is only accepted while en
    linger enabled (as for `hermes-gateway.service`). The Notion token comes from
    `notion.env_file`, as for the gates.
 2. Status file `state/daemon.json`, stamped every 15 s by a pulse thread that also pings the
-   systemd watchdog: pid, fingerprint, state, mode, webhook counters, last error. The pulse goes
+   systemd watchdog: pid, fingerprint, state, mode, webhook counters, last error, the running
+   `cron run` of a wake (pid, start) and whether a restart is pending (`draining`). The pulse goes
    on while the main thread makes progress (a loop, a sync step, a Notion request), so a long
    pass stays healthy; after 5 minutes without progress it stops, systemd kills the process and
    the gate covers. It is a file, not a database row, so it needs no schema and works while the
@@ -208,7 +215,8 @@ follows the same model: its unit runs the checkout, and it picks up new code by 
 - **Code or settings change**: every 10 s the daemon fingerprints its package files and the
   workspace `config.toml` (path, mtime, size); it reads `config.toml` only when it starts. On a
   change it waits until the files have been stable for 10 s (a `git pull` in progress is not
-  loaded half-way), stamps `restarting` and exits 0; systemd starts it with the new code and
+  loaded half-way) and the `cron run` of its last wake has ended (from the first sign of the change
+  it starts no new one), stamps `restarting` and exits 0; systemd starts it with the new code and
   settings. With `daemon.enabled` turned off it then refuses to run with exit code 4, which the
   unit's `RestartPreventExitStatus` keeps down until `install` removes the unit.
 - **Version skew**: the status carries the fingerprint. A gate whose own fingerprint differs

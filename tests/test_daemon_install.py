@@ -28,13 +28,17 @@ class Systemd:
     def __init__(self):
         self.calls = []
         self.active = False
+        self.fail = set()            # commands that fail (exit 1, nothing changes)
+        self.stays_active = False    # `disable --now` succeeds but the unit does not stop
 
     def __call__(self, cmd, **kwargs):
         args = cmd[2:]
         self.calls.append(args)
+        if args[0] in self.fail:
+            return subprocess.CompletedProcess(cmd, 1, "", f"Failed to {args[0]}: test double")
         if args[0] in ("restart", "start"):
             self.active = True
-        if args[:2] == ["disable", "--now"]:
+        if args[:2] == ["disable", "--now"] and not self.stays_active:
             self.active = False
         out = ("active" if self.active else "inactive") if args[0] == "is-active" else ""
         return subprocess.CompletedProcess(cmd, 0, out, "")
@@ -113,6 +117,52 @@ class UnitInstallTests(InstallCase):
         inst = self.installer()
         inst.uninstall(inst.uninstall_plan())
         self.assertFalse(self.unit().exists())
+
+    def failed_uninstall(self):
+        inst = self.installer()
+        with self.assertRaises(RuntimeError) as caught:
+            inst.uninstall(inst.uninstall_plan())
+        return str(caught.exception)
+
+    def test_uninstall_keeps_the_unit_when_it_cannot_be_stopped(self):
+        self.configure(enabled=True)
+        self.install()
+        self.systemd.fail = {"disable"}
+        message = self.failed_uninstall()
+        self.assertIn("disable --now", message)
+        self.assertIn("then run uninstall", message)
+        self.assertTrue(self.unit().exists(), "a running daemon keeps its unit")
+        self.assertNotIn("uninstalled_at", hermes_install.load_manifest(self.paths), "the uninstall can be retried")
+        self.systemd.fail = set()
+        inst = self.installer()
+        inst.uninstall(inst.uninstall_plan())
+        self.assertFalse(self.unit().exists())
+        self.assertIn("uninstalled_at", hermes_install.load_manifest(self.paths))
+
+    def test_uninstall_keeps_the_unit_while_it_is_still_active(self):
+        self.configure(enabled=True)
+        self.install()
+        self.systemd.stays_active = True
+        message = self.failed_uninstall()
+        self.assertIn("still active", message)
+        self.assertTrue(self.unit().exists())
+
+    def test_a_failed_reload_after_removing_the_unit_fails_the_uninstall(self):
+        self.configure(enabled=True)
+        self.install()
+        self.systemd.fail = {"daemon-reload"}
+        message = self.failed_uninstall()
+        self.assertIn("daemon-reload", message)
+        self.assertFalse(self.unit().exists(), "stopped and disabled: the file is gone")
+
+    def test_turning_it_off_fails_install_when_the_daemon_cannot_be_stopped(self):
+        self.configure(enabled=True)
+        self.install()
+        self.configure(enabled=False)
+        self.systemd.fail = {"disable"}
+        with self.assertRaises(RuntimeError):
+            self.install()
+        self.assertTrue(self.unit().exists())
 
 
 class CommandTests(InstallCase):

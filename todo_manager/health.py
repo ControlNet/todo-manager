@@ -191,6 +191,26 @@ def problem_items(rep: dict[str, Any], cfg: Config) -> list[tuple[str, str]]:
             add(f"{origin}:{text}", f"{origin}: {text}")
     for text in rep.get("conventions_problems") or []:
         add(f"conventions:{text.split(':', 1)[0]}", f"conventions: {text}")
+    sync_daemon = rep.get("daemon") or {}
+    if sync_daemon.get("enabled"):
+        # The gate's daemon/alive channel above is the same incident.
+        if not sync_daemon["healthy"] and not any(s["scope"] == "alive"
+                                                  for s in rep["stale_sources"].get("daemon", [])):
+            add("daemon:unhealthy", f"sync daemon {sync_daemon['reason']} (`todo-manager daemon status`,"
+                " `journalctl --user -u todo-manager-daemon`); the feedback gate syncs meanwhile")
+        wake = sync_daemon.get("wake") or {}
+        age = clock.minutes_since(wake.get("started_at"))
+        if age is not None and age > int(cfg.get("feedback.stale_claim_minutes", 60)):
+            add("daemon:wake_stuck", f"the feedback job's `hermes cron run` (pid {wake.get('pid')}) the daemon"
+                f" started at {wake['started_at']} is still running after {round(age)} min, past the claim lease"
+                " (feedback.stale_claim_minutes): check the job with `hermes cron list` / `hermes cron runs` and"
+                " the daemon's journal. It is not stopped automatically (stopping it mid-run interrupts the job);"
+                " until it ends the daemon starts no wake and does not restart for code or settings changes")
+        recorded = " ".join(text for r in (rep.get("recorded_problems") or {}).values()
+                            for text in r.get("problems", []))
+        for page, why in sorted((sync_daemon.get("page_problems") or {}).items()):
+            if page not in recorded:     # the gate's report of the same page is enough
+                add(f"daemon:page:{page}", f"Notion page {page}: {why}")
     if rep.get("notion_ready") and not cfg.get("identity.notion_user_ids"):
         add("identity.notion_user_ids", "identity.notion_user_ids is empty: Notion comments and edits are treated as"
             " evidence only, never as the user's instructions")

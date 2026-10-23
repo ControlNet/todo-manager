@@ -51,6 +51,7 @@ CODE_SETTLE_SECONDS = 10
 EXIT_DISABLED = 4   # `daemon run` with daemon.enabled false: the unit does not restart on it
 WAKE_INTERVAL_SECONDS = 60
 UNCLAIMED_WAKE_MINUTES = 5   # the same feedback still unclaimed after a wake: as often as the cron job
+FINALIZE_GRACE_MINUTES = 10  # Hermes without an execution ledger: may still finish a run this long after `run done`
 CLAIMS_MINUTES = 1
 HOME_MINUTES = 5
 REVIVE_MINUTES = 10
@@ -133,7 +134,8 @@ def health_of(cfg: Config) -> dict[str, Any]:
     age = clock.minutes_since(st.get("alive_at"))
     out = {"enabled": True, "state": st.get("state"), "mode": st.get("mode"), "alive_at": st.get("alive_at"),
            "webhook": st.get("webhook"), "last_error": st.get("last_error"),
-           "page_problems": st.get("page_problems") or {}, "retrying": st.get("retrying") or []}
+           "page_problems": st.get("page_problems") or {}, "retrying": st.get("retrying") or [],
+           "wake": st.get("wake"), "draining": st.get("draining")}
     if age is None or age * 60 > STALE_SECONDS:
         return {**out, "healthy": False, "reason": f"not running since {st.get('alive_at')}"}
     if st.get("code") != fingerprint_of(cfg):
@@ -233,6 +235,18 @@ def hermes_wake(cfg: Config) -> subprocess.Popen | None:
     return hermes_install.Installer(cfg, paths).hermes_start("cron", "run", job["id"])
 
 
+def hermes_executing(cfg: Config) -> bool | None:
+    """Hermes is still running an execution of the feedback job (its execution ledger; also
+    after the agent's ``run done``, until the run's delivery and bookkeeping are done). None
+    when this Hermes keeps no ledger."""
+    from . import hermes_install
+    paths = hermes_install.Paths.from_config(cfg)
+    job = hermes_install.load_jobs(paths).get(hermes_install.JOBS["feedback"]["name"])
+    if not job:
+        return False    # nothing to run: no wake either
+    return hermes_install.job_executing(paths, job["id"])
+
+
 # --------------------------------------------------------------------------- the daemon
 
 Key = tuple[str, ...]
@@ -244,13 +258,15 @@ class Daemon:
     def __init__(self, cfg: Config, *, notion_factory: Callable[[sqlite3.Connection, Config], Any] | None = None,
                  kanban_factory: Callable[[Config], Any] | None = None,
                  waker: Callable[[Config], Any] | None = None, board_db: Path | None = None,
-                 stats: webhook.Stats | None = None, fingerprint: Callable[[], str] | None = None) -> None:
+                 stats: webhook.Stats | None = None, fingerprint: Callable[[], str] | None = None,
+                 executing: Callable[[Config], bool | None] | None = None) -> None:
         from . import wiring
         self.cfg = cfg
         self.events: "queue.Queue[webhook.Event]" = queue.Queue()
         self.notion_factory = notion_factory or wiring.notion_sync
         self.kanban_factory = kanban_factory or wiring.kanban
         self.waker = waker or hermes_wake
+        self.executing = executing or hermes_executing
         self.board_db = board_db if board_db is not None else default_board_db(cfg)
         self.stats = stats or webhook.Stats()
         self.conn: sqlite3.Connection | None = None
@@ -281,6 +297,8 @@ class Daemon:
         self.silent = False
         self.woken_for: frozenset[str] = frozenset()
         self.wake_proc: Any = None   # the `hermes cron run` of the last wake, until it ends
+        self.wake_started_at: str | None = None
+        self.draining = False        # new code or settings seen: no new wake, restart once `cron run` ends
 
     # ------------------------------------------------------------ settings
     def setting(self, key: str, default: Any) -> Any:
@@ -566,14 +584,28 @@ class Daemon:
         return frozenset(f["id"] for f in items if not ops.not_ready(self.conn, self.cfg, f))
 
     def feedback_run_under_way(self) -> bool:
-        """A feedback run from its gate's claim until its agent's ``run done``, within the claim
-        lease (after it, the run is expired: ``ops.perform`` refuses its commands)."""
+        """A feedback run from its gate's claim until Hermes has finished the job's execution: its
+        agent's ``run done`` within the claim lease (after it, the run is expired: ``ops.perform``
+        refuses its commands), then Hermes' execution ledger, which ends after the run's delivery
+        and bookkeeping. Without a ledger, ``FINALIZE_GRACE_MINUTES`` after ``run done``; an
+        unreadable one counts as running."""
         assert self.conn is not None
         cutoff = clock.iso(clock.now() - timedelta(minutes=int(self.cfg.get("feedback.stale_claim_minutes", 60))))
-        return self.conn.execute(
-            "SELECT 1 FROM runs WHERE entry='feedback' AND started_at >= ? AND released_at IS NULL"
-            " AND agent_completed_at IS NULL AND (status='running' OR (status='woke' AND wake=1)) LIMIT 1",
-            (cutoff,)).fetchone() is not None
+        if self.conn.execute(
+                "SELECT 1 FROM runs WHERE entry='feedback' AND started_at >= ? AND released_at IS NULL"
+                " AND agent_completed_at IS NULL AND (status='running' OR (status='woke' AND wake=1)) LIMIT 1",
+                (cutoff,)).fetchone() is not None:
+            return True
+        try:
+            executing = self.executing(self.cfg)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            self.last_error = f"wake check failed: Hermes cron state unreadable: {type(exc).__name__}: {str(exc)[:200]}"
+            return True
+        if executing is not None:
+            return executing
+        since = clock.iso(clock.now() - timedelta(minutes=FINALIZE_GRACE_MINUTES))
+        return self.conn.execute("SELECT 1 FROM runs WHERE entry='feedback' AND agent_completed_at >= ? LIMIT 1",
+                                 (since,)).fetchone() is not None
 
     def waking(self) -> bool:
         """The ``hermes cron run`` of the last wake has not ended: Hermes is still running the job
@@ -585,7 +617,7 @@ class Daemon:
             return True
         if code:
             self.last_error = f"wake failed: hermes cron run exited {code} (output in the daemon's journal)"
-        self.wake_proc = None
+        self.wake_proc = self.wake_started_at = None
         return False
 
     def maybe_wake(self) -> bool:
@@ -593,8 +625,9 @@ class Daemon:
         often than its own schedule while the same items stay unclaimed (a failing gate is not
         restarted every minute, each run reporting the failure). Never while the job may still
         be running (the `cron run` of the last wake, or a run the schedule started): Hermes then
-        interrupts one of the two executions. The next wake or scheduled run takes the feedback."""
-        if self.conn is None or self.waking():
+        interrupts one of the two executions. Nor once new code or settings are waiting
+        (``draining``). The next wake or scheduled run takes the feedback."""
+        if self.conn is None or self.draining or self.waking():
             return False
         try:
             with file_lock(lock_path(self.cfg.home, "workspace"), blocking=True, timeout=self.lock_timeout,
@@ -620,6 +653,7 @@ class Daemon:
         self.last["wake"], self.woken_for = clock.now(), ready
         try:
             self.wake_proc = self.waker(self.cfg)
+            self.wake_started_at = clock.iso() if self.wake_proc is not None else None
             return self.wake_proc is not None
         except Exception as exc:  # noqa: BLE001 - the gate's own schedule still runs the job
             self.last_error = f"wake failed: {type(exc).__name__}: {str(exc)[:200]}"
@@ -627,8 +661,11 @@ class Daemon:
 
     # ------------------------------------------------------------ process
     def status(self) -> dict[str, Any]:
+        proc = self.wake_proc
         return {"pid": os.getpid(), "started_at": self.started_at, "alive_at": clock.iso(), "code": self.code,
                 "state": self.state, "mode": self.mode, "last_error": self.last_error,
+                "wake": {"pid": getattr(proc, "pid", None), "started_at": self.wake_started_at} if proc else None,
+                "draining": self.draining,
                 "webhook": {"token": self.webhook_ready, "last_event_at": self.stats.last_event_at,
                             "accepted": self.stats.accepted, "duplicates": self.stats.duplicates,
                             "bad_signatures": self.stats.bad_signatures,
@@ -700,17 +737,18 @@ class Daemon:
                 self.cycle(first)
                 if self.state != self.stamped_state:
                     self.heartbeat(force=True)   # running / waiting_install shown at once
-                self.maybe_wake()
                 if time.monotonic() >= next_code_check:
                     next_code_check = time.monotonic() + self.code_check_seconds
                     current = self.fingerprint()
                     if current != seen_code:
                         seen_code, changed_at = current, time.monotonic()
+                        self.draining = True         # a new wake would postpone the restart again
                     elif (changed_at is not None and time.monotonic() - changed_at >= self.code_settle_seconds
                           and not self.waking()):   # stopping the unit would kill `cron run`
                         self.state = "restarting"
                         self.heartbeat(force=True)
                         return 0
+                self.maybe_wake()
                 if self.conn is None:
                     time.sleep(59)   # waiting for install: try again in a minute
         finally:
