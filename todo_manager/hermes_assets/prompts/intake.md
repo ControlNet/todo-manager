@@ -114,7 +114,8 @@ every NEW item one outcome:
   A new project's icon: from `todo-manager project icons`, a name that fits the work and the
   first of `free_colors` (no other project's colour).
   Leave one-off matters and routine service (single reviews, admin requests) without a project.
-- A clipped item says how to read the rest (`todo-manager source show <item>`); read it when the
-  visible part does not settle the decision.
+- A clipped item, or one whose quoted earlier messages were left out, says how to read the rest
+  (`todo-manager source show <item>`); read it when the visible part does not settle the decision,
+  and before writing that a date or detail is not given.
 - Finish once with `todo-manager run done <run> [--checked <task>...] [--digest-reviewed]`, including all confirmations together, and one short line on what changed. Items without an
   outcome are offered again in a later run.

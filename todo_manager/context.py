@@ -36,7 +36,9 @@ ITEM_OVERHEAD = 200      # header, recipients and subject lines per rendered ite
 BATCH_OVERHEAD = 300     # conversation heading, link, linked tasks
 EARLIER_SHOWN = 6        # earlier messages rendered as context per conversation
 MAX_PROJECTS = 80
-QUOTE_START = re.compile(r"^(On .{5,200} wrote:|在.{2,80}写道[:：]|-----Original Message-----|From: .+)$", re.M)
+WRAPPED = r"(?:\n.{0,200}@.{1,200}>)?"     # Gmail wraps a long reply header inside the sender's address
+QUOTE_START = re.compile(r"^(On .{5,200}" + WRAPPED + r" wrote:|在.{2,80}" + WRAPPED + r" ?写道[:：]"
+                         r"|-----Original Message-----|From: .+)$", re.M)
 
 
 def item_chars(cfg: Config) -> int:
@@ -51,14 +53,16 @@ def earlier_chars(cfg: Config) -> int:
     return int(cfg.get("wake.max_earlier_chars", 600))
 
 
-def trim_quoted(text: str) -> str:
-    """Drop the quoted history an email reply carries (the earlier messages are shown on their own)."""
-    lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith(">")]
-    trimmed = "\n".join(lines)
+def trim_quoted(text: str, more: str) -> str:
+    """Drop the quoted history an email reply carries, for a reply whose earlier messages are shown
+    on their own; a cut says so and names the command printing the full message."""
+    lines = text.splitlines()
+    kept = [ln for ln in lines if not ln.lstrip().startswith(">")]
+    trimmed, cut = "\n".join(kept), len(kept) < len(lines)
     match = QUOTE_START.search(trimmed)
     if match and match.start() > 40:
-        trimmed = trimmed[: match.start()].rstrip() + "\n[quoted earlier messages left out]"
-    return trimmed.strip()
+        trimmed, cut = trimmed[: match.start()], True
+    return trimmed.strip() + (f"\n[quoted earlier messages left out; full message: `{more}`]" if cut else "")
 
 
 def clip(text: str, limit: int, more: str) -> str:
@@ -324,15 +328,22 @@ def _conversation(conn: sqlite3.Connection, cfg: Config, batch: dict[str, Any], 
     in_run = {r["id"] for r in conn.execute("SELECT s.id FROM source_items s JOIN batches b ON b.id=s.batch_id"
                                              " WHERE b.claimed_run=? AND b.state='claimed' AND s.state='batched'",
                                              (batch["claimed_run"],))}
-    for e in [e for e in earlier if e["id"] not in in_run]:     # those are shown as NEW in their own segment
-        more = f"todo-manager source show {e['id']}"
-        label = "first message" if root and e["id"] == root["id"] else "earlier"
-        body = trim_quoted(item_body(conn, e["id"]))
-        out.append(f"\n{_item_header(e)} [{label}]\n{material(body, earlier_chars(cfg), more)}")
+    # A reply's quoted history is left out only after an earlier message of the conversation: when
+    # the user was added later or the quoted mail was never read, the quote is the only copy.
+    shown = False
+    for e in earlier:
+        if e["id"] not in in_run:       # those are shown as NEW in their own segment
+            more = f"todo-manager source show {e['id']}"
+            label = "first message" if root and e["id"] == root["id"] else "earlier"
+            body = item_body(conn, e["id"])
+            body = trim_quoted(body, more) if shown else body
+            out.append(f"\n{_item_header(e)} [{label}]\n{material(body, earlier_chars(cfg), more)}")
+        shown = True
     for item in batch_items:
         more = f"todo-manager source show {item['id']}"
         body = item_body(conn, item["id"])
-        body = trim_quoted(body) if item["source"] == "gmail" else body
+        body = trim_quoted(body, more) if item["source"] == "gmail" and shown else body
+        shown = True
         limit = bulk_chars(cfg) if item["meta"].get("bulk_hint") else item_chars(cfg)
         extras = []
         if item["meta"].get("to"):
