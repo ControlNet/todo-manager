@@ -7,7 +7,9 @@ change that caused it. A deterministic worker then performs the effect with retr
 * ``dedupe_key`` is fixed per logical effect, so re-enqueueing is a no-op.
 * A request whose outcome is unknown (timeout after send) becomes ``uncertain`` and is
   reconciled by its handler (e.g. by searching for the marker it embedded) before any
-  retry, so a lost response never produces a duplicate comment or block.
+  retry, so a lost response never produces a duplicate comment or block. It stays
+  ``uncertain`` until a reconciling attempt settles it (a result, or ``Permanent``): a
+  failed lookup is retried as another reconciliation, never as a blind replay.
 * Failures keep the payload and back off; they never re-run the semantic work.
 """
 
@@ -119,11 +121,11 @@ def process(conn: sqlite3.Connection, handlers: dict[tuple[str, str], Handler], 
             _mark(conn, item, "dead", str(exc), delay=None)
             stats["dead"] += 1
         except Retryable as exc:
-            _mark(conn, item, "failed", str(exc), delay=exc.retry_after)
-            stats["failed"] += 1
+            _mark(conn, item, "failed", str(exc), delay=exc.retry_after, reconcile=reconcile)
+            stats["uncertain" if reconcile else "failed"] += 1
         except Exception as exc:  # noqa: BLE001 - unknown errors are retried with backoff
-            _mark(conn, item, "failed", f"{type(exc).__name__}: {exc}", delay=None, backoff=True)
-            stats["failed"] += 1
+            _mark(conn, item, "failed", f"{type(exc).__name__}: {exc}", delay=None, backoff=True, reconcile=reconcile)
+            stats["uncertain" if reconcile else "failed"] += 1
         else:
             with tx(conn):
                 conn.execute("UPDATE outbox SET status='done', result=?, last_error=NULL, updated_at=? WHERE id=?",
@@ -133,10 +135,12 @@ def process(conn: sqlite3.Connection, handlers: dict[tuple[str, str], Handler], 
 
 
 def _mark(conn: sqlite3.Connection, item: dict[str, Any], status: str, error: str, *, delay: float | None,
-          backoff: bool = True) -> None:
+          backoff: bool = True, reconcile: bool = False) -> None:
     attempts = item["attempts"] + 1
     if status == "failed" and attempts >= MAX_ATTEMPTS:
         status = "dead"
+    elif status == "failed" and reconcile:
+        status = "uncertain"   # the reconciliation itself failed: the earlier outcome is still unknown
     if delay is None and backoff:
         delay = min(3600, 30 * (2 ** min(attempts, 7)))
     next_at = clock.iso(clock.now() + timedelta(seconds=delay)) if delay else None

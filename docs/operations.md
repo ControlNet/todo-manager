@@ -380,7 +380,9 @@ closed; `drop` rows stay only in the old system. Nothing old is modified or dele
   A gate-level exception exits nonzero. Hermes may inject Script Error and wake the agent; the
   prompt requires [CRON_FAILURE] with no business mutation.
 - Outbound writes go through the outbox with retries and back-off; an uncertain write is
-  reconciled (looked up) before any retry. Given-up writes show in `status --details`; after fixing the
+  reconciled (looked up) before any retry, and stays uncertain until a lookup settles it (a
+  failed lookup is retried as another lookup, never as a resend). A dropped connection or a
+  truncated or unreadable response counts as uncertain like a timeout. Given-up writes show in `status --details`; after fixing the
   cause, unchanged projections retain their retry/exhaustion state; a real projection change
   uses the existing replacement/reconciliation path without resetting active Retry-After, and a
   newer task or project push replaces a given-up one. After a fix that changes no task data (a
