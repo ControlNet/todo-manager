@@ -107,8 +107,11 @@ One active delegation per Task is enforced transactionally unless the existing e
 parallel-work option is requested. Supplements/revisions use the active delegation. The
 submission lock serializes lookup/create/link in Todo Manager; Hermes owns worker claim locks.
 Lookup includes archived cards, so a lost response or a restart cannot create a second card
-for the same delegation. Multiple matches are quarantined. No native jobs/state tables are
-written directly.
+for the same delegation; a create that failed after its card was written (subscription or
+parking) is reported as uncertain and looked up the same way. Multiple matches are quarantined.
+Supplements pending at submission go into the card body; one queued while the create runs is
+posted as a comment once the card is linked (a pause then blocks it). No native jobs/state
+tables are written directly.
 
 Cards carry Task/page/delegation references, requirement version, goals, context, deliverables,
 authorization and the minimum approval/pause/result/unknown-action protocol. The protocol and
@@ -140,7 +143,8 @@ results represent the delegation, and neither automatically completes the user's
 Child questions become delivery records containing the actual child card and event. Replies
 in their Notion discussion recover that delivery ID; direct replies use `delegate answer
 --question <delivery-id>`. Lost comment responses reconcile by marker before retrying.
-A later question, changed requirements, a pause or cancellation prevents stale resumption.
+A later question, a pause or cancellation prevents stale resumption. Changed requirements
+void external authorizations only; a plain answer stays valid.
 External approvals on child questions are explicitly refused by this adapter: the root can
 perform the separately authorized external action using the existing version-bound protocol.
 There is no automatic transfer of a root approval to a child.

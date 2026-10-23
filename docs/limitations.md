@@ -226,8 +226,10 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
   profile has (terminal, mail, `gh`, …). What the code guarantees:
   - an approval is recorded only from you, for one action and one delivery id/version; it is
     voided by a newer delivery or a changed requirement before it is sent, re-checked at send
-    time, sent at most once (`[tm:<id>]` marker) and consumed once (a replay cannot reopen a
-    newer version);
+    time (also on the retry of an uncertain attempt while the version still waits in review: a
+    voided one whose comment landed is withdrawn on the card with a `WITHDRAWN` comment), sent
+    at most once (`[tm:<id>]` marker) and consumed once (a replay cannot reopen a newer
+    version; a retry counts it only when its comment is on the card);
   - cards are created with Hermes' per-card breaker `max_retries = 1` (`kanban.max_retries`):
     a crashed, timed-out or stale run parks the card instead of a respawn, and a run that held
     an approval and ended without a result is marked `unknown`, paused and reported to you -

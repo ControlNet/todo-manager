@@ -3,7 +3,8 @@
     ~/.hermes/hermes-agent/venv/bin/python kanban_bridge.py < request.json
 
 Request: {"op": ..., "board": ..., ...}. Response (last stdout line, prefixed with
-``@@TM@@``): {"ok": true, "result": ...} or {"ok": false, "error": ...}.
+``@@TM@@``): {"ok": true, "result": ...} or {"ok": false, "error": ...}; ``"uncertain": true``
+(code PARTIAL) when it failed after a write, e.g. a create whose card exists.
 
 Only formal state functions are used (create_task, block_task, unblock_task,
 specify_triage_task, reopen_review_task, complete_task, archive_task, add_comment), never
@@ -232,10 +233,14 @@ def main() -> None:
                 workspace_path=req.get("workspace_path"), skills=req.get("skills"),
                 max_runtime_seconds=req.get("max_runtime_seconds"), max_retries=req.get("max_retries"),
                 initial_status="blocked" if req.get("notify") or req.get("start_after") else "running", board=board)
-            if req.get("notify"):
-                ensure_notify(kb, conn, tid, req["notify"], release=not req.get("start_after"))
-            if req.get("start_after"):
-                park(kb, conn, tid, req["start_after"])
+            try:
+                if req.get("notify"):
+                    ensure_notify(kb, conn, tid, req["notify"], release=not req.get("start_after"))
+                if req.get("start_after"):
+                    park(kb, conn, tid, req["start_after"])
+            except Exception as exc:  # noqa: BLE001 - the card is written: the caller must look it up
+                return _out({"ok": False, "error": f"card {tid} created, then {type(exc).__name__}: {exc}",
+                             "code": "PARTIAL", "uncertain": True})
             return _out({"ok": True, "result": tid})
         if op == "schedule":
             return _out({"ok": True, "result": park(kb, conn, req["task_id"], req["until"])})

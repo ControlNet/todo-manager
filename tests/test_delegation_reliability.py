@@ -7,9 +7,11 @@ reliability review (docs/acceptance.md).
 
 import contextlib
 import io
+import sys
+from unittest import mock
 
-from todo_manager import cli, clock, delegation, gate_feedback, health, store
-from todo_manager.kanban import FakeKanban
+from todo_manager import cli, clock, db, delegation, gate_feedback, health, kanban, store
+from todo_manager.kanban import BridgeKanban, FakeKanban, KanbanError
 from tests.helpers import WorkspaceCase
 
 
@@ -149,6 +151,26 @@ class CancellationTests(Base):
         cancel = self.conn.execute("SELECT status FROM delegation_messages WHERE delegation_id=? AND kind='cancel'",
                                    (did,)).fetchone()
         self.assertEqual(cancel["status"], "superseded")
+
+
+class BridgeResponseTests(WorkspaceCase):
+    """A bridge failure after the card was written is reported as partial: the card may exist."""
+
+    def respond(self, response):
+        stub = self.tmp / "stub_bridge.py"
+        stub.write_text(f"import sys\nsys.stdin.read()\nprint({'@@TM@@' + response!r})\n", encoding="utf-8")
+        kb = BridgeKanban("tm-unit", sys.executable, str(self.tmp))
+        with mock.patch.object(kanban, "BRIDGE", stub), self.assertRaises(KanbanError) as ctx:
+            kb.create(title="t", body="b", idem_key="k", assignee="default", tenant="todo-manager")
+        return ctx.exception
+
+    def test_a_partial_create_is_uncertain(self):
+        exc = self.respond('{"ok": false, "error": "TypeError: x", "code": "PARTIAL", "uncertain": true}')
+        self.assertTrue(exc.uncertain)
+        self.assertEqual(exc.code, "PARTIAL")
+
+    def test_a_refused_call_is_not(self):
+        self.assertFalse(self.respond('{"ok": false, "error": "no profile", "code": "NO_PROFILE"}').uncertain)
 
 
 class StaleTransitionTests(Base):
@@ -351,6 +373,93 @@ class ApprovalTests(Base):
         self.tick()
         self.assertEqual(self.conn.execute("SELECT outcome FROM approvals WHERE id=?", (aid,)).fetchone()[0], "unknown")
         self.assertNotIn(card, self.kb.dispatch_tick())
+
+
+    def test_an_uncertain_approval_is_rechecked_after_a_requirement_change(self):
+        did, card, v1, aid = self.approved_v1()
+        self.kb.fail_next["comment"] = KanbanError("bridge timeout during comment", uncertain=True)
+        delegation.send_messages(self.conn, self.cfg, self.kb)
+        self.assertEqual(self.approval_msg(aid)["status"], "sending")
+        delegation.add_message(self.conn, did, "supplement", "不要发给 Alice", feedback_id="fbk_sup")
+        self.tick()
+        self.assertFalse([c for c in self.kb.comments if "APPROVED" in c["body"]], "never reached the card")
+        self.assertEqual(self.events(card, "review_reopened"), [])
+        self.assertEqual(self.kb.cards[card]["status"], "review")
+        self.assertEqual(self.approval_msg(aid)["status"], "superseded")
+        self.assertIsNotNone(self.conn.execute("SELECT revoked_at FROM approvals WHERE id=?", (aid,)).fetchone()[0])
+
+    def test_a_posted_approval_voided_before_the_reopen_is_withdrawn_on_the_card(self):
+        did, card, v1, aid = self.approved_v1()
+        mid = self.approval_msg(aid)["id"]
+        self.kb.lose_response.add("comment")          # the comment lands, its response is lost
+        delegation.send_messages(self.conn, self.cfg, self.kb)
+        self.assertEqual(self.approval_msg(aid)["status"], "sending")
+        delegation.add_message(self.conn, did, "supplement", "不要发给 Alice", feedback_id="fbk_sup")
+        self.tick()
+        self.tick()
+        self.assertEqual(self.events(card, "review_reopened"), [], "the version is not sent back with it")
+        self.assertEqual(self.kb.cards[card]["status"], "review")
+        withdrawn = [c["body"] for c in self.kb.comments if f"[tm:{mid}:withdrawn]" in c["body"]]
+        self.assertEqual(len(withdrawn), 1, "posted once")
+        self.assertIn("WITHDRAWN send_email", withdrawn[0])
+        self.assertEqual(self.approval_msg(aid)["status"], "superseded")
+        row = self.conn.execute("SELECT revoked_at, consumed_at FROM approvals WHERE id=?", (aid,)).fetchone()
+        self.assertIsNotNone(row["revoked_at"])
+        self.assertIsNone(row["consumed_at"])
+
+    def test_a_retried_approval_is_not_counted_without_its_comment(self):
+        did, card, v1, aid = self.approved_v1()
+        self.kb.fail_next["comment"] = KanbanError("bridge timeout during comment", uncertain=True)
+        delegation.send_messages(self.conn, self.cfg, self.kb)
+        self.assertEqual(self.approval_msg(aid)["status"], "sending")
+        self.kb.reopen_review(card)                    # sent back on the dashboard meanwhile
+        delegation.send_messages(self.conn, self.cfg, self.kb)
+        self.assertFalse([c for c in self.kb.comments if "APPROVED" in c["body"]])
+        self.assertEqual(self.approval_msg(aid)["status"], "superseded")
+        row = self.conn.execute("SELECT revoked_at, consumed_at FROM approvals WHERE id=?", (aid,)).fetchone()
+        self.assertIsNotNone(row["revoked_at"])
+        self.assertIsNone(row["consumed_at"], "that run started without it")
+
+
+class SubmitRaceTests(Base):
+    """A message queued while the create call is in flight (``add_message`` does not take the
+    kanban-submit lock): only what went into the card body counts as sent at creation."""
+
+    def queue_during_create(self, did, kind, body):
+        def other_process():
+            other = db.connect(self.cfg.db_path)
+            try:
+                self.late = delegation.add_message(other, did, kind, body)
+            finally:
+                other.close()
+        self.kb.interleave["create"] = other_process
+
+    def test_a_supplement_queued_during_create_reaches_the_card(self):
+        did = self.delegate()
+        early = delegation.add_message(self.conn, did, "supplement", "Early: cc Bob")
+        self.queue_during_create(did, "supplement", "Late: cc Carol")
+        delegation.submit_pending(self.conn, self.cfg, self.kb)
+        card = self.d(did)["card_id"]
+        self.assertIn("Early: cc Bob", self.kb.cards[card]["body"])
+        self.assertNotIn("Late: cc Carol", self.kb.cards[card]["body"])
+        self.assertEqual(self.msg(early)["status"], "sent")
+        self.assertEqual(self.msg(self.late)["status"], "pending")
+        delegation.send_messages(self.conn, self.cfg, self.kb)
+        self.assertEqual(self.msg(self.late)["status"], "sent")
+        self.assertTrue([c for c in self.kb.comments if f"[tm:{self.late}]" in c["body"]
+                         and "Late: cc Carol" in c["body"]])
+
+    def test_a_pause_queued_during_create_blocks_the_card(self):
+        did = self.delegate()
+        self.queue_during_create(did, "pause", "stop for now")
+        delegation.submit_pending(self.conn, self.cfg, self.kb)
+        card = self.d(did)["card_id"]
+        self.assertEqual(self.msg(self.late)["status"], "pending")
+        self.tick()
+        self.assertEqual(self.msg(self.late)["status"], "sent")
+        self.assertEqual(self.kb.cards[card]["status"], "blocked")
+        self.assertNotIn(card, self.kb.dispatch_tick())
+        self.assertEqual(self.d(did)["status"], "paused")
 
 
 class RemovedSettingTests(Base):

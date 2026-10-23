@@ -144,7 +144,9 @@ class BridgeKanban:
                               f"{(proc.stderr or '')[-300:]}", uncertain=mutating)
         response = json.loads(lines[-1][len(MARK):])
         if not response.get("ok"):
-            raise KanbanError(response.get("error", "bridge error"), code=response.get("code"))
+            # ``uncertain``: it failed after a write (PARTIAL), e.g. a create whose card exists.
+            raise KanbanError(response.get("error", "bridge error"), code=response.get("code"),
+                              uncertain=bool(response.get("uncertain")))
         return response.get("result")
 
     def ping(self) -> dict[str, Any]:
@@ -244,6 +246,7 @@ class FakeKanban:
         # action -> callable run after the transition's check and before its state function:
         # stands in for a dashboard action interleaving there (the race ``transition_raced`` reports).
         # "comment": run right before a comment is stored (e.g. the worker submits meanwhile).
+        # "create": run while the create call is in flight (e.g. a message queued meanwhile).
         self.interleave: dict[str, Any] = {}
         self.valid_profiles = {'default'}
         self.settings_values = {"review_dispatch": False, "auto_decompose": False}
@@ -279,6 +282,8 @@ class FakeKanban:
         if not self.profile_valid(assignee):
             raise KanbanError('assignee is not a dispatchable Hermes profile', code='NO_PROFILE')
         self._maybe_fail("create")
+        if "create" in self.interleave:
+            self.interleave.pop("create")()
         for card in self.cards.values():
             if card["idem_key"] == idem_key and card["status"] != "archived":
                 return card["id"]
@@ -294,7 +299,7 @@ class FakeKanban:
             try:
                 self.notify(cid, notify, release=not start_after)
             except KanbanError as exc:
-                raise KanbanError(str(exc), uncertain=True) from exc
+                raise KanbanError(str(exc), code="PARTIAL", uncertain=True) from exc   # as the bridge reports it
         if start_after:
             if self.interrupt_schedule:
                 self.interrupt_schedule = False
