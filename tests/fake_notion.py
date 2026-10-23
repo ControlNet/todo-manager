@@ -3,7 +3,8 @@
 It mirrors the behaviours the sync relies on (data-source queries filtered/sorted by
 ``last_edited_time``, which this double rounds to the minute so tests can force two edits to
 share a timestamp; no precision of the real API is assumed), property ids, select options created on write,
-markdown body search-and-replace, unresolved-comment listing, ``in_trash``) and can
+markdown body search-and-replace, a task page's markdown listed and trashed as top-level blocks,
+unresolved-comment listing, ``in_trash``) and can
 inject faults (errors, lost write responses). It is NOT evidence that the real API
 behaves the same; real behaviour is checked separately against a sandbox page.
 
@@ -16,6 +17,7 @@ imitated.
 from __future__ import annotations
 
 import copy
+import hashlib
 import itertools
 import json
 import re
@@ -36,15 +38,28 @@ def _minute(ts: str) -> str:
 # Seen on the production workspace (2026-10-11): Notion stores a bare URL as a link that ends
 # only at white space (CJK text after it becomes part of the link) and a bare domain as a link
 # to http://domain; the markdown write's response does not show it, later reads do.
+# Seen again (2026-10-21): a bare email address is linked with every non-space character before
+# the ``@`` in its local part (CJK text, punctuation, an escaped backtick), the href unescaped.
 _AUTOLINK = re.compile(r"(?P<link>(?<!\\)\[(?:\\.|[^\]\\])*\]\([^)\s]*\))"
                        r"|(?P<url>https?://[^\s<>\]]+)"
+                       r"|(?P<email>[^\s\[\]()<>*@]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})"
                        r"|(?<![\w./@-])(?P<domain>[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:edu|com|org|net|io|au))(?![\w-])")
+# ASSUMPTION (from that one observation): such a link cannot be matched when it is sent back as
+# ``old_str`` ("No matches found"), while a mailto link to a plain address round-trips.
+_MAILTO = re.compile(r"\]\(mailto:([^)\s]*)\)")
+_PLAIN_ADDRESS = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
+
+
+def _unescaped(text: str) -> str:
+    return re.sub(r"\\(.)", r"\1", text)
 
 
 def autolinked(markdown: str) -> str:
     def link(m: re.Match) -> str:
         if m.group("url"):
             return f"[{m.group('url')}]({m.group('url')})"
+        if m.group("email"):
+            return f"[{m.group('email')}](mailto:{_unescaped(m.group('email'))})"
         if m.group("domain"):
             return f"[{m.group('domain')}](http://{m.group('domain')})"
         return m.group(0)
@@ -64,7 +79,10 @@ class FakeNotion:
         self.fail_next: dict[tuple[str, str], Exception] = {}
         self.precise_times = False   # True: page edit times keep their seconds (default: rounded to the minute)
         self.truncate_markdown_at: int | None = None   # imitate the API cutting a large body (``truncated``)
-        self.autolink = False   # True: store bare URLs and domains as links, as Notion does (see autolinked)
+        self.autolink = False   # True: store bare URLs, domains and addresses as links, as Notion does (see autolinked)
+        # How a page without ``blocks`` of its own shows its markdown as blocks (see _md_blocks):
+        # True puts a callout's first line in its first child instead of its own rich text.
+        self.callout_text_as_child = False
         self.lose_response: set[tuple[str, str]] = set()
         # Imitate Notion creating a board with its own grouping (the Status select, empty groups
         # hidden) instead of the requested one, as it did on 2026-10-12; a PATCH applies it.
@@ -89,6 +107,47 @@ class FakeNotion:
     def text(block: dict[str, Any]) -> str:
         return "".join(t.get("plain_text") or t.get("text", {}).get("content", "")
                        for t in block[block["type"]].get("rich_text", []))
+
+    def _md_blocks(self, page_id: str) -> list[tuple[dict[str, Any], int, int, list[dict[str, Any]]]]:
+        """The top-level blocks of a page that has no ``blocks`` of its own (a task page), read
+        roughly from its markdown: (block, start, end, children). A ``<callout>`` is one block
+        whose first line is its rich text (``callout_text_as_child``: its first child) and whose
+        other tab-indented lines are its children; any other line is a paragraph. Ids are derived
+        from the position and text, so a block changed since it was listed is not found."""
+        md = self.markdown.get(page_id) or ""
+        lines, pos = [], 0
+        for line in md.split("\n"):
+            lines.append((line, pos))
+            pos += len(line) + 1
+        out, i = [], 0
+        while i < len(lines):
+            line, start = lines[i]
+            j = i
+            if line.startswith("<callout"):
+                while j + 1 < len(lines) and lines[j][0].rstrip() != "</callout>":
+                    j += 1
+                inner = [x[1:] for x, _ in lines[i + 1:j] if x.startswith("\t") and not x.startswith("\t\t")]
+            elif line.strip():
+                while j + 1 < len(lines) and lines[j + 1][0].startswith("\t"):
+                    j += 1
+            else:
+                i += 1
+                continue
+            end = lines[j][1] + len(lines[j][0])
+            key = hashlib.sha256(f"{page_id}:{start}:{md[start:end]}".encode()).hexdigest()[:16]
+            plain = lambda text: _unescaped(text.replace("**", ""))
+            if line.startswith("<callout"):
+                first = [] if self.callout_text_as_child or not inner else inner[:1]
+                rest = inner[len(first):]
+                block = self.block("callout", plain(first[0]) if first else "", id=f"md-{key}")
+                children = [self.block("paragraph", plain(x), id=f"md-{key}-{n}") for n, x in enumerate(rest)]
+            else:
+                block = self.block("paragraph", plain(line), id=f"md-{key}")
+                children = []
+            block["has_children"] = bool(children)
+            out.append((block, start, end, children))
+            i = j + 1
+        return out
 
     def _insert_blocks(self, page_id: str, new: list[dict[str, Any]], after: str | None, kind: str = "end") -> None:
         blocks = self.blocks.setdefault(page_id, [])
@@ -414,7 +473,24 @@ class FakeNotion:
             self._insert_blocks(parts[1], new, (position.get("after_block") or {}).get("id"), position["type"])
             return {"results": copy.deepcopy(new), "has_more": False, "next_cursor": None}
         if parts[0] == "blocks" and len(parts) == 3 and parts[2] == "children":
+            if parts[1] in self.pages and parts[1] not in self.blocks:
+                return self._paged([b for b, *_ in self._md_blocks(parts[1])], params)
+            if parts[1].startswith("md-"):
+                children = next((c for pid in self.pages if pid not in self.blocks
+                                 for b, _, _, c in self._md_blocks(pid) if b["id"] == parts[1]), None)
+                if children is None:
+                    raise HttpError(404, "not found", body={"code": "object_not_found", "message": "not found"})
+                return self._paged(children, params)
             return self._paged(copy.deepcopy(self.blocks.get(parts[1], [])), params)
+        if parts[0] == "blocks" and len(parts) == 2 and method == "DELETE" and parts[1].startswith("md-"):
+            for pid in [p for p in self.pages if p not in self.blocks]:
+                for b, start, end, _ in self._md_blocks(pid):
+                    if b["id"] == parts[1]:   # the block and its children leave the markdown
+                        md = self.markdown[pid]
+                        self.markdown[pid] = md[:start] + md[end + 1:]
+                        self._touch(self.pages[pid], BOT_ID, "page.content_updated")
+                        return {**b, "in_trash": True}
+            raise HttpError(404, "not found", body={"code": "object_not_found", "message": "not found"})
         if parts[0] == "blocks" and len(parts) == 2 and method in ("PATCH", "DELETE"):
             for page_id, blocks in self.blocks.items():
                 found = next((b for b in blocks if b["id"] == parts[1]), None)
@@ -538,6 +614,9 @@ class FakeNotion:
             if kind == "update_content":
                 for op in body["update_content"]["content_updates"]:
                     count = current.count(op["old_str"])
+                    if not count or any(not _PLAIN_ADDRESS.fullmatch(href) for href in _MAILTO.findall(op["old_str"])):
+                        raise HttpError(400, "no matches", body={"code": "validation_error",
+                                                                 "message": f"No matches found for {op['old_str'][:60]}"})
                     if count != 1 and not op.get("replace_all_matches"):
                         raise HttpError(400, "old_str must match exactly once",
                                         body={"code": "validation_error", "message": f"matches={count}"})

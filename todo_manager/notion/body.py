@@ -26,6 +26,8 @@ MAX_DELIVERY_CHARS = 15000
 _LEADING = re.compile(r"^(\s*)([#>+-]|\d+[.)])")
 # A bare http(s) URL in text: it ends at white space, markup characters or CJK text (U+2E80 on).
 _URL = re.compile(r"https?://[^\s<>\[\]{}\"'`|^\\\u2e80-\uffff]+")
+# A bare email address, ASCII only: Notion would link it with every non-space character before it.
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![A-Za-z0-9-])")
 _MD_LINK = re.compile(r"(?<!\\)\[((?:\\.|[^\]\\])*)\]\(([^)\s]*)\)")
 
 
@@ -62,18 +64,30 @@ def _url_end(url: str) -> str:
     return url
 
 
+def _with_addresses(text: str) -> str:
+    """Escape text, with each bare email address as an explicit mailto link."""
+    out, pos = [], 0
+    for m in _EMAIL.finditer(text):
+        out.append(escape_inline(text[pos:m.start()]))
+        out.append(f"[{escape_inline(m.group(0))}](mailto:{m.group(0)})")
+        pos = m.end()
+    return "".join(out) + escape_inline(text[pos:])
+
+
 def prose_inline(text: str) -> str:
     """Escape written text, with each bare http(s) URL as an explicit link: Notion would link
-    it itself up to the next white space, taking any CJK text after it into the link."""
+    it itself up to the next white space, taking any CJK text after it into the link. Email
+    addresses outside URLs become mailto links: Notion would link them with the text before
+    them, in a form it cannot match again as ``old_str``."""
     out, pos = [], 0
     for m in _URL.finditer(text):
         url = _url_end(m.group(0))
         if url.endswith("://") or len(url) >= 1900:
             continue
-        out.append(escape_inline(text[pos:m.start()]))
+        out.append(_with_addresses(text[pos:m.start()]))
         out.append(f"[{escape_inline(url)}]({url.replace('(', '%28').replace(')', '%29')})")
         pos = m.start() + len(url)
-    return "".join(out) + escape_inline(text[pos:])
+    return "".join(out) + _with_addresses(text[pos:])
 
 
 def prose(text: str) -> str:
@@ -162,7 +176,6 @@ def render(sections: dict[str, Any], marker: str = MARKER, lang: str | None = No
 def locate(markdown: str, marker: str = MARKER) -> tuple[int, int] | None:
     """(start, end) offsets of the managed callout in a page's markdown, or None.
     ``marker`` is a catalog key; the marker text of any language is recognised."""
-    heads = [text[:12] for text in i18n.variants(marker)]
     pos = 0
     while True:
         start = markdown.find("<callout", pos)
@@ -173,9 +186,14 @@ def locate(markdown: str, marker: str = MARKER) -> tuple[int, int] | None:
             end_tag = re.compile(r"^</callout>[ \t]*$", re.M)
             head = markdown[start:start + 400]
             close = end_tag.search(markdown, start)
-            if close and any(h in _unescape(head) for h in heads):
+            if close and marked(_unescape(head), marker):
                 return line_start, close.end()
         pos = start + 8
+
+
+def marked(text: str, marker: str = MARKER) -> bool:
+    """Whether text carries the marker (of any language): the first line of the managed box."""
+    return any(variant[:12] in text for variant in i18n.variants(marker))
 
 
 def _unescape(text: str) -> str:

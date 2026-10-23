@@ -934,13 +934,51 @@ class NotionSync:
             command = {"type": "insert_content", "insert_content": {"content": rendered, "position": {"type": "start"}}}
         with tx(self.conn):
             set_meta(self.conn, 'notion.body_pending:' + page_id, rendered)
+        outcome = "updated" if region is not None else "inserted"
         try:
             result = self.client.update_markdown(page_id, command)
         except NotionUncertain as exc:
             raise outbox.Uncertain(str(exc)) from None
+        except NotionError as exc:
+            if region is None or exc.status != 400 or "No matches found" not in str(exc):
+                raise
+            # Notion cannot match some content in the form it serves it (an email address it
+            # linked with the text before it), so the box we just read can never be updated.
+            result, outcome = self._replace_box(page_id, region, rendered), "replaced"
         new_region = body.extract(result.get("markdown") or "") or rendered
         self._store_region(page_id, rendered, new_region)
-        return "updated" if region is not None else "inserted"
+        return outcome
+
+    def _replace_box(self, page_id: str, region: str, rendered: str) -> dict[str, Any]:
+        """Replace the managed callout without ``old_str``: only when a new read still shows the
+        region already found to be ours, and exactly one top-level callout carries the marker.
+        It is trashed before the box is inserted again at the start, so a failure in between
+        leaves no box, which the retry inserts as on a new page (never two boxes)."""
+        doc = self.client.page_markdown(page_id)
+        markdown = doc.get("markdown") or ""
+        if doc.get("truncated") or body.extract(markdown) != region:
+            raise outbox.Retryable("the managed region changed while it was updated")
+        if body.extract(body.outside(markdown)):
+            raise outbox.Retryable("the page has more than one managed region; not replaced")
+        boxes = []
+        for block in self.client.block_children(page_id):
+            if block.get("type") != "callout":
+                continue
+            text = plain_text((block.get("callout") or {}).get("rich_text"))
+            if not body.marked(text) and block.get("has_children"):
+                # The callout's own text may be empty, with the marker line as its first child.
+                first = next(iter(self.client.block_children(block["id"])), {})
+                text = plain_text((first.get(first.get("type") or "") or {}).get("rich_text"))
+            if body.marked(text):
+                boxes.append(block["id"])
+        if len(boxes) != 1:
+            raise outbox.Retryable(f"{len(boxes)} top-level callouts carry the marker; not replaced")
+        self.client.trash_block(boxes[0])
+        try:
+            return self.client.update_markdown(page_id, {"type": "insert_content", "insert_content": {
+                "content": rendered, "position": {"type": "start"}}})
+        except NotionUncertain as exc:
+            raise outbox.Uncertain(str(exc)) from None
 
     def reconcile_body(self, page_id: str, region: str) -> None:
         expected = get_meta(self.conn, 'notion.body_pending:' + page_id)
