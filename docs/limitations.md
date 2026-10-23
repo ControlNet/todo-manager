@@ -133,6 +133,11 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
 - A Notion property write whose response was lost is recognised as our own echo only while the
   page still shows exactly the values we wrote; if someone changes one of those fields to the
   same value we wrote, that change is indistinguishable from our echo.
+- A property edit that lands between our read and our write is taken as the user's only for
+  fields the write does not set, and only when the response arrives (Notion has no conditional
+  writes): the same field changed in that window is overwritten, and an edit landing during a
+  write whose response was lost is taken for our bot's on the retry. Who made such an edit is
+  not known (author empty); with `identity.notion_user_ids` set it counts as the user's.
 - Slack: only conversations the token's user is a member of can be discovered. Bot channels are
   not detected automatically; they are blacklisted with `slack.exclude` (an unlisted one costs only
   API reads: bot messages are context only, never analysed, and do not make a channel "active").

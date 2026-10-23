@@ -26,9 +26,14 @@ Page bodies (gate B, after the property import)
 
 Push (outbox handlers)
   * Read-before-write: the page is fetched first; unseen human edits are imported before
-    anything is written, then only the properties that differ are patched.
+    anything is written, then only the properties that differ are patched. A field we did not
+    send that the PATCH response shows changed since our read is a human edit (``_concurrent_edit``).
   * Page creation looks the task up by ``TM ID`` first; an uncertain create (timeout,
-    503) is reconciled the same way before any retry, never blindly repeated.
+    503, a crash) is reconciled the same way before any retry, never blindly repeated. The
+    values a create sends are recorded before the request: a page found later is compared with
+    them, so the user's edits made before we linked it are imported.
+  * A property a page lacks (deleted or recreated in Notion) or of another type is unreadable,
+    not empty: left out of import and comparison and reported as a schema problem.
   * Body: only the managed callout is replaced (see ``body``). An edit the user made
     inside it is handed to the feedback flow instead of being overwritten.
 
@@ -58,6 +63,10 @@ from .client import NotionClient, NotionError, NotionUncertain, plain_text
 TRASH_REASON = "sync.trash_reason"    # catalog keys
 BOARD_STATUS = {"cancel": "cancelled", "done": "done", "todo": "todo"}   # decision-board choice -> status
 HOME_MARKER = "home.marker"
+# meta key prefix + "{kind}:{entity id}": a page create that may have happened and is not linked
+# yet: when it was sent (or became uncertain) and the values it sent.
+CREATE_PENDING = "notion.create_pending:"
+CREATE_VISIBLE_SECONDS = 50   # an empty TM ID lookup this soon after such a create is not definite
 
 
 @dataclass
@@ -144,6 +153,7 @@ class NotionSync:
                  (page.get("last_edited_by") or {}).get("id"), dumps(seen)))
             table = "tasks" if entity_type == "task" else "projects"
             self.conn.execute(f"UPDATE {table} SET notion_page_id=? WHERE id=?", (page["id"], entity_id))
+            self.conn.execute("DELETE FROM meta WHERE key=?", (f"{CREATE_PENDING}{entity_type}:{entity_id}",))
 
     def _seen(self, page_id: str, seen: dict[str, Any], page: dict[str, Any] | None = None) -> None:
         params: list[Any] = [dumps(seen)]
@@ -420,12 +430,17 @@ class NotionSync:
         if _moved_out(page):    # no properties while outside: reading them would clear the fields
             self.problems.append(f"{page['id']}: {_moved_out(page)}")
             return "ignored"
-        values, problems = schema.parse_page(kind, page, self.pmap(kind))
+        unreadable: set[str] = set()
+        values, problems = schema.parse_page(kind, page, self.pmap(kind), unreadable)
         row = self.page_row(page["id"])
         for problem in problems:
             self.problems.append(f"{page['id']}: {problem}")
+        self._report_unreadable(kind, unreadable)
         if row is None:
-            return self._import_new(kind, page, values)
+            outcome = self._import_new(kind, page, values)
+            if outcome != "linked":
+                return outcome
+            row = self.page_row(page["id"])   # found by its TM ID: compared with what our create sent
         if page.get("in_trash"):
             if kind == "task" and not row["trashed"]:
                 self.page_trashed(row, page)
@@ -436,6 +451,12 @@ class NotionSync:
             self._page_restored(kind, row, page)
         seen = row["last_seen_props"]
         current = {**schema.comparable(kind, values), **_page_icon(kind, page)}
+        # An unreadable property is not an empty value: it keeps its baseline, so it is no edit.
+        for f in unreadable:
+            if f in seen:
+                current[f] = seen[f]
+            else:
+                current.pop(f, None)
         if kind == "project" and "icon" not in seen:
             seen = self._adopt_icon(row, current["icon"], seen)
         editable = _editable(kind)
@@ -467,6 +488,15 @@ class NotionSync:
         with tx(self.conn):
             self._set_pending(page["id"], still_pending, row["pending_write"].get("version"))
         return "edited" if self.is_user(editor) else "evidence"
+
+    def _report_unreadable(self, kind: str, unreadable: set[str]) -> None:
+        """A mapped property a page does not have, or of another type: a schema problem (an
+        upgrade's property that the install has not created yet is expected, not reported)."""
+        for f in sorted(unreadable):
+            text = schema.unreadable_problem(kind, f, self.state.language)
+            if f in self.pmap(kind).ids and schema.prop(kind, f).type != "last_edited_time" \
+                    and text not in self.problems:
+                self.problems.append(text)
 
     def _adopt_icon(self, row: dict[str, Any], icon: str | None, seen: dict[str, Any]) -> dict[str, Any]:
         """First read since project icons are synced: an icon already on the page is the user's."""
@@ -507,8 +537,8 @@ class NotionSync:
                     self.problems.append(f"duplicate Notion page {page['id']} for task {tm_id} "
                                          f"(linked page {existing['page_id']})")
                     return "ignored"
-                self._link("task", tm_id, page, current)   # recovery: page exists, link was lost
-                return "unchanged"
+                self._link("task", tm_id, page, self._found_baseline("task", tm_id, page))   # its link was lost
+                return "linked"
             title = values.get("title") or self.t("sync.untitled_task")
             project_id = self._local_project(values.get("project_id"))
             truncated = False
@@ -545,8 +575,8 @@ class NotionSync:
             if existing and existing['page_id'] != page['id']:
                 self.problems.append(f"duplicate Notion page {page['id']} for project {tm_id} (linked page {existing['page_id']})")
                 return 'ignored'
-            self._link("project", tm_id, page, current)
-            return "unchanged"
+            self._link("project", tm_id, page, self._found_baseline("project", tm_id, page))
+            return "linked"
         title = values.get("title") or self.t("sync.untitled_project")
         with tx(self.conn):
             pid = store.create_project(self.conn, title, origin="notion", actor=actor, cause_ref=page["id"],
@@ -559,6 +589,27 @@ class NotionSync:
                             author=creator, author_is_user=by_user, payload={"page_id": page["id"]})
             effects.project_push(self.conn, pid)
         return "created"
+
+    def _found_baseline(self, kind: str, entity_id: str, page: dict[str, Any]) -> dict[str, Any]:
+        """Baseline of a page found by its TM ID whose create was never linked (its response was
+        lost): the values that create sent, so edits made since are imported, not overwritten.
+        Without a record of them (a create by an older version) the page's values count as ours
+        only while our bot is still its last editor; otherwise each editable value that differs
+        from the local one counts as the last editor's edit, so the user's are kept."""
+        sent = loads(get_meta(self.conn, f"{CREATE_PENDING}{kind}:{entity_id}"), {}) or {}
+        if sent.get("props") is not None:
+            return sent["props"]
+        values, _ = schema.parse_page(kind, page, self.pmap(kind))
+        remote = {**schema.comparable(kind, values), **_page_icon(kind, page)}
+        if self.state.bot_user_id and (page.get("last_edited_by") or {}).get("id") == self.state.bot_user_id:
+            return remote
+        if kind == "task":
+            local = schema.comparable(kind, self.task_values(store.get_task(self.conn, entity_id)))
+        else:
+            project = store.get_project(self.conn, entity_id)
+            local = {**schema.comparable(kind, self.project_values(project)),
+                     "icon": project_icons.normalize(project.get("icon"))}
+        return {**remote, **{f: local.get(f) for f in _editable(kind)}}
 
     def _local_project(self, page_id: str | None) -> str | None:
         if not page_id:
@@ -772,7 +823,7 @@ class NotionSync:
         if task is None:
             raise outbox.Permanent(f"task {task_id} no longer exists")
         if task.get("project_id") and not self.project_page_id(task["project_id"]):
-            self._push_project(task["project_id"], reconcile=False)
+            self._push_project(task["project_id"], reconcile)
         row = self.entity_row("task", task_id)
         if row and row["trashed"]:
             return {"skipped": "page trashed"}
@@ -817,26 +868,40 @@ class NotionSync:
                 self.problems.append(f"{len(matches)} Notion pages carry TM ID {entity['id']}; linked the oldest")
                 matches.sort(key=lambda p: p.get("created_time") or "")
             page = matches[0]
-            values, _ = schema.parse_page(kind, page, self.pmap(kind))
-            self._link(kind, entity["id"], page, {**schema.comparable(kind, values), **_page_icon(kind, page)})
+            self._link(kind, entity["id"], page, self._found_baseline(kind, entity["id"], page))
             return self.entity_row(kind, entity["id"])
-        if reconcile and self.conn.execute(
+        # A create of this entity that may have happened (its response lost, or the process ended
+        # while it was under way) may not be listed yet. Whichever attempt comes next (the row's own
+        # reconcile, another push of the entity, a task pushing its project) creates only once the
+        # lookup's empty answer is definite: the window since that create has passed.
+        key = f"{CREATE_PENDING}{kind}:{entity['id']}"
+        recent = clock.iso(clock.now() - timedelta(seconds=CREATE_VISIBLE_SECONDS))
+        sent_at = (loads(get_meta(self.conn, key), {}) or {}).get("at") or ""
+        if sent_at > recent or (reconcile and self.conn.execute(
                 "SELECT 1 FROM outbox WHERE op=? AND entity_id=? AND status='uncertain'"
-                " AND updated_at > ?", (f"push_{kind}", entity["id"],
-                                        clock.iso(clock.now() - timedelta(seconds=50)))).fetchone():
+                " AND updated_at > ?", (f"push_{kind}", entity["id"], recent)).fetchone()):
             raise outbox.Retryable("waiting for an uncertain create to become visible", retry_after=60)
         values = self.task_values(entity) if kind == "task" else self.project_values(entity)
         props = schema.render_properties(kind, values, self.pmap(kind))
         markdown = self.render_body(entity) if kind == "task" else None
         parent = {"type": "data_source_id", "data_source_id": self.data_source(kind)}
         icon = project_icons.render(entity.get("icon")) if kind == "project" else None
+        sent = {**schema.comparable(kind, values), **({"icon": project_icons.from_page(icon)} if kind == "project" else {})}
+        with tx(self.conn):   # before the request: a lost response or a crash leaves it behind
+            set_meta(self.conn, key, dumps({"at": clock.iso(), "props": sent}))
         try:
             page = self.client.create_page(parent, props, markdown=markdown, icon=icon)
         except NotionUncertain as exc:
             if exc.committed_id:
                 page = self.client.retrieve_page(exc.committed_id)
             else:
+                with tx(self.conn):   # the page may have been committed until now
+                    set_meta(self.conn, key, dumps({"at": clock.iso(), "props": sent}))
                 raise outbox.Uncertain(str(exc)) from None
+        except NotionError:
+            with tx(self.conn):
+                self.conn.execute("DELETE FROM meta WHERE key=?", (key,))   # definitely not created
+            raise
         self._link(kind, entity["id"], page, {**schema.comparable(kind, values), **_page_icon(kind, page)})
         if markdown:
             # The visible-text fingerprint of what we sent identifies our region until the next read.
@@ -870,13 +935,16 @@ class NotionSync:
         entity = store.get_task(self.conn, entity_id) if kind == "task" else store.get_project(self.conn, entity_id)
         values = self.task_values(entity) if kind == "task" else self.project_values(entity)
         target = schema.comparable(kind, values)
-        on_page = {**schema.comparable(kind, schema.parse_page(kind, page, self.pmap(kind))[0]), **_page_icon(kind, page)}
+        unreadable: set[str] = set()   # left out: neither compared nor written (reported by the import)
+        on_page = {**schema.comparable(kind, schema.parse_page(kind, page, self.pmap(kind), unreadable)[0]),
+                   **_page_icon(kind, page)}
         if kind == "project":
             target["icon"] = project_icons.normalize(entity.get("icon"))
             if not project_icons.writable(target["icon"]):
                 target["icon"] = on_page["icon"]     # an uploaded image: what the page has
-        diff = {f for f in target if target[f] != on_page.get(f)}
+        diff = {f for f in target if f not in unreadable and target[f] != on_page.get(f)}
         result: dict[str, Any] = {"props": sorted(diff)}
+        racing: dict[str, Any] = {}
         if diff:
             props = schema.render_properties(kind, values, self.pmap(kind), only=diff - {"icon"})
             extra = {"icon": project_icons.render(target["icon"])} if "icon" in diff else {}
@@ -891,12 +959,39 @@ class NotionSync:
                 with tx(self.conn):
                     self._set_pending(row["page_id"], None)  # definitely not written
                 raise
+            # The response is the page after our write. A field we did not send that differs from
+            # our read was changed by someone else in between, and our write made the bot the
+            # page's last editor. (A change in that window of a field we did send is overwritten
+            # unnoticed: without conditional writes Notion cannot tell us.)
+            after = {**schema.comparable(kind, schema.parse_page(kind, page, self.pmap(kind), unreadable)[0]),
+                     **_page_icon(kind, page)}
+            racing = {f: after.get(f) for f in _editable(kind)
+                      if f not in diff and f not in unreadable and after.get(f) != on_page.get(f)}
         with tx(self.conn):
+            # Sent fields: the value sent; the others: our read, so a racing change stays a change.
             self._seen(row["page_id"], target, page)
             self._set_pending(row["page_id"], None)
+        if racing:
+            self._concurrent_edit(kind, row["page_id"], page, racing)
+            entity = store.get_task(self.conn, entity_id) if kind == "task" else entity
         if kind == "task":
             result["body"] = self._sync_body(row["page_id"], entity)
         return result
+
+    def _concurrent_edit(self, kind: str, page_id: str, page: dict[str, Any], racing: dict[str, Any]) -> None:
+        """Fields someone changed between our read and our write (``_update_page``). A later read
+        would take the change for our bot's (the page's last editor) and write the old value back.
+        With an identity configured it is applied now as the user's edit (by whom is not known,
+        only that it was not our bot); without one it is left to that read, evidence like any edit."""
+        if not self.user_ids():
+            return
+        row = self.page_row(page_id)
+        seen = row["last_seen_props"]
+        current = {**seen, **racing}
+        unknown = {**page, "last_edited_by": {"object": "user", "id": None}}
+        (self._apply_task_edit if kind == "task" else self._apply_project_edit)(row, unknown, racing, seen, current)
+        with tx(self.conn):
+            self._seen(page_id, current, page)   # our bot is the page's last editor again
 
     def _sync_body(self, page_id: str, task: dict[str, Any]) -> str:
         row = self.page_row(page_id)

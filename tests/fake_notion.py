@@ -211,7 +211,15 @@ class FakeNotion:
                 if schema["type"] == "last_edited_time":
                     view["properties"][name] = {"id": schema["id"], "type": "last_edited_time",
                                                 "last_edited_time": page["last_edited_time"]}
+                elif name not in view["properties"]:   # added to the data source after the page
+                    view["properties"][name] = self._empty(schema)
         return view
+
+    @staticmethod
+    def _empty(schema: dict[str, Any]) -> dict[str, Any]:
+        """A page's value of a property it has no value for (Notion lists every property)."""
+        empty: Any = {"title": [], "rich_text": [], "checkbox": False, "relation": []}.get(schema["type"])
+        return {"id": schema["id"], "type": schema["type"], schema["type"]: empty}
 
     # ------------------------------------------------------------------ test controls
     def user_set_icon(self, page_id: str, icon: dict[str, Any] | None, author: str = USER_ID) -> None:
@@ -313,14 +321,8 @@ class FakeNotion:
         if parent.get("type") == "data_source_id":
             ds = self.data_sources[parent["data_source_id"]]
             for name, schema in ds["properties"].items():
-                if schema["type"] in ("title", "rich_text"):
-                    page["properties"][name] = {"id": schema["id"], "type": schema["type"], schema["type"]: []}
-                elif schema["type"] == "checkbox":
-                    page["properties"][name] = {"id": schema["id"], "type": "checkbox", "checkbox": False}
-                elif schema["type"] == "relation":
-                    page["properties"][name] = {"id": schema["id"], "type": "relation", "relation": []}
-                elif schema["type"] != "last_edited_time":
-                    page["properties"][name] = {"id": schema["id"], "type": schema["type"], schema["type"]: None}
+                if schema["type"] != "last_edited_time":
+                    page["properties"][name] = self._empty(schema)
             self._set_props(page, ds, props)
         self.pages[pid] = page
         self._touch(page, who, "page.created")
