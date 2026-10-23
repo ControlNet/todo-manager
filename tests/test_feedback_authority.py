@@ -173,8 +173,8 @@ class OneFeedbackManyCommandsTests(GateCase):
         fid = feedback.claimed_by(self.conn, run_id)[0]["id"]
         before = self.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
         two = [{"op": "create_task", "title": "订会议室"}, {"op": "create_task", "title": "发议程"}]
-        apply_feedback_ops(self.conn, self.cfg, fid, two)
-        apply_feedback_ops(self.conn, self.cfg, fid, two[:1])          # a retry after a lost response
+        apply_feedback_ops(self.conn, self.cfg, fid, two, run=run_id)
+        apply_feedback_ops(self.conn, self.cfg, fid, two[:1], run=run_id)    # a retry after a lost response
         self.decide(run_id, [{"feedback": fid, "outcome": "applied"}])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], before + 2)
         self.assertEqual(feedback.get(self.conn, fid)["result"]["ops"], ["task create", "task create"])

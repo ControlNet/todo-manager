@@ -103,8 +103,8 @@ class SameGateRunTests(GateCase):
         _, woke, run_id = self.gate()
         self.assertTrue(woke)
         a, b = [f["id"] for f in feedback.claimed_by(self.conn, run_id)]
-        apply_feedback_ops(self.conn, self.cfg, a, [delegate_op(self.task)])
+        apply_feedback_ops(self.conn, self.cfg, a, [delegate_op(self.task)], run=run_id)
         with self.assertRaises(OpError) as ctx:
-            apply_feedback_ops(self.conn, self.cfg, b, [delegate_op(self.task, "第二份")])
+            apply_feedback_ops(self.conn, self.cfg, b, [delegate_op(self.task, "第二份")], run=run_id)
         self.assertIn("active delegation", str(ctx.exception))
         self.assertEqual(len(delegation.for_task(self.conn, self.task, active_only=True)), 1)

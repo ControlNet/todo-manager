@@ -7,8 +7,8 @@ prints structured business JSON or administrative summaries (--json for automati
 (default ``~/.hermes/workspace/todo-manager``), never in the source tree.
 
 Commands that change Todo data take the context they act in (see ``ops``): ``--run`` (a cron
-run), ``--feedback`` (the user's Notion feedback item), ``--request ID --said TEXT`` (the user's
-chat request) or --human (explicit manual invocation).
+run), ``--feedback`` (the user's Notion feedback item; a feedback run adds its ``--run``),
+``--request ID --said TEXT`` (the user's chat request) or --human (explicit manual invocation).
 """
 
 from __future__ import annotations
@@ -102,7 +102,8 @@ def _task_line(t: dict[str, Any]) -> str:
 def _add_ctx(parser: argparse.ArgumentParser) -> None:
     g = parser.add_mutually_exclusive_group()
     g.add_argument("--human", action="store_true", help="explicit manual human invocation (provenance, not access control)")
-    g.add_argument("--run", help="the cron run this is part of")
+    # Not in the group: a feedback run gives --feedback with its --run (ops.context checks the rest).
+    parser.add_argument("--run", help="the cron run this is part of (with --feedback: the run that claimed it)")
     g.add_argument("--feedback", dest="feedback_id", help="the user's feedback item this carries out")
     g.add_argument("--request", help="id of the user's chat request (Matrix event id, or one id per request)")
     parser.add_argument("--said", help="with --request: the user's words")
@@ -472,7 +473,7 @@ def cmd_feedback(args: argparse.Namespace) -> int:
     cfg, conn = _open(args)
     if args.action == "resolve":
         return _run(lambda: ops.feedback_resolve(conn, cfg, args.id, outcome=args.outcome, reply=args.reply,
-                                                 reason=args.reason, settles=args.settles))
+                                                 reason=args.reason, settles=args.settles, run=args.run))
     if args.action == "record":
         return _run(lambda: ops.feedback_record(conn, request=args.request, said=args.said, scope=args.scope,
                                                 origin=args.origin))
@@ -819,6 +820,7 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--reply", help="short reply posted in the same Notion discussion (clarify: the question)")
     x.add_argument("--reason")
     x.add_argument("--settles", help="ID of the clarified body-edit feedback this answer settles")
+    x.add_argument("--run", help="the feedback run that claimed the item (none: by hand, while no run holds it)")
     x = fs.add_parser("record", help="store what the user said for the next feedback run")
     x.add_argument("--request", required=True)
     x.add_argument("--said", required=True)

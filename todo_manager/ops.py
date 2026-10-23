@@ -6,7 +6,10 @@ links, the items it handles, the follow-up it settles). It acts in a context:
 * ``run``      - a cron run (actor ``agent``); items and follow-ups claimed by that run are
                  handled by it;
 * ``feedback`` - the user's Notion feedback item (actor ``human``); refused for feedback whose
-                 author is not the verified user (it is information, never an instruction);
+                 author is not the verified user (it is information, never an instruction).
+                 A feedback run adds its run id: it acts only while it holds the item's claim
+                 with a live lease; without a run (the user at the terminal) it waits while a
+                 live run holds the claim;
 * ``request``  - the main agent acting on the user's chat request (actor ``human``); the user's
                  words are stored once per request id;
 * ``cli``      - the user at the terminal (actor ``human``).
@@ -140,18 +143,21 @@ def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, fe
             scope: str | None = None, key: str | None = None,
             write: bool = True, human: bool = False) -> Ctx:
     """Resolve and check the context of a command (``write``: it changes Todo data)."""
-    given = [x for x in (run, feedback_id, request, human) if x]
+    given = [x for x in (feedback_id or run, request, human) if x]
     if len(given) > 1:
-        raise OpError("INVALID", "give one of --run, --feedback, --request, --human")
+        raise OpError("INVALID", "give one of --run, --feedback (with the --run that claimed it), --request, --human")
     if (said or "").strip() and not request:
         raise OpError("INVALID", "--said goes with --request <id>: the Matrix event id of the user's message, or"
                                  " one id you choose for this request")
-    if run:
+    if run and not feedback_id:
         row = runs.get(conn, run)
         if row is None or row["entry"] not in ("intake", "feedback"):
             raise OpError("NOT_FOUND", f"no intake or feedback run {run}")
         return Ctx("run", run, actor="agent", origin=row["entry"], run=row, key=key, cfg=cfg)
     if feedback_id:
+        by = runs.get(conn, run) if run else None
+        if run and (by is None or by["entry"] != "feedback"):
+            raise OpError("NOT_FOUND", f"no feedback run {run}")
         fb = feedback.get(conn, feedback_id)
         if fb is None:
             raise OpError("NOT_FOUND", f"no feedback item {feedback_id}")
@@ -168,7 +174,7 @@ def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, fe
         elif write and not_ready(conn, cfg, fb):
             refusal = OpError("NOT_READY", f"{feedback_id}: {not_ready(conn, cfg, fb)}; it is offered again when"
                                            " ready")
-        return Ctx("feedback", feedback_id, actor="human", origin=_fb_origin(fb), fb=fb, key=key,
+        return Ctx("feedback", feedback_id, actor="human", origin=_fb_origin(fb), run=by, fb=fb, key=key,
                    refusal=refusal, cfg=cfg)
     if request:
         prior = conn.execute("SELECT text FROM feedback WHERE source_id IN (?,?) AND kind='direct' AND origin=? "
@@ -195,6 +201,34 @@ def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, fe
     return Ctx("cli", None, actor="human", origin="cli", key=key)
 
 
+def run_stale(conn: sqlite3.Connection, cfg: Config | None, run_id: str) -> bool:
+    """Whether a run may no longer write: released, expired, or without semantic work."""
+    current = runs.get(conn, run_id)
+    # Same claim leases as the gates; an old model turn cannot outlive its material.
+    from .gate_intake import STALE_CLAIM_MINUTES
+    lease = (cfg.get('feedback.stale_claim_minutes', 60) if cfg and
+             current and current['entry'] == 'feedback' else STALE_CLAIM_MINUTES)
+    return bool(not current or current.get('released_at') or current.get('agent_completed_at')
+                or current['status'] not in ('running', 'woke', 'success')
+                or (current['status'] in ('woke', 'success') and not current['wake'])
+                or clock.minutes_since(current['started_at']) >= lease)
+
+
+def check_claim(conn: sqlite3.Connection, cfg: Config | None, fb: dict[str, Any], run_id: str | None) -> None:
+    """A feedback run acts on an item only while it holds the item's claim with a live lease (once
+    the lease expired a later run may have taken the item over). Without a run, the user at the
+    terminal, the item must not be held by a live run."""
+    holder = fb.get('claimed_run')
+    if run_id is not None and (holder != run_id or run_stale(conn, cfg, run_id)):
+        raise OpError('STALE_RUN', f"run {run_id} no longer holds {fb['id']} (its lease expired or another run"
+                                   " took it over): nothing was changed; stop working on this item")
+    if run_id is None and holder and not run_stale(conn, cfg, holder):
+        # The holder is not named: a stale run must not borrow the id of the run that replaced it.
+        raise OpError('CLAIMED_BY_RUN', f"{fb['id']} is being handled by a feedback run: a command of that run"
+                                        " adds `--run <run id>` (the run named in its context and in `run done`);"
+                                        " a manual command waits until that run is done")
+
+
 def _key(ctx: Ctx, command: str, args: dict[str, Any]) -> str | None:
     if ctx.key:
         return f"key:{ctx.key}"
@@ -215,17 +249,8 @@ def perform(conn: sqlite3.Connection, ctx: Ctx, command: str, args: dict[str, An
                 return {**loads(row["result"], {}), "duplicate": True}
         if ctx.refusal is not None:
             raise ctx.refusal
-        if ctx.kind == 'run':
-            current = runs.get(conn, ctx.ref)
-            # Same claim leases as the gates; an old model turn cannot outlive its material.
-            from .gate_intake import STALE_CLAIM_MINUTES
-            lease = (ctx.cfg.get('feedback.stale_claim_minutes', 60) if ctx.cfg and
-                     current and current['entry'] == 'feedback' else STALE_CLAIM_MINUTES)
-            if (not current or current.get('released_at') or current.get('agent_completed_at')
-                    or current['status'] not in ('running', 'woke', 'success')
-                    or (current['status'] in ('woke', 'success') and not current['wake'])
-                    or clock.minutes_since(current['started_at']) >= lease):
-                raise OpError('STALE_RUN', f'{ctx.ref} is released, expired, or has no semantic work; use a new run')
+        if ctx.kind == 'run' and run_stale(conn, ctx.cfg, ctx.ref):
+            raise OpError('STALE_RUN', f'{ctx.ref} is released, expired, or has no semantic work; use a new run')
         if ctx.kind == 'feedback':
             current = feedback.get(conn, ctx.fb['id'])
             if current['status'] != 'pending':
@@ -235,6 +260,7 @@ def perform(conn: sqlite3.Connection, ctx: Ctx, command: str, args: dict[str, An
             reason = feedback_input_reason(conn, current)
             if reason:
                 raise OpError('INCOMPLETE', reason)
+            check_claim(conn, ctx.cfg, current, ctx.run['id'] if ctx.run else None)
         result = fn()
         if ctx.kind == 'request' and not result.get('rejected'):
             # This records direct handling, not semantic completion of an arbitrary multi-step request.
@@ -682,13 +708,17 @@ def release_body(conn: sqlite3.Connection, task_id: str) -> None:
 
 
 def feedback_resolve(conn: sqlite3.Connection, cfg: Config, feedback_id: str, *, outcome: str,
-                     reply: str | None = None, reason: str | None = None, settles: str | None = None) -> dict[str, Any]:
+                     reply: str | None = None, reason: str | None = None, settles: str | None = None,
+                     run: str | None = None) -> dict[str, Any]:
     with tx(conn):
-        return _feedback_resolve(conn, cfg, feedback_id, outcome=outcome, reply=reply, reason=reason, settles=settles)
+        return _feedback_resolve(conn, cfg, feedback_id, outcome=outcome, reply=reply, reason=reason, settles=settles,
+                                 run=run)
 
 
 def _feedback_resolve(conn: sqlite3.Connection, cfg: Config, feedback_id: str, *, outcome: str,
-                     reply: str | None = None, reason: str | None = None, settles: str | None = None) -> dict[str, Any]:
+                     reply: str | None = None, reason: str | None = None, settles: str | None = None,
+                     run: str | None = None) -> dict[str, Any]:
+    """``run``: the feedback run resolving the item (``check_claim``); None: the user by hand."""
     fb = feedback.get(conn, feedback_id)
     if fb is None:
         raise OpError("NOT_FOUND", f"no feedback item {feedback_id}")
@@ -702,6 +732,10 @@ def _feedback_resolve(conn: sqlite3.Connection, cfg: Config, feedback_id: str, *
             raise OpError("SUPERSEDED", f"{feedback_id} was replaced by a later edit of the same text; nothing to"
                                         " resolve (the new version is offered in a later run)")
         raise OpError("ALREADY_RESOLVED", f"{feedback_id} is already {fb['status']}")
+    by = runs.get(conn, run) if run else None
+    if run and (by is None or by["entry"] != "feedback"):
+        raise OpError("NOT_FOUND", f"no feedback run {run}")
+    check_claim(conn, cfg, fb, run)
     why = not_ready(conn, cfg, fb)
     if why:
         raise OpError("NOT_READY", f"{feedback_id}: {why}; it is offered again when ready")

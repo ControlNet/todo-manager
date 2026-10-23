@@ -104,7 +104,7 @@ class GateTests(GateCase):
         f1, f2 = [f["id"] for f in feedback.claimed_by(self.conn, run_id)]
         with self.assertRaises(OpError) as ctx:
             apply_feedback_ops(self.conn, self.cfg, f1, [{"op": "update_task", "task": self.task,
-                                                          "set": {"status": "finished-ish"}}])
+                                                          "set": {"status": "finished-ish"}}], run=run_id)
         self.assertEqual(ctx.exception.code, "INVALID")
         self.assertEqual(store.get_task(self.conn, self.task)["status"], "todo", "atomic: nothing applied")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM op_log").fetchone()[0], 0)
@@ -202,7 +202,7 @@ class DelegationFeedbackTests(GateCase):
         fid = feedback.claimed_by(self.conn, run_id)[0]["id"]
         with self.assertRaises(OpError) as ctx:
             apply_feedback_ops(self.conn, self.cfg, fid, [
-                {"op": "message", "delegation": self.did, "kind": "answer", "body": "A"}])
+                {"op": "message", "delegation": self.did, "kind": "answer", "body": "A"}], run=run_id)
         self.assertIn("earlier question", str(ctx.exception))
         self.decide(run_id, [{"feedback": fid, "outcome": "applied", "ops": [
             {"op": "message", "delegation": self.did, "kind": "supplement", "body": "问题一的答案其实是 A"}]}])

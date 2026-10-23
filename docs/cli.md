@@ -41,7 +41,8 @@ structured JSON outside a terminal. Inspection never initializes or migrates a w
 
 ## Explicit provenance and direct chat
 
-Business writes require exactly one of `--run`, `--feedback`, `--request`, `--human`.
+Business writes require exactly one of `--run`, `--feedback`, `--request`, `--human`; a feedback
+run gives `--feedback F --run R` (and `feedback resolve F --run R`).
 The manual marker is an audit assertion, not an operating-system security boundary.
 `feedback resolve` and `run done` already name the feedback/run being settled.
 
@@ -153,7 +154,9 @@ Released/restored, settled, idle, failed and expired runs return `STALE_RUN` (ex
 lease is 90 minutes from run start; feedback uses `feedback.stale_claim_minutes` (default 60).
 An active gate preparation (`running`) or woken run may write within that lease. A previously
 committed identical operation still returns `duplicate: true`; obtain a fresh run/context for new
-judgments. Recovery releases all intake/feedback runs, including interrupted gate preparation,
+judgments. A `--feedback F --run R` write or resolution is accepted only while R holds F's claim
+within that lease (a later run may have taken F over); otherwise `STALE_RUN`. Without `--run`
+(by hand) it is refused with `CLAIMED_BY_RUN` while a live run holds F. Recovery releases all intake/feedback runs, including interrupted gate preparation,
 and makes their unprocessed materials available again. This is separate from delegation holds.
 
 `outbox retry ID... --human` queues given-up (`dead`) Notion task and project pushes again after

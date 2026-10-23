@@ -43,8 +43,8 @@ Every woken intake and feedback run is given the file as written.
 - Read: `todo-manager status --details`, `task list --search "..."`, `task show <task>`, `project list`, `delegate list`, `delegate show <id>`.
 - Mutate: `task create --title "..." --evidence <item>:origin`, `task update <id> --based-on <version> --set <field>=<value>`, `task update <id> --evidence <item>`.
 - Intake: `source dismiss <item> --outcome informational --reason "..."`, `source defer <item> --reason "..."`, append `--run <id>`. Settle unchanged follow-ups/digest together with `run done <id> --checked <task> --digest-reviewed`.
-- Feedback: `feedback resolve <id> --outcome applied|clarify|ignored --reply "..."`; `feedback show <id>` reads full text.
-- Delegate: `delegate create --task <id> --brief "goal, background, constraints and delivery requirements" --allow read,analyze,draft`; append `--feedback <id>` or direct request context; a later start the user asked for is `--start-after "YYYY-MM-DD HH:MM"` (local time), never waiting written into the brief. The required --allow field must reflect explicit authority; read,analyze,draft permits no external action.
+- Feedback: in a feedback run every `--feedback <id>` goes with `--run <run>`; `feedback resolve <id> --run <run> --outcome applied|clarify|ignored --reply "..."`; `feedback show <id>` reads full text.
+- Delegate: `delegate create --task <id> --brief "goal, background, constraints and delivery requirements" --allow read,analyze,draft`; append `--feedback <id> --run <run>` or direct request context; a later start the user asked for is `--start-after "YYYY-MM-DD HH:MM"` (local time), never waiting written into the brief. The required --allow field must reflect explicit authority; read,analyze,draft permits no external action.
 - Message: `delegate message <id> --kind supplement|revision|pause|resume|cancel|accept --body "..."`.
 - Answer: `delegate answer <id> --body "..." [--question <delivery-id>]`; explicit one-use approval uses `--approve <action>[:<scope>]`. Version approval uses `delegate approve <id> --delivery <delivery> --action <action>`.
 - Full material: `source show <item>`, `feedback show <id>`; stored material containing words, also what was
@@ -68,13 +68,15 @@ Every woken intake and feedback run is given the file as written.
 
 Business operations return JSON, including list/show. Check applied/rejected fields; queued is
 not remotely delivered. Administrative commands support --json. Business writes require exactly
-one explicit provenance: --run, --feedback, --request, or --human for actual manual use.
+one explicit provenance: --run, --feedback (with its --run in a feedback run), --request, or --human for actual manual use.
 Do not use --human for an agent judgment. Read-only inspection does not initialize or upgrade.
 
 Settle a run once with all --checked task IDs and --digest-reviewed, when applicable.
 Unhandled material stays recoverable; completion does not assert total coverage.
 STALE_RUN means a released, expired, idle or failed run cannot make new writes. Use fresh
 run context, never --human to bypass it. Exact committed retries still return duplicate.
+With --feedback it means the run no longer holds that item (a later run took it over): stop
+working on it. CLAIMED_BY_RUN: a --feedback command without the --run that holds the item.
 CONFIG names invalid workspace settings; recovery with explicit --home can restore a valid
 backup despite broken target config. Status reports missing automation in problems; deliberate
 cron pause alone is not a health failure.
