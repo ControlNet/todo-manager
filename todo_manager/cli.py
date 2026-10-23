@@ -537,6 +537,11 @@ def cmd_delegate(args: argparse.Namespace) -> int:
     return _run(act)
 
 
+def cmd_outbox(args: argparse.Namespace) -> int:
+    cfg, conn = _open(args)
+    return _run(lambda: ops.outbox_retry(conn, cfg, _ctx(conn, cfg, args), args.ids))
+
+
 # --------------------------------------------------------------------------- notion
 
 def cmd_export(args: argparse.Namespace) -> int:
@@ -866,6 +871,13 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--detail")
     _add_ctx(x)
     s.set_defaults(fn=cmd_delegate)
+
+    s = sub.add_parser("outbox", help="outbound Notion writes (status --details lists the given-up ones)")
+    obs = s.add_subparsers(dest="action", required=True)
+    x = obs.add_parser("retry", help="queue given-up task/project pushes again, after fixing the cause")
+    x.add_argument("ids", nargs="+", metavar="id")
+    _add_ctx(x)
+    s.set_defaults(fn=cmd_outbox)
 
     s = sub.add_parser("export", help="Markdown + JSON snapshot under TODO_HOME/exports")
     s.add_argument("--verify", action="store_true", help="also rebuild a scratch DB from the export and compare")

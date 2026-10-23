@@ -383,7 +383,8 @@ closed; `drop` rows stay only in the old system. Nothing old is modified or dele
   reconciled (looked up) before any retry. Given-up writes show in `status --details`; after fixing the
   cause, unchanged projections retain their retry/exhaustion state; a real projection change
   uses the existing replacement/reconciliation path without resetting active Retry-After, and a
-  newer task or project push replaces a given-up one.
+  newer task or project push replaces a given-up one. After a fix that changes no task data (a
+  code fix), queue a given-up push again with `todo-manager outbox retry <id> --human`.
 - Feedback that the model claimed but never applied is retried (bounded), then marked failed
   (a comment on its task page; `status --details` lists it).
 - Overlapping runs are prevented by per-gate locks; a restore takes the shared writers’ workspace lock exclusively.

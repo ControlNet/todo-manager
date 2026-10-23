@@ -21,6 +21,7 @@ source show|search|dismiss|defer
 feedback list|show|record|resolve
 delegate list|show|create|message|answer|approve
 run show|done
+outbox retry ID...
 daemon run|status|enroll|token|reset-token|restart
 gmail-labels show
 ```
@@ -154,6 +155,16 @@ An active gate preparation (`running`) or woken run may write within that lease.
 committed identical operation still returns `duplicate: true`; obtain a fresh run/context for new
 judgments. Recovery releases all intake/feedback runs, including interrupted gate preparation,
 and makes their unprocessed materials available again. This is separate from delegation holds.
+
+`outbox retry ID... --human` queues given-up (`dead`) Notion task and project pushes again after
+the cause was fixed; `status --details` lists given-up effects (`health.outbox_dead`). The given-up
+row is superseded with its attempts and error kept, and a fresh push of the current projection is
+queued with new attempts (an unchanged task would otherwise keep reusing the given-up row). A push
+that a newer one replaced is reported under `superseded` and not queued. Refused, with nothing
+changed for any listed ID: a `pending`/`failed`/`uncertain` effect (`NOT_DEAD`: it retries by itself;
+its retry deadline is not bypassed), comments, delivery pages and project views (`NOT_RETRYABLE`: they
+may already exist in Notion), and a scheduled run (`NOT_AUTHORIZED`). Provenance and `--key`
+follow the other writes.
 
 Invalid TOML or wrong types of known configuration fields return `CONFIG` with the file path
 (and parser line/column when available). Business commands never silently substitute defaults.

@@ -195,7 +195,8 @@ def problem_items(rep: dict[str, Any], cfg: Config) -> list[tuple[str, str]]:
         add("identity.notion_user_ids", "identity.notion_user_ids is empty: Notion comments and edits are treated as"
             " evidence only, never as the user's instructions")
     if rep["outbox_dead"]:
-        add("outbox_dead", f"{len(rep['outbox_dead'])} outbox effects gave up")
+        add("outbox_dead", f"{len(rep['outbox_dead'])} outbox effects gave up (after fixing the cause:"
+            " todo-manager outbox retry <id> --human)")
     if rep.get("feedback_held"):
         add("feedback_held", "feedback held, not handled until resolved: " + "; ".join(
             f"{h['id']} ({h['reason']})" for h in rep["feedback_held"][:5]))

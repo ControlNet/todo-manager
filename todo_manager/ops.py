@@ -1053,6 +1053,67 @@ def config_set(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, key: str, value:
     return perform(conn, ctx, "config set", args, apply)
 
 
+# --------------------------------------------------------------------------- outbox
+
+# Given-up effects that are never queued again: their outcome may already be in Notion. Only the
+# task and project pushes are retried; they write the current local state onto the page.
+NOT_RETRYABLE = {
+    "comment": "a comment may already have been posted; sending it again could post it twice (check the page"
+               " and post it by hand if needed)",
+    "push_delivery": "it creates a delivery page and uploads its files; a retry could duplicate them",
+    "project_view": "it creates a project's task view; a retry could create a second view",
+}
+
+
+def outbox_retry(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, outbox_ids: list[str]) -> dict[str, Any]:
+    """Queue given-up task/project pushes again after their cause was fixed (all or none).
+
+    The given-up row is superseded, keeping its attempts and error, and ``effects`` queues a
+    fresh push of the current projection: reset in place, its digest would still match an
+    unchanged task, so later scans would keep reusing it. A push that a newer one replaced is
+    reported (and settled by it), not queued."""
+    if ctx.kind == "run":
+        raise OpError("NOT_AUTHORIZED", "a scheduled run does not retry given-up effects; the user does, after"
+                                        " fixing the cause")
+    args = {"ids": outbox_ids}
+    newer_sql = ("SELECT id FROM outbox WHERE target=? AND op=? AND entity_id=? AND rowid>? AND status!='superseded'"
+                 " ORDER BY rowid DESC LIMIT 1")
+
+    def apply() -> dict[str, Any]:
+        report: dict[str, Any] = {"retried": [], "superseded": []}
+        for oid in dict.fromkeys(outbox_ids):
+            row = conn.execute("SELECT rowid, * FROM outbox WHERE id=?", (oid,)).fetchone()
+            if row is None:
+                raise OpError("NOT_FOUND", f"no outbox effect {oid}")
+            line = {"id": oid, "op": f"{row['target']}/{row['op']}", "entity": row["entity_id"]}
+            newer = conn.execute(newer_sql, (row["target"], row["op"], row["entity_id"], row["rowid"])).fetchone()
+            if row["status"] == "superseded":
+                report["superseded"].append({**line, "by": newer["id"] if newer else None})
+                continue
+            if row["status"] != "dead":
+                raise OpError("NOT_DEAD", f"{oid} is {row['status']}: only a given-up (dead) effect is retried"
+                              + ("; it already succeeded" if row["status"] == "done" else
+                                 f"; it retries by itself (next attempt {row['next_attempt_at']})"))
+            if row["target"] != "notion" or row["op"] not in ("push_task", "push_project"):
+                raise OpError("NOT_RETRYABLE", f"{oid} ({line['op']}): "
+                              + NOT_RETRYABLE.get(row["op"], "only task and project pushes are retried"))
+            kind = row["op"][len("push_"):]
+            if (store.get_task if kind == "task" else store.get_project)(conn, row["entity_id"]) is None:
+                raise OpError("NOT_RETRYABLE", f"{oid}: {kind} {row['entity_id']} no longer exists")
+            conn.execute("UPDATE outbox SET status='superseded', updated_at=? WHERE id=?", (clock.iso(), oid))
+            if newer:
+                report["superseded"].append({**line, "by": newer["id"]})
+                continue
+            # None: an older unfinished push already carries this projection (it reconciles first).
+            queued = (effects.task_push if kind == "task" else effects.project_push)(conn, row["entity_id"])
+            report["retried"].append({**line, "queued": queued or conn.execute(
+                "SELECT id FROM outbox WHERE target='notion' AND op=? AND entity_id=? AND status!='superseded'"
+                " ORDER BY rowid DESC LIMIT 1", (row["op"], row["entity_id"])).fetchone()["id"]})
+        return report
+
+    return perform(conn, ctx, "outbox retry", args, apply)
+
+
 # --------------------------------------------------------------------------- runs
 
 def run_done(conn: sqlite3.Connection, cfg: Config, run_id: str, note: str | None = None, *,
