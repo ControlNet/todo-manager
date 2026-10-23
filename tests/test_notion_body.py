@@ -13,7 +13,9 @@ import unittest
 
 from todo_manager import clock, delegation, feedback, store
 from todo_manager.kanban import FakeKanban
+from todo_manager.net import HttpError
 from todo_manager.notion import body
+from todo_manager.notion.client import NotionError
 from tests.fake_notion import autolinked
 from tests.helpers import mail
 from tests.test_feedback import GateCase
@@ -227,3 +229,169 @@ class LinkRenderingTests(unittest.TestCase):
                          body.content_fingerprint("证书 certs.example.edu 的"))
         self.assertNotEqual(body.content_fingerprint("见 https://a.example/x。然后"),
                             body.content_fingerprint("见 https://a.example/y。然后"))
+
+
+MAILY = "联系入口：`alice@example.org`，抄送bob@example.com。"
+
+
+class NotionEmailTests(NotionCase):
+    """Notion links a bare email address together with every non-space character before the
+    ``@``, and cannot match that link when it is sent back as ``old_str`` (seen 2026-10-21: the
+    box of two task pages stopped updating). FakeNotion.autolink imitates both."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake.autolink = True
+        self.task = store.create_task(self.conn, "核对联系人", origin="intake", summary=MAILY)
+        self.push(self.task)
+        self.page = self.page_of(self.task)
+
+    def kinds(self):
+        return [f["kind"] for f in feedback.pending(self.conn)]
+
+    def update_summary(self, summary):
+        store.update_task(self.conn, self.task, {"summary": summary}, actor="agent", origin="intake",
+                          based_on_version=store.get_task(self.conn, self.task)["version"])
+        return self.push(self.task)
+
+    def last_push(self):
+        return self.conn.execute("SELECT status, last_error FROM outbox WHERE op='push_task' AND entity_id=?"
+                                 " ORDER BY rowid DESC LIMIT 1", (self.task,)).fetchone()
+
+    def deletes(self):
+        return [c for c in self.fake.calls if c[0] == "DELETE"]
+
+    def mangle(self):
+        """The box as the earlier code wrote it (bare addresses), stored the way Notion links them."""
+        md = self.fake.markdown[self.page]
+        region = body.extract(md)
+        earlier = re.sub(r"\[([^\]]+)\]\(mailto:\1\)", r"\1", region)
+        self.fake.markdown[self.page] = md.replace(region, autolinked(earlier))
+        self.assertIn("](mailto:联系入口：`alice@example.org)", self.fake.markdown[self.page])
+
+    def add_notes(self):
+        notes = '<callout icon="💡" color="yellow_bg">\n\t我的提醒：带电脑\n</callout>\n我的笔记 carol@example.com'
+        self.fake.user_set_markdown(self.page, self.fake.markdown[self.page] + "\n\n" + autolinked(notes))
+        self.pull()
+        self.assertEqual(self.kinds(), [], "a box Notion linked is not a box edit")
+        return body.outside(self.fake.markdown[self.page]).strip()
+
+    def test_addresses_are_written_as_links_of_their_own(self):
+        self.assertIn("联系入口：\\`[alice@example.org](mailto:alice@example.org)\\`，抄送"
+                      "[bob@example.com](mailto:bob@example.com)。", self.fake.markdown[self.page])
+        self.update_summary(MAILY + "\n周三前回复")
+        self.assertIn("周三前回复", body.extract(self.fake.markdown[self.page]))
+        self.assertEqual(self.last_push()["status"], "done")
+        self.assertEqual(self.kinds(), [])
+        self.assertEqual(self.deletes(), [], "the box is updated in place")
+
+    def test_the_fake_cannot_match_a_mangled_address(self):
+        self.mangle()
+        region = body.extract(self.fake.markdown[self.page])
+        with self.assertRaisesRegex(NotionError, "HTTP 400: No matches found"):
+            self.client.update_markdown(self.page, {"type": "update_content", "update_content": {
+                "content_updates": [{"old_str": region, "new_str": "x"}]}})
+
+    def test_a_box_holding_a_mangled_address_is_replaced(self):
+        self.mangle()
+        notes = self.add_notes()
+        self.update_summary(MAILY + "\n周三前回复")
+        md = self.fake.markdown[self.page]
+        self.assertIn("周三前回复", body.extract(md))
+        self.assertIn("[alice@example.org](mailto:alice@example.org)", body.extract(md))
+        self.assertIsNone(body.extract(body.outside(md)), "one managed box")
+        self.assertEqual(body.outside(md).strip(), notes, "the user's notes, their callout included, are kept")
+        self.assertEqual(len(self.deletes()), 1)
+        self.assertEqual(self.last_push()["status"], "done")
+        self.assertIn('"body":"replaced"', self.conn.execute(
+            "SELECT result FROM outbox WHERE op='push_task' ORDER BY rowid DESC LIMIT 1").fetchone()[0])
+        self.assertIsNone(self.conn.execute("SELECT value FROM meta WHERE key=?",
+                                            ("notion.body_pending:" + self.page,)).fetchone())
+        self.pull()
+        self.assertEqual(self.kinds(), [], "the new box is ours")
+        self.update_summary(MAILY + "\n周四前回复")
+        self.assertIn("周四前回复", body.extract(self.fake.markdown[self.page]))
+        self.assertEqual(len(self.deletes()), 1, "later updates go in place again")
+
+    def test_the_marker_may_be_the_first_child_of_the_callout(self):
+        self.fake.callout_text_as_child = True
+        self.mangle()
+        self.update_summary(MAILY + "\n周三前回复")
+        self.assertIn("周三前回复", body.extract(self.fake.markdown[self.page]))
+        self.assertEqual(self.last_push()["status"], "done")
+
+    def test_an_edit_of_the_box_during_the_update_is_not_replaced(self):
+        self.mangle()
+        dispatch = self.fake._dispatch
+        edited = []
+
+        def user_edits_first(method, path, params, payload):
+            if method == "PATCH" and path.endswith("/markdown") and not edited:
+                edited.append(path)
+                self.fake.user_set_markdown(self.page, self.fake.markdown[self.page].replace("抄送", "转告"))
+            return dispatch(method, path, params, payload)
+        self.fake._dispatch = user_edits_first
+        self.update_summary(MAILY + "\n周三前回复")
+        self.assertEqual(self.deletes(), [])
+        self.assertEqual(tuple(self.last_push()), ("failed", "the managed region changed while it was updated"))
+        clock.advance(minutes=5)
+        self.drain()
+        self.assertEqual(self.kinds(), ["body_edit"])
+        self.assertIn("转告", body.extract(self.fake.markdown[self.page]))
+        self.assertEqual(self.deletes(), [])
+
+    def test_a_failure_between_removing_and_inserting_the_box_converges(self):
+        self.mangle()
+        notes = self.add_notes()
+        dispatch = self.fake._dispatch
+
+        def fail_after_delete(method, path, params, payload):
+            result = dispatch(method, path, params, payload)
+            if method == "DELETE":
+                self.fake.fail_next[("PATCH", f"/pages/{self.page}/markdown")] = HttpError(
+                    503, "unavailable", body={"code": "service_unavailable", "message": "unavailable"})
+            return result
+        self.fake._dispatch = fail_after_delete
+        self.update_summary(MAILY + "\n周三前回复")
+        self.assertEqual(self.last_push()["status"], "uncertain")
+        md = self.fake.markdown[self.page]
+        self.assertIsNone(body.extract(md), "no box until the retry")
+        self.assertEqual(md.strip(), notes)
+        clock.advance(minutes=5)
+        self.drain()
+        md = self.fake.markdown[self.page]
+        self.assertIn("周三前回复", body.extract(md))
+        self.assertIsNone(body.extract(body.outside(md)))
+        self.assertEqual(body.outside(md).strip(), notes)
+        self.assertEqual(self.last_push()["status"], "done")
+        self.assertEqual(self.kinds(), [])
+
+
+class EmailRenderingTests(unittest.TestCase):
+    def test_bare_addresses_become_links_with_an_ascii_address(self):
+        self.assertEqual(body.prose_inline("联系入口：`alice@example.org`"),
+                         "联系入口：\\`[alice@example.org](mailto:alice@example.org)\\`")
+        self.assertEqual(body.prose_inline("发给bob.smith+lab@mail.example.com。谢谢"),
+                         "发给[bob.smith+lab@mail.example.com](mailto:bob.smith+lab@mail.example.com)。谢谢")
+        self.assertEqual(body.prose("(alice_b@example.org)."),
+                         "([alice_b@example.org](mailto:alice_b@example.org)).")
+
+    def test_addresses_in_urls_are_not_linked_again(self):
+        out = body.prose_inline("见 https://x.example/y?u=alice@example.org 或 mailto:bob@example.com")
+        self.assertIn("[https://x.example/y?u=alice@example.org](https://x.example/y?u=alice@example.org)", out)
+        self.assertNotIn("mailto:alice", out)
+        self.assertIn("mailto:[bob@example.com](mailto:bob@example.com)", out)
+        self.assertEqual(out.count("](mailto:"), 1)
+
+    def test_text_without_an_address_is_unchanged(self):
+        for text in ("a@b", "user@localhost", "@acme-lab 的消息", "x@y.z1"):
+            self.assertEqual(body.prose_inline(text), body.escape_inline(text))
+
+    def test_linked_and_mangled_addresses_count_as_the_same_text(self):
+        sent = "联系入口：\\`[alice@example.org](mailto:alice@example.org)\\`"
+        earlier = "联系入口：\\`alice@example.org\\`"
+        stored = autolinked(earlier)
+        self.assertIn("mailto:联系入口", stored)
+        self.assertEqual(body.content_fingerprint(sent), body.content_fingerprint(earlier))
+        self.assertEqual(body.content_fingerprint(stored), body.content_fingerprint(earlier))
+        self.assertTrue(body.same_content(stored, body.content_fingerprint(sent)))
