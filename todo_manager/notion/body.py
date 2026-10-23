@@ -14,6 +14,7 @@ import hashlib
 import re
 from datetime import timedelta
 from typing import Any
+from urllib.parse import unquote
 
 from .. import clock, i18n
 from ..files import artifact_label
@@ -29,6 +30,9 @@ _URL = re.compile(r"https?://[^\s<>\[\]{}\"'`|^\\\u2e80-\uffff]+")
 # A bare email address, ASCII only: Notion would link it with every non-space character before it.
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![A-Za-z0-9-])")
 _MD_LINK = re.compile(r"(?<!\\)\[((?:\\.|[^\]\\])*)\]\(([^)\s]*)\)")
+# Notion's block attributes after a block's text, e.g. {color="blue"} or {toggle="true"}.
+_ATTRS = re.compile(r'(?<!\\)\{(?:\s*[A-Za-z_-]+="[^"]*")+\s*\}')
+_FINGERPRINT = "v2:"   # fingerprints that count text in braces and where links point
 
 
 def edit_unread(last_edited_time: str | None, last_edited_by: str | None, body_read_at: str | None,
@@ -200,21 +204,33 @@ def _unescape(text: str) -> str:
     return re.sub(r"\\(.)", r"\1", text)
 
 
-def _visible(region: str, links: bool = True) -> str:
+def _visible(region: str, links: bool = True, braces: bool = True) -> str:
     if links:
         region = _MD_LINK.sub(r"\1", region)
-    return " ".join(_unescape(re.sub(r"<[^>]+>|\{[^}]*\}|[*_`~#>\-]", " ", region)).split())
+    markup = r"<[^>]+>|\{[^}]*\}|[*_`~#>\-]" if braces else r"<[^>]+>|[*_`~#>\-]"
+    return " ".join(_unescape(re.sub(markup, " ", region)).split())
 
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
 
 
+def _says_its_text(text: str, href: str) -> bool:
+    """Whether a link points only where its text says: how Notion links a bare URL (cut where
+    CJK text runs on), domain or email address (with the text before it)."""
+    text = text.rstrip("/")
+    return href in (text, "http://" + text, "https://" + text, "mailto:" + text) or (
+        href.startswith(("http://", "https://")) and text.startswith(href))
+
+
 def content_fingerprint(region: str) -> str:
-    """Hash of the visible text only, robust to markup re-rendering differences. A link counts
-    by its text: Notion stores a bare URL or domain as a link on its own, and the response to
-    the write that sent it does not show that yet."""
-    return _hash(_visible(region))
+    """Hash of the visible text, robust to markup re-rendering differences, and of where each
+    link points unless it only repeats its text: Notion stores a bare URL, domain or address
+    as a link on its own, and the response to the write that sent it does not show that yet.
+    Text in braces counts; only Notion's block attributes (``{color="blue"}``) do not."""
+    hrefs = [href for text, href in ((_unescape(m.group(1)), unquote(m.group(2)).rstrip("/"))
+                                     for m in _MD_LINK.finditer(region)) if not _says_its_text(text, href)]
+    return _FINGERPRINT + _hash(_visible(_ATTRS.sub(" ", region), braces=False) + "\n" + " ".join(hrefs))
 
 
 def _unlinked_url(m: re.Match) -> str:
@@ -226,11 +242,15 @@ def _unlinked_url(m: re.Match) -> str:
 
 def same_content(region: str, fingerprint: str | None) -> bool:
     """Whether ``region`` shows the content a stored ``fingerprint`` was taken of. Fingerprints
-    stored before links counted by their text (2026-10-12) are recognised too, including after
-    Notion turned that content's bare URLs or domains into links."""
+    stored before text in braces and link targets counted (untagged, before 2026-10-23) are
+    recognised by the rules they were taken with, until the box is written again: links by
+    their text, and before 2026-10-12 with links, including those Notion made of bare URLs or
+    domains since."""
     if not fingerprint:
         return False
-    return fingerprint in (content_fingerprint(region), _hash(_visible(region, links=False)),
+    if fingerprint.startswith(_FINGERPRINT):
+        return fingerprint == content_fingerprint(region)
+    return fingerprint in (_hash(_visible(region)), _hash(_visible(region, links=False)),
                            _hash(_visible(_MD_LINK.sub(_unlinked_url, region), links=False)))
 
 

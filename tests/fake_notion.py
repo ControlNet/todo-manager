@@ -83,6 +83,7 @@ class FakeNotion:
         # How a page without ``blocks`` of its own shows its markdown as blocks (see _md_blocks):
         # True puts a callout's first line in its first child instead of its own rich text.
         self.callout_text_as_child = False
+        self.md_keys: dict[str, str] = {}   # derived block key -> the key it keeps (see user_edit_in_block)
         self.lose_response: set[tuple[str, str]] = set()
         # Imitate Notion creating a board with its own grouping (the Status select, empty groups
         # hidden) instead of the requested one, as it did on 2026-10-12; a PATCH applies it.
@@ -135,6 +136,7 @@ class FakeNotion:
                 continue
             end = lines[j][1] + len(lines[j][0])
             key = hashlib.sha256(f"{page_id}:{start}:{md[start:end]}".encode()).hexdigest()[:16]
+            key = self.md_keys.get(key, key)
             plain = lambda text: _unescaped(text.replace("**", ""))
             if line.startswith("<callout"):
                 first = [] if self.callout_text_as_child or not inner else inner[:1]
@@ -274,6 +276,15 @@ class FakeNotion:
     def user_set_markdown(self, page_id: str, markdown: str, author: str = USER_ID) -> None:
         self.markdown[page_id] = markdown
         self._touch(self.pages[page_id], author, "page.content_updated")
+
+    def user_edit_in_block(self, page_id: str, old: str, new: str, author: str = USER_ID) -> None:
+        """Replace text inside one top-level block of a page read from its markdown (a task page);
+        the block and its children keep their ids, as a block edited in Notion does."""
+        at = self.markdown[page_id].index(old)
+        before = next((b["id"], start) for b, start, end, _ in self._md_blocks(page_id) if start <= at < end)
+        self.user_set_markdown(page_id, self.markdown[page_id].replace(old, new, 1), author)
+        after = next(b["id"] for b, start, _, _ in self._md_blocks(page_id) if start == before[1])
+        self.md_keys[after[3:]] = before[0][3:]
 
     def user_trash(self, page_id: str, trashed: bool = True, author: str = USER_ID) -> None:
         self.pages[page_id]["in_trash"] = trashed

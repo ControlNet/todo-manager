@@ -944,22 +944,45 @@ class NotionSync:
                 raise
             # Notion cannot match some content in the form it serves it (an email address it
             # linked with the text before it), so the box we just read can never be updated.
-            result, outcome = self._replace_box(page_id, region, rendered), "replaced"
+            result, trashed = self._replace_box(page_id, region, rendered)
+            outcome = f"replaced; the old box is in the Notion trash: block {trashed}"
         new_region = body.extract(result.get("markdown") or "") or rendered
         self._store_region(page_id, rendered, new_region)
         return outcome
 
-    def _replace_box(self, page_id: str, region: str, rendered: str) -> dict[str, Any]:
+    def _replace_box(self, page_id: str, region: str, rendered: str) -> tuple[dict[str, Any], str]:
         """Replace the managed callout without ``old_str``: only when a new read still shows the
         region already found to be ours, and exactly one top-level callout carries the marker.
         It is trashed before the box is inserted again at the start, so a failure in between
-        leaves no box, which the retry inserts as on a new page (never two boxes)."""
+        leaves no box, which the retry inserts as on a new page (never two boxes). Notion has no
+        conditional delete: the callout's blocks, listed before that read, are listed again just
+        before it is trashed, and a change leaves it in place for the retry to read as an edit
+        (a change after that last listing is still lost). Returns the response and the trashed
+        block's id, restorable from the Notion trash."""
+        box = self._marked_callout(page_id)
+        listed = self._block_tree(box)
         doc = self.client.page_markdown(page_id)
         markdown = doc.get("markdown") or ""
         if doc.get("truncated") or body.extract(markdown) != region:
             raise outbox.Retryable("the managed region changed while it was updated")
         if body.extract(body.outside(markdown)):
             raise outbox.Retryable("the page has more than one managed region; not replaced")
+        if self._block_tree(box) != listed:
+            raise outbox.Retryable("the managed region changed while it was replaced; not removed")
+        self.client.trash_block(box)
+        try:
+            return self.client.update_markdown(page_id, {"type": "insert_content", "insert_content": {
+                "content": rendered, "position": {"type": "start"}}}), box
+        except NotionUncertain as exc:
+            raise outbox.Uncertain(f"{exc}; the old box is in the Notion trash: block {box}") from None
+
+    def _block_tree(self, block_id: str) -> list[Any]:
+        """A block's children and theirs, as listed now."""
+        return [(child, self._block_tree(child["id"]) if child.get("has_children") else [])
+                for child in self.client.block_children(block_id)]
+
+    def _marked_callout(self, page_id: str) -> str:
+        """The id of the one top-level callout that carries the marker."""
         boxes = []
         for block in self.client.block_children(page_id):
             if block.get("type") != "callout":
@@ -973,12 +996,7 @@ class NotionSync:
                 boxes.append(block["id"])
         if len(boxes) != 1:
             raise outbox.Retryable(f"{len(boxes)} top-level callouts carry the marker; not replaced")
-        self.client.trash_block(boxes[0])
-        try:
-            return self.client.update_markdown(page_id, {"type": "insert_content", "insert_content": {
-                "content": rendered, "position": {"type": "start"}}})
-        except NotionUncertain as exc:
-            raise outbox.Uncertain(str(exc)) from None
+        return boxes[0]
 
     def reconcile_body(self, page_id: str, region: str) -> None:
         expected = get_meta(self.conn, 'notion.body_pending:' + page_id)

@@ -49,6 +49,19 @@ class BodyDetectionTests(NotionCase):
         self.pull()
         self.assertEqual(self.kinds(), ["body_edit"])
 
+    def test_an_edit_of_text_in_braces_is_a_box_edit(self):
+        task = store.create_task(self.conn, "Deploy the service", origin="intake", summary="Deploy {region=us} first")
+        self.push(task)
+        page = self.page_of(task)
+        self.assertIn("Deploy \\{region=us\\} first", self.fake.markdown[page])
+        self.fake.user_set_markdown(page, self.fake.markdown[page].replace("region=us", "region=eu"))
+        self.pull()
+        self.assertEqual(self.kinds(), ["body_edit"])
+        store.update_task(self.conn, task, {"summary": "Deploy {region=us} first, then verify"}, actor="agent",
+                          origin="intake", based_on_version=store.get_task(self.conn, task)["version"])
+        self.push(task)
+        self.assertIn("region=eu", body.extract(self.fake.markdown[page]), "the edit is held, not overwritten")
+
     def test_our_own_body_write_is_not_feedback(self):
         store.update_task(self.conn, self.task, {"summary": "组会在周三"}, actor="agent", origin="intake",
                           based_on_version=store.get_task(self.conn, self.task)["version"])
@@ -133,6 +146,12 @@ def old_fingerprint(region: str) -> str:
     return hashlib.sha256(" ".join(text.split()).encode("utf-8")).hexdigest()[:24]
 
 
+def text_fingerprint(region: str) -> str:
+    """The box fingerprint from 2026-10-12 to 2026-10-23 (links by their text, braces left out),
+    still stored for boxes not rewritten since."""
+    return old_fingerprint(re.sub(r"(?<!\\)\[((?:\\.|[^\]\\])*)\]\(([^)\s]*)\)", r"\1", region))
+
+
 LINKY = "原帖 https://forum.example.edu/courses/1/discussion/2。通知正文已截断\n证书来自 certs.example.edu 的通知"
 
 
@@ -208,6 +227,32 @@ class NotionLinkingTests(NotionCase):
         self.assertEqual(self.kinds(), [])
         self.assertIn("周三前", self.fake.markdown[page])
 
+    def test_changing_where_a_link_points_is_a_box_edit(self):
+        self.link_mail(self.task)
+        md = self.fake.markdown[self.page]
+        self.assertIn("](https://mail.google.com/mail/#all/t1)", body.extract(md))
+        self.fake.user_set_markdown(self.page, md.replace("](https://mail.google.com/mail/#all/t1)",
+                                                          "](https://elsewhere.example/t1)"))
+        self.pull()
+        self.assertEqual(self.kinds(), ["body_edit"])
+
+    def test_a_box_fingerprinted_before_braces_and_link_targets_counted_is_ours_until_rewritten(self):
+        task = store.create_task(self.conn, "Deploy", origin="intake", summary="Deploy {region=us} per the mail")
+        self.link_mail(task)
+        page = self.page_of(task)
+        region = body.extract(self.fake.markdown[page])
+        self.conn.execute("UPDATE notion_pages SET managed_hash=?, box_seen_hash=? WHERE page_id=?",
+                          (text_fingerprint(region), text_fingerprint(region), page))
+        self.fake.user_set_markdown(page, self.fake.markdown[page] + "\n\nmy notes")
+        self.pull()
+        self.assertEqual(self.kinds(), [], "an unedited box is not taken for an edit after the upgrade")
+        self.update_summary(task, "Deploy {region=us} per the mail, by Friday")
+        self.assertIn("by Friday", body.extract(self.fake.markdown[page]))
+        self.assertEqual(self.kinds(), [])
+        self.fake.user_set_markdown(page, self.fake.markdown[page].replace("region=us", "region=eu"))
+        self.pull()
+        self.assertEqual(self.kinds(), ["body_edit"], "the rewritten box has the new fingerprint")
+
 
 class LinkRenderingTests(unittest.TestCase):
     def test_bare_urls_in_text_become_links_that_end_where_the_url_ends(self):
@@ -229,6 +274,27 @@ class LinkRenderingTests(unittest.TestCase):
                          body.content_fingerprint("证书 certs.example.edu 的"))
         self.assertNotEqual(body.content_fingerprint("见 https://a.example/x。然后"),
                             body.content_fingerprint("见 https://a.example/y。然后"))
+
+
+    def test_text_in_braces_and_where_a_link_points_count(self):
+        fp = body.content_fingerprint
+        self.assertNotEqual(fp("Deploy \\{region=us\\}"), fp("Deploy \\{region=eu\\}"))
+        self.assertNotEqual(fp("Deploy {region=us}"), fp("Deploy {region=eu}"))
+        self.assertEqual(fp("Deploy \\{region=us\\}"), fp("Deploy {region=us}"), "escaping is markup")
+        self.assertNotEqual(fp("[Runbook](https://a.example/run)"), fp("[Runbook](https://b.example/run)"))
+        self.assertNotEqual(fp("[Runbook](https://a.example/run)"), fp("Runbook"))
+        self.assertEqual(fp("[Runbook](https://a.example/%7Eme)"), fp("[Runbook](https://a.example/~me)"))
+        self.assertEqual(fp('Runbook {color="blue"}'), fp("Runbook"), "Notion's block attributes are markup")
+        self.assertEqual(fp("[https://a.example/x，见附件](https://a.example/x)"), fp("https://a.example/x，见附件"))
+
+    def test_fingerprints_stored_by_the_earlier_code_still_match_the_same_box(self):
+        region = "Deploy \\{region=us\\} · [Runbook](https://a.example/run)"
+        edited = region.replace("region=us", "region=eu")
+        for earlier in (old_fingerprint(region), text_fingerprint(region)):
+            self.assertTrue(body.same_content(region, earlier))
+        self.assertTrue(body.same_content(region, body.content_fingerprint(region)))
+        self.assertFalse(body.same_content(edited, body.content_fingerprint(region)))
+        self.assertFalse(body.same_content(region.replace("a.example", "b.example"), body.content_fingerprint(region)))
 
 
 MAILY = "联系入口：`alice@example.org`，抄送bob@example.com。"
@@ -303,7 +369,8 @@ class NotionEmailTests(NotionCase):
         self.assertEqual(body.outside(md).strip(), notes, "the user's notes, their callout included, are kept")
         self.assertEqual(len(self.deletes()), 1)
         self.assertEqual(self.last_push()["status"], "done")
-        self.assertIn('"body":"replaced"', self.conn.execute(
+        trashed = self.deletes()[0][1].rsplit("/", 1)[1]
+        self.assertIn(f'"body":"replaced; the old box is in the Notion trash: block {trashed}"', self.conn.execute(
             "SELECT result FROM outbox WHERE op='push_task' ORDER BY rowid DESC LIMIT 1").fetchone()[0])
         self.assertIsNone(self.conn.execute("SELECT value FROM meta WHERE key=?",
                                             ("notion.body_pending:" + self.page,)).fetchone())
@@ -334,6 +401,34 @@ class NotionEmailTests(NotionCase):
         self.update_summary(MAILY + "\n周三前回复")
         self.assertEqual(self.deletes(), [])
         self.assertEqual(tuple(self.last_push()), ("failed", "the managed region changed while it was updated"))
+        clock.advance(minutes=5)
+        self.drain()
+        self.assertEqual(self.kinds(), ["body_edit"])
+        self.assertIn("转告", body.extract(self.fake.markdown[self.page]))
+        self.assertEqual(self.deletes(), [])
+
+    def test_an_edit_of_the_box_after_its_check_is_not_trashed(self):
+        self.mangle()
+        dispatch = self.fake._dispatch
+        state = {"failed": False, "edited": False}
+
+        def user_edits_after_the_check(method, path, params, payload):
+            try:
+                result = dispatch(method, path, params, payload)
+            except HttpError:
+                state["failed"] = state["failed"] or (method == "PATCH" and path.endswith("/markdown"))
+                raise
+            if state["failed"] and not state["edited"] and method == "GET" and path.endswith("/markdown"):
+                state["edited"] = True      # right after the read that found the box unchanged
+                self.fake.user_edit_in_block(self.page, "抄送", "转告")
+            return result
+        self.fake._dispatch = user_edits_after_the_check
+        self.update_summary(MAILY + "\n周三前回复")
+        self.assertTrue(state["edited"])
+        self.assertEqual(self.deletes(), [], "the edited box is not removed")
+        self.assertIn("转告", body.extract(self.fake.markdown[self.page]))
+        self.assertEqual(tuple(self.last_push()),
+                         ("failed", "the managed region changed while it was replaced; not removed"))
         clock.advance(minutes=5)
         self.drain()
         self.assertEqual(self.kinds(), ["body_edit"])
