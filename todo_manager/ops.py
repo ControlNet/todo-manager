@@ -411,23 +411,14 @@ def task_update(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, task_id: str, *
         did = _decision(conn, ctx, "update_task", "task", task_id, [i for i, _ in evidence], reason)
         report: dict[str, Any] = {"task": task_id}
         if changes:
-            todo = dict(changes)
-            stale: dict[str, str] = {}
-            if ctx.actor == "human" and based_on is not None:
-                # The user's request, written against version ``based_on``: a newer edit by the user wins.
-                meta = loads(before["field_meta"], {})
-                stale = {f: "stale: changed by the user after the version you read" for f in todo
-                         if meta.get(f, {}).get("by") == "human" and int(meta[f].get("v", 0)) > based_on}
-                for f in stale:
-                    todo.pop(f)
             try:
-                result = store.update_task(conn, task_id, todo, actor=ctx.actor, origin=ctx.origin,
-                                           cause_ref=ctx.cause or did,
-                                           based_on_version=based_on if ctx.actor != "human" else None,
+                # A human request written against ``based_on`` loses to the user's newer edits
+                # (store._protected); status and next_actor stay a pair (store._keep_state_pair).
+                result = store.update_task(conn, task_id, changes, actor=ctx.actor, origin=ctx.origin,
+                                           cause_ref=ctx.cause or did, based_on_version=based_on,
                                            override_human=override_human)
             except store.StoreError as exc:
                 raise OpError("INVALID", str(exc)) from None
-            result.rejected.update(stale)
             if "change_note" in result.applied:
                 conn.execute("UPDATE tasks SET change_note_at=? WHERE id=?", (clock.iso(), task_id))
             if result.applied.get("status") in store.CLOSED_STATUSES and closed_reason:
@@ -533,8 +524,7 @@ def project_update(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, project_id: 
             conn.execute("UPDATE projects SET recent_activity_at=? WHERE id=?", (clock.iso(), project_id))
         try:
             result = store.update_project(conn, project_id, changes, actor=ctx.actor, origin=ctx.origin,
-                                          cause_ref=ctx.cause or did,
-                                          based_on_version=based_on if ctx.actor != "human" else None,
+                                          cause_ref=ctx.cause or did, based_on_version=based_on,
                                           repos_add=repos_add or [], repos_remove=repos_remove or [])
         except store.StoreError as exc:
             raise OpError("INVALID", str(exc)) from None

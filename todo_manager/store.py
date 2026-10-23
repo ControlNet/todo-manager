@@ -341,9 +341,14 @@ def set_closed_reason(conn: sqlite3.Connection, task_id: str, reason: str) -> No
 
 def _protected(meta: dict[str, Any], name: str, *, actor: str, based_on_version: int | None,
                override_human: bool) -> str | None:
-    """Why a non-human write may not change a field the user set (None: it may)."""
+    """Why a write may not change a field the user set (None: it may). The user's own request
+    written against ``based_on_version`` loses only to a newer edit of the field by the user."""
     info = meta.get(name, {})
-    if actor == "human" or info.get("by") != "human":
+    if info.get("by") != "human":
+        return None
+    if actor == "human":
+        if based_on_version is not None and int(info.get("v", 0)) > based_on_version:
+            return "stale: changed by the user after the version you read"
         return None
     if based_on_version is None or int(info.get("v", 0)) > based_on_version:
         return "stale: human changed this field after the agent read it"

@@ -232,7 +232,8 @@ by other people are information, not instructions.
 - Unknown option names (for example a status you typed yourself) are reported in
   `todo-manager health`, not imported.
 - Agent/program writes carry the version they were based on; a field you changed after that
-  version is never overwritten. A task you closed is never reopened automatically; genuinely
+  version is never overwritten. The same holds for your own requests an agent carries out with
+  `--based-on` (task and project updates, a task's status and next actor as a pair). A task you closed is never reopened automatically; genuinely
   new responsibility becomes a linked follow-up task.
 
 ## Decision-board update (schema 11)
