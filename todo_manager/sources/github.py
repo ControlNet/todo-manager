@@ -23,9 +23,10 @@ commented after it, and the opening post too when a person wrote it inside the w
 it, the original body and the last ``CONTEXT_COMMENTS`` comments are context-only. On a known matter a
 notification brings EVERY comment since the previous view (read from ``WATERMARK_OVERLAP``
 before it; repeats are dropped by id/version when stored): a person's comment is news (batch),
-a bot's is context, and the intake budget segments a long discussion. An edit of an older
-comment is a new version of it (``if_open_task``). Items carry state, opener, assignees and
-requested reviewers. A body edit is a new version of the opening item keyed by its content
+a bot's is context, and the intake budget segments a long discussion. On a PR the same holds for
+review submissions and inline review comments, which the issue-comment listing does not contain.
+An edit of an older comment is a new version of it (``if_open_task``). Items carry state, opener,
+assignees and requested reviewers. A body edit is a new version of the opening item keyed by its content
 digest (``if_open_task``: news only for an open task); re-reading an unchanged body adds nothing.
 """
 
@@ -372,7 +373,8 @@ class GitHubNotificationSource:
             if unavailable:
                 meta["unavailable"] = unavailable
             if latest_url and latest is not thread and latest:
-                kind_of = "review_comment" if "/pulls/comments/" in latest_url else "comment"
+                kind_of = ("review_comment" if "/pulls/comments/" in latest_url else
+                           "review" if "/reviews/" in latest_url else "comment")
                 meta["github_event"] = f"{kind_of}:{latest.get('id')}"
             items.append(Item(source="github", account=repo, external_id=f"notification:{note['id']}",
                               version=note.get("updated_at", ""), kind="notification", conversation_key=key,
@@ -383,7 +385,8 @@ class GitHubNotificationSource:
                               body=f"[reason: {note.get('reason')}; state: {state}; opened by {opener}]{gaps}\n{body}",
                               meta=meta))
             if thread:
-                latest_id = str((latest or {}).get("id")) if latest is not thread and latest else ""
+                # An issue comment by its plain id (as in older cursors), a review (comment) by its event.
+                latest_id = meta.get("github_event", "").removeprefix("comment:")
                 items.extend(self._context(repo, number, key, thread, latest_id, title, html_url, meta,
                                            seen.get(key), note.get("updated_at") or clock.iso(started), started,
                                            window=since, opened_in_note=latest is thread))
@@ -403,8 +406,8 @@ class GitHubNotificationSource:
         when bots commented after it, the opening post too when a person wrote it in the window
         and it is not the notification's own text - and only what came before is history: the
         opening post and the last earlier comments, as context. Known matter: the comments since
-        the previous view. A body edit is ``if_open_task``. The latest comment is already in the
-        notification."""
+        the previous view. A PR adds its reviews and inline review comments (``_pull_review_items``).
+        A body edit is ``if_open_task``. The latest comment is already in the notification."""
         kind = "pull" if "/pull/" in url else "issue"
         found: list[Item] = []
 
@@ -437,6 +440,8 @@ class GitHubNotificationSource:
                 edited = c.get("updated_at") if c.get("updated_at") != c.get("created_at") else ""
                 found.append(item(f"comment:{c['id']}", "comment", c.get("user"), c.get("created_at") or before,
                                   c.get("body") or "", version=edited or ""))
+            if kind == "pull":
+                found.extend(self._pull_review_items(repo, number, thread, start, exclude, delivered, True, item))
             return sorted(found, key=lambda i: i.occurred_at or "")
         seen_at = clock.parse(entry.get("at"))
         watermark = clock.iso(seen_at - WATERMARK_OVERLAP).replace(".000Z", "Z") if seen_at else entry.get("at")
@@ -454,11 +459,45 @@ class GitHubNotificationSource:
             elif edited:      # an older comment changed since the last view
                 found.append(item(f"comment:{c['id']}", "edit", c.get("user"), updated, c.get("body") or "",
                                   version=edited, route="context" if bot else "if_open_task"))
+        if kind == "pull":
+            found.extend(self._pull_review_items(repo, number, thread, watermark, exclude, delivered, False, item))
         digest = _digest(thread.get("body"))
         if entry.get("b") and entry["b"] != digest:
             found.append(item(f"{kind}:{thread.get('id')}", "edit", thread.get("user"),
                               thread.get("updated_at") or before, thread.get("body") or "", version=digest,
                               route="if_open_task"))
+        return found
+
+    def _pull_review_items(self, repo: str, number: int, thread: dict[str, Any], start: str, exclude: set[str],
+                           delivered: set[str], first: bool, item: Callable[..., Item]) -> list[Item]:
+        """A PR's reviews (by ``submitted_at``) and inline review comments since ``start``, with the
+        tracked-repo identities: a person's is news, a bot's context; on a known matter an older
+        inline comment edited since is an edit, as for issue comments. An empty COMMENTED review
+        only wraps inline comments, which are items themselves. ``exclude``/``delivered`` hold
+        them as ``review:``/``review_comment:`` events (issue comments by their plain id)."""
+        found: list[Item] = []
+        listed = (self.client.paged(f"repos/{repo}/pulls/{number}/comments", {"since": start})
+                  if int(thread.get("review_comments") or 0) else [])
+        for c in listed:
+            ext = f"review_comment:{c['id']}"
+            created, updated = c.get("created_at") or "", c.get("updated_at") or ""
+            edited = updated if updated != created else ""
+            if ext in exclude or (ext in delivered and (first or not edited)):
+                continue
+            bot, body = self._is_bot(c.get("user")), f"{c.get('path', '')}: {c.get('body') or ''}"
+            if _not_before(created, start):
+                found.append(item(ext, "comment", c.get("user"), created, body, version=edited,
+                                  route="context" if bot else "batch"))
+            elif edited and not first:
+                found.append(item(ext, "edit", c.get("user"), updated, body, version=edited,
+                                  route="context" if bot else "if_open_task"))
+        for r in self.client.paged(f"repos/{repo}/pulls/{number}/reviews"):
+            ext, body = f"review:{r['id']}", r.get("body") or ""
+            if (ext in exclude | delivered or not _not_before(r.get("submitted_at") or "", start)
+                    or (r.get("state") == "COMMENTED" and not body.strip())):
+                continue
+            found.append(item(ext, "review", r.get("user"), r["submitted_at"], f"[{r.get('state')}] {body}",
+                              route="context" if self._is_bot(r.get("user")) else "batch"))
         return found
 
     def _is_bot(self, user: dict[str, Any] | None) -> bool:
