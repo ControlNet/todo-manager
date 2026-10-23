@@ -189,9 +189,11 @@ a comment.
 The callout is replaced with a search-and-replace of the exact text read just before, so
 concurrent edits elsewhere survive. If you edit text inside the callout, the edit is held and
 handed to the model as feedback instead of being overwritten; afterwards the box is regenerated.
-If you delete the callout, it is re-inserted at the top. Only the visible text counts as an edit:
-Notion turning a bare URL or domain into a link is not one, and neither is changing only where a
-link inside the callout points.
+If you delete the callout, it is re-inserted at the top. The visible text (text in braces
+included) and where each link points count as an edit; Notion turning a bare URL, domain or email
+address into a link does not, and neither does a block color. A box Notion cannot match again
+is moved to the Notion trash and written anew, only when a listing of its blocks just before
+still shows it unchanged; the push result names the trashed block.
 
 ## Delivery pages
 
