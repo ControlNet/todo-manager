@@ -8,7 +8,9 @@
 * A mail is the user's when its sender is one of the identity addresses, or it is SENT from one
   of the mailbox's send-as addresses (``send_as``); SENT alone is not authorship.
 * If the stored historyId has expired, falls back to a paginated ``messages.list`` over the
-  window since the last success minus an overlap, capturing the profile historyId first.
+  window since the mailbox's covered point minus an overlap, capturing the profile historyId first.
+  ``covered_at`` (in the cursor) is the start of the last scan that completed: budget-limited
+  partial runs leave it unchanged, unlike the cursor row's ``last_success_at``.
 * Large backlogs are worked through a persisted thread queue; nothing is silently capped.
 * GitHub notification mails are keyed to the same matter as the GitHub API source
   (``github:owner/repo#n``, matter grouping) and carry the GitHub event they announce
@@ -242,11 +244,18 @@ class GmailSource:
         history_id = state.get('history_id')
         floor = state.get('since') or clock.iso(clock.now() - timedelta(days=self.lookback_days))
         scan = state.get('scan')
+        covered = state.get('covered_at')
+        if covered is None:
+            # A cursor from before ``covered_at``: the last success is covered only when no scan
+            # was left unfinished; otherwise the cursor's origin is the oldest safe point.
+            covered = last_success_at if last_success_at and not (scan or state.get('queue')) else floor
         if scan is None:
             # Compatibility with a previously persisted, already selected backlog.
             scan = {'phase': 'hydrate' if state.get('queue') else ('history' if history_id else 'window'),
                     'ready': list(state.get('queue', [])), 'candidates': [],
                     'target': state.get('queue_history_id'), 'mode': 'history' if history_id else 'initial_window'}
+            if not state.get('queue'):
+                scan['started_at'] = clock.iso()   # its target covers the mailbox through this point
         items: list[Item] = []
         self._remaining = self.max_requests
         self._deadline = min(time.monotonic() + self.max_seconds, getattr(self, '_gate_deadline', float('inf')))
@@ -255,7 +264,8 @@ class GmailSource:
 
         def result() -> FetchResult:
             complete = scan['phase'] == 'done'
-            saved = {'history_id': (scan.get('target') or history_id) if complete else history_id, 'since': floor}
+            saved = {'history_id': (scan.get('target') or history_id) if complete else history_id, 'since': floor,
+                     'covered_at': (scan.get('started_at') or covered) if complete else covered}
             if not complete:
                 saved['scan'] = scan
             for item in items:
@@ -294,7 +304,7 @@ class GmailSource:
                         scan['target'] = str(self._get('profile')['historyId'])
                         since = clock.now() - timedelta(days=self.lookback_days)
                         if scan['mode'] == 'window_fallback':
-                            since = (clock.parse(last_success_at) or since) - timedelta(minutes=self.overlap)
+                            since = (clock.parse(covered) or since) - timedelta(minutes=self.overlap)
                         scan['query'] = f'after:{int(since.timestamp())} {self.query}'.strip()
                     data = self._get('messages', {'q': scan['query'], 'maxResults': self.page_size,
                                                  'pageToken': scan.get('page'), 'includeSpamTrash': 'false'})

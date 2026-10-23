@@ -444,6 +444,10 @@ Retry-After through repeated projection changes.
 
 Gmail selection and body reads can span ticks. Keep their cursor; `complete:false` is remaining
 read work, not evidence that nothing matches. Persistent API errors remain health failures.
+When the stored historyId has expired, the window search starts at the cursor's `covered_at`
+(start of the last completed scan) minus the overlap, not at the last successful run; a cursor
+written before `covered_at` existed uses its last success only if no scan was unfinished,
+otherwise its origin (`since`).
 The patch accepts old selected-thread queues, but old code cannot resume the new `scan` cursor.
 Use an explicit workspace backup before upgrading even though schema remains 10; rollback
 requires considering the preserved source checkpoint, not just database schema compatibility.

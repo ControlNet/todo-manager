@@ -7,6 +7,7 @@ are not the real services. Real read-only runs are done separately in a sandbox 
 
 import base64
 import json
+from datetime import timedelta
 
 from todo_manager import clock, gate_intake, store
 from todo_manager.net import HttpError
@@ -81,6 +82,71 @@ class GmailAdapterTests(WorkspaceCase):
         self.assertEqual(result.meta["mode"], "window_fallback")
         self.assertEqual(sorted(i.external_id for i in result.items), ["m1", "m2", "m3"])
         self.assertEqual(json.loads(result.cursor)["history_id"], "900")
+
+    def gap_transport(self, history, gap_at):
+        """History as given; the window listing returns the gap thread only when its ``after:``
+        bound reaches back to the gap mail (as Gmail's search would)."""
+        def listing(p):
+            after = p.get("q", "").partition("after:")[2].split(" ")[0]
+            if after and int(after) <= int(gap_at.timestamp()):
+                return {"messages": [{"id": "gap", "threadId": "tgap"}]}
+            return {"messages": []}
+        gap = gmail_message("gap", "tgap")
+        gap["internalDate"] = str(int(gap_at.timestamp() * 1000))
+        return FakeHttp([
+            ("/history", lambda p: history[0]),
+            ("/profile", {"historyId": "400"}),
+            ("/messages", listing),
+            ("/threads/a", {"messages": [gmail_message("a1", "a")]}),
+            ("/threads/b", {"messages": [gmail_message("b1", "b")]}),
+            ("/threads/tgap", {"messages": [gap]}),
+        ])
+
+    def test_expired_history_after_partial_scan_searches_from_the_covered_position(self):
+        start = clock.now()
+        history = [{"historyId": "200"}]
+        http = self.gap_transport(history, start + timedelta(hours=12))
+        self.conn.execute("INSERT INTO cursors(source,scope,cursor) VALUES ('gmail','mailbox:primary',?)",
+                          (json.dumps({"history_id": "100"}),))
+
+        def run(**kw):
+            gate_intake.fetch_all(self.conn, [GmailSource(
+                account="primary", address="me@example.edu", token=lambda: "t", my_addresses=[],
+                http=http, initial_lookback_days=3, **kw)])
+            return get_cursor(self.conn, "gmail", "mailbox:primary")
+
+        self.assertTrue(run()["meta"]["complete"])      # covered through `start`, history 200
+        clock.advance(days=1)
+        history[0] = {"historyId": "300", "nextPageToken": "more", "history": [{"messagesAdded": [
+            {"message": {"id": "a1", "threadId": "a"}}, {"message": {"id": "b1", "threadId": "b"}}]}]}
+        row = run(max_requests_per_run=2)               # budget-limited: history pages remain
+        self.assertFalse(row["meta"]["complete"])
+        self.assertEqual(row["last_success_at"], clock.iso())
+        clock.advance(days=1)
+        history[0] = HttpError(404, "Requested entity was not found.")
+        row = run()
+        self.assertTrue(row["meta"]["complete"])
+        self.assertEqual(row["meta"]["mode"], "window_fallback")
+        window = [c[2]["q"] for c in http.calls if c[1].endswith("/messages") and "after:" in c[2].get("q", "")]
+        self.assertEqual(window[-1].split()[0], f"after:{int((start - timedelta(minutes=120)).timestamp())}")
+        self.assertIsNotNone(self.conn.execute(
+            "SELECT 1 FROM source_items WHERE external_id='gap'").fetchone(), "mail in the gap was skipped")
+        self.assertEqual(json.loads(row["cursor"])["history_id"], "400")
+        # Covered through the start of the scan that has now completed (the unfinished one).
+        self.assertEqual(json.loads(row["cursor"])["covered_at"], clock.iso(start + timedelta(days=1)))
+
+    def test_expired_history_with_an_unfinished_legacy_scan_searches_from_the_cursor_origin(self):
+        origin = clock.iso(clock.now() - timedelta(days=3))
+        http = self.gap_transport([HttpError(404, "expired")], clock.now() - timedelta(days=2))
+        legacy = {"history_id": "200", "since": origin,
+                  "scan": {"phase": "history", "page": "p2", "candidates": ["a"], "ready": [],
+                           "target": "250", "mode": "history"}}
+        result = self.source(http).fetch(json.dumps(legacy), last_success_at=clock.iso())
+        self.assertEqual(result.meta["mode"], "window_fallback")
+        window = [c[2]["q"] for c in http.calls if c[1].endswith("/messages")]
+        self.assertEqual(window[0].split()[0],
+                         f"after:{int((clock.parse(origin) - timedelta(minutes=120)).timestamp())}")
+        self.assertEqual([i.external_id for i in result.items], ["gap"])
 
     def test_other_errors_are_failures_not_empty_results(self):
         http = FakeHttp([("/history", HttpError(503, "backend error", retry_after=30))])
