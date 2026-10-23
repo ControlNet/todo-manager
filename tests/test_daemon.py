@@ -6,6 +6,8 @@ ones ``FakeNotion`` records for its changes. No process, systemd or port is used
 """
 
 import json
+import os
+import subprocess
 from pathlib import Path
 
 from todo_manager import clock, daemon, db, delegation, feedback, gate_feedback, health, ops, runs, store, webhook
@@ -30,7 +32,9 @@ class FakeCronRun:
 class DaemonCase(GateCase):
     def setUp(self):
         super().setUp()
-        self.cfg.data["daemon"] = {"enabled": True}
+        # A temporary unit directory: a stale daemon makes the gate restart an installed unit,
+        # which must never be the real ~/.config/systemd/user one.
+        self.cfg.data["daemon"] = {"enabled": True, "unit_dir": str(self.tmp / "systemd-user")}
         webhook.save_token(self.cfg.home, "tok")
         self.wakes = []
         self.cron_exit = 0         # the started `cron run` has already finished, with this code
@@ -450,6 +454,85 @@ class WakeTests(DaemonCase):
                          "a late `run done` changes nothing")
 
 
+def start_time(pid):
+    """Field 22 of /proc/<pid>/stat, as Hermes records an execution's owner."""
+    return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+
+
+class HermesExecutionTests(DaemonCase):
+    """A run the schedule started: its agent's `run done` is not the end of it, Hermes still
+    finishes the execution (output, delivery, its bookkeeping). Hermes' execution ledger
+    (``cron/executions.db``, synthetic here) says when it has."""
+
+    def setUp(self):
+        super().setUp()
+        cron = self.tmp / "hermes" / "cron"
+        cron.mkdir(parents=True, exist_ok=True)
+        (cron / "jobs.json").write_text(json.dumps({"jobs": [{"id": "j1", "name": "todo-manager-feedback",
+                                                              "enabled": True, "state": "scheduled"}]}))
+        self.ledger = cron / "executions.db"
+
+    def execution(self, status, pid=None, started=None, job_id="j1"):
+        import sqlite3
+        conn = sqlite3.connect(self.ledger)
+        conn.execute("CREATE TABLE IF NOT EXISTS executions (id TEXT PRIMARY KEY, job_id TEXT NOT NULL,"
+                     " pid INTEGER NOT NULL, process_started_at INTEGER, status TEXT NOT NULL)")
+        conn.execute("DELETE FROM executions")
+        pid = os.getpid() if pid is None else pid
+        conn.execute("INSERT INTO executions VALUES ('e1', ?, ?, ?, ?)",
+                     (job_id, pid, start_time(pid) if started is None else started, status))
+        conn.commit()
+        conn.close()
+
+    def record(self, source_id):
+        feedback.record(self.conn, kind="direct", origin="cli", source_id=source_id, text="把截止日期改到周五",
+                        author_is_user=True, scope_type="task", scope_id=self.task)
+
+    def finished_run(self):
+        self.record("c1")
+        _, woke, run_id = self.gate()
+        self.assertTrue(woke)
+        ops.run_done(self.conn, self.cfg, run_id)
+        self.record("c2")
+
+    def test_no_wake_while_hermes_still_finishes_the_scheduled_execution(self):
+        self.execution("running")
+        self.finished_run()
+        clock.advance(minutes=2)
+        self.assertFalse(self.d.maybe_wake(), "run done, but Hermes has not finished the execution")
+        self.execution("completed")
+        self.assertTrue(self.d.maybe_wake())
+
+    def test_an_execution_whose_owner_is_gone_does_not_block_the_wake(self):
+        self.execution("claimed")
+        self.finished_run()
+        self.assertFalse(self.d.maybe_wake())
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        self.execution("running", pid=gone.pid, started=0)
+        self.assertTrue(self.d.maybe_wake(), "nothing is running it any more")
+
+    def test_a_reused_pid_is_not_the_owner(self):
+        self.execution("running")
+        self.finished_run()
+        self.assertFalse(self.d.maybe_wake())
+        self.execution("running", started=start_time(os.getpid()) + 100000)
+        self.assertTrue(self.d.maybe_wake(), "the pid now belongs to another process")
+
+    def test_without_the_ledger_the_wake_waits_a_grace_window_after_run_done(self):
+        """An older Hermes keeps no execution ledger: it may still be finishing the run."""
+        self.finished_run()
+        self.assertFalse(self.d.maybe_wake())
+        clock.advance(minutes=daemon.FINALIZE_GRACE_MINUTES + 1)
+        self.assertTrue(self.d.maybe_wake())
+
+    def test_an_unreadable_ledger_counts_as_running(self):
+        self.ledger.write_text("not a database")
+        self.finished_run()
+        self.assertFalse(self.d.maybe_wake())
+        self.assertIn("Hermes", self.d.last_error)
+
+
 class HermesWakeTests(DaemonCase):
     def jobs(self, **feedback_job):
         path = self.tmp / "hermes" / "cron" / "jobs.json"
@@ -787,6 +870,104 @@ class CodeChangeTests(DaemonCase):
         d.wake_proc.returncode = 0
         thread.join(timeout=15)
         self.assertEqual(result, [0])
+
+    def test_a_source_change_starts_no_new_cron_run_and_restarts_when_the_current_one_ends(self):
+        """Feedback stays claimable: without draining, the next wake would postpone the update
+        again and again. The feedback stays queued for the new daemon or the schedule."""
+        import itertools
+        import threading
+        feedback.record(self.conn, kind="direct", origin="cli", source_id="c1", text="把截止日期改到周五",
+                        author_is_user=True, scope_type="task", scope_id=self.task)
+        self.cron_exit = None                     # a wake would start a `cron run` that keeps running
+        d = daemon.Daemon(self.cfg, notion_factory=lambda conn, cfg: None, kanban_factory=lambda cfg: None,
+                          waker=self.wake, board_db=None,
+                          fingerprint=lambda versions=itertools.chain(["v1"], itertools.repeat("v2")): next(versions))
+        d.code_check_seconds, d.code_settle_seconds = 0, 0.2
+        d.wake_proc = FakeCronRun(None)
+        result = []
+        thread = threading.Thread(target=lambda: result.append(d.run_forever()), daemon=True)
+        thread.start()
+        thread.join(timeout=1)
+        self.assertEqual(result, [])
+        d.wake_proc.returncode = 0
+        thread.join(timeout=15)
+        self.assertEqual(result, [0], "restarted as soon as the running `cron run` ended")
+        self.assertEqual(self.wakes, [], "no new `cron run` once the update was seen")
+        self.assertTrue(feedback.pending(self.conn), "the feedback waits for the new daemon or the schedule")
+
+
+class StuckWakeTests(DaemonCase):
+    def record(self, source_id):
+        feedback.record(self.conn, kind="direct", origin="cli", source_id=source_id, text="把截止日期改到周五",
+                        author_is_user=True, scope_type="task", scope_id=self.task)
+
+    def keys(self):
+        return health.report(self.conn, self.cfg)["problem_keys"]
+
+    def test_a_cron_run_longer_than_the_claim_lease_is_reported_and_left_running(self):
+        self.cron_exit = None
+        self.record("c1")
+        self.assertTrue(self.d.maybe_wake())
+        proc = self.cron_run
+        clock.advance(minutes=59)
+        self.d.heartbeat(force=True)
+        self.assertNotIn("daemon:wake_stuck", self.keys())
+        clock.advance(minutes=2)
+        self.assertFalse(self.d.maybe_wake())
+        self.d.heartbeat(force=True)
+        report = health.report(self.conn, self.cfg)
+        self.assertIn("daemon:wake_stuck", report["problem_keys"])
+        text = report["problems"][report["problem_keys"].index("daemon:wake_stuck")]
+        self.assertIn("hermes cron", text)
+        self.assertIn("not stopped", text)
+        self.assertIs(self.d.wake_proc, proc, "never killed: that is the interruption the guard prevents")
+        clock.advance(minutes=5)
+        self.d.heartbeat(force=True)
+        self.assertEqual(self.keys().count("daemon:wake_stuck"), 1, "one problem however long it runs")
+        proc.returncode = 0
+        self.d.maybe_wake()
+        self.d.heartbeat(force=True)
+        self.assertNotIn("daemon:wake_stuck", self.keys())
+
+
+class DaemonHealthTests(DaemonCase):
+    """Daemon problems reach plain `status` (``problem_items``), not only `--details`."""
+
+    def keys(self):
+        return health.report(self.conn, self.cfg)["problem_keys"]
+
+    def test_an_unhealthy_enabled_daemon_is_one_problem(self):
+        self.d.heartbeat(force=True)
+        self.assertNotIn("daemon:unhealthy", self.keys())
+        daemon.status_path(self.cfg.home).unlink()
+        self.assertIn("daemon:unhealthy", self.keys(), "no status: not running")
+        self.d.heartbeat(force=True)
+        clock.advance(seconds=daemon.STALE_SECONDS + 1)
+        self.assertIn("daemon:unhealthy", self.keys(), "stale status")
+        self.gate()                                   # the gate records the daemon/alive channel
+        keys = self.keys()
+        self.assertIn("source:daemon:alive", keys)
+        self.assertNotIn("daemon:unhealthy", keys, "one incident, reported once")
+        self.cfg.data["daemon"]["enabled"] = False
+        daemon.status_path(self.cfg.home).unlink()
+        self.assertFalse([k for k in self.keys() if k.startswith("daemon:")], "a disabled daemon is no problem")
+
+    def test_a_gone_page_is_a_problem_until_it_reads_again(self):
+        self.d.page_problems["page-gone"] = "2026-10-20T00:00:00Z: no longer accessible (deleted or unshared)"
+        self.d.heartbeat(force=True)
+        report = health.report(self.conn, self.cfg)
+        self.assertIn("daemon:page:page-gone", report["problem_keys"])
+        self.d.page_problems["page-gone"] = "2026-10-21T00:00:00Z: no longer accessible (deleted or unshared)"
+        self.d.heartbeat(force=True)
+        self.assertEqual(self.keys().count("daemon:page:page-gone"), 1)
+        health.record_problems(self.conn, "notion", ["page page-gone is no longer accessible (deleted or unshared)"])
+        keys = self.keys()
+        self.assertNotIn("daemon:page:page-gone", keys, "the gate's report of the same page is enough")
+        self.assertEqual(len([k for k in keys if "page-gone" in k]), 1)
+        self.d.page_problems.clear()
+        self.d.heartbeat(force=True)
+        health.record_problems(self.conn, "notion", [])
+        self.assertFalse([k for k in self.keys() if "page-gone" in k])
 
 
 del GateCase   # imported only as a base

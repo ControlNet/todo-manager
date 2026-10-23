@@ -6,6 +6,7 @@ import argparse
 import difflib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -168,6 +169,41 @@ def load_jobs(p: Paths) -> dict[str, dict[str, Any]]:
     jobs = data.get("jobs", []) if isinstance(data, dict) else data
     wanted = {spec["name"] for spec in JOBS.values()}
     return {j["name"]: j for j in jobs if j.get("name") in wanted}
+
+
+def _owner_alive(pid: int, started: int | None) -> bool:
+    """Hermes' own owner check (cron/executions.py ``_owner_is_live``): the process exists and,
+    where /proc tells, started when the execution recorded (not a reused pid)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass                     # exists, owned by someone else (or cannot tell: as alive)
+    if started is None:
+        return True
+    try:
+        current = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+    except (OSError, IndexError, ValueError):
+        return True
+    return abs(current - int(started)) <= 200     # Hermes' START_TIME_DRIFT_TOLERANCE
+
+
+def job_executing(p: Paths, job_id: str) -> bool | None:
+    """Whether Hermes is still running an execution of the job, from its execution ledger
+    (``cron/executions.db``): an attempt stays ``claimed``/``running`` until Hermes has finished
+    the whole run (agent, output, delivery, its own bookkeeping) and only its live owner process
+    finishes it. None when this Hermes keeps no ledger. Read only; errors are the caller's."""
+    path = p.hermes_home / "cron" / "executions.db"
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+    try:
+        rows = conn.execute("SELECT pid, process_started_at FROM executions WHERE job_id=?"
+                            " AND status IN ('claimed','running')", (job_id,)).fetchall()
+    finally:
+        conn.close()
+    return any(_owner_alive(int(pid), started) for pid, started in rows)
 
 
 def load_manifest(p: Paths) -> dict[str, Any]:
@@ -446,10 +482,20 @@ class Installer:
                 raise RuntimeError(f"systemctl --user {' '.join(args)} failed: {(proc.stderr or proc.stdout or '')[-300:]}")
 
     def _remove_unit(self, path: Path) -> None:
+        """Stop and disable the daemon, then remove its unit. A daemon that did not stop keeps its
+        unit (and the uninstall fails, to be run again)."""
         from . import daemon
-        self._systemctl("disable", "--now", daemon.UNIT_NAME)
+        proc = self._systemctl("disable", "--now", daemon.UNIT_NAME)
+        if getattr(proc, "returncode", 0) != 0 or self._unit_active():
+            why = (f"failed: {(proc.stderr or proc.stdout or '')[-300:]}" if getattr(proc, "returncode", 0)
+                   else "left it still active")
+            raise RuntimeError(f"systemctl --user disable --now {daemon.UNIT_NAME} {why}; {path} kept. Stop the"
+                               " daemon (systemctl --user stop todo-manager-daemon), then run uninstall (or install) again")
         path.unlink(missing_ok=True)
-        self._systemctl("daemon-reload")
+        proc = self._systemctl("daemon-reload")
+        if getattr(proc, "returncode", 0) != 0:
+            raise RuntimeError(f"daemon stopped and {path} removed, but systemctl --user daemon-reload failed:"
+                               f" {(proc.stderr or proc.stdout or '')[-300:]}; run it yourself")
 
     def _own_unit(self) -> Path | None:
         from . import daemon

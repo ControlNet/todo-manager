@@ -353,7 +353,14 @@ Checks: `todo-manager daemon status` (state, mode, last delivery, bad signatures
 `journalctl --user -u todo-manager-daemon` (start-up line and crashes; requests are not logged).
 `health` and the home callout report the `daemon` channels: `alive` (the gate found the daemon
 stale, on other code or waiting for install, and synced itself) and `webhook` (our writes
-produced no deliveries: tunnel or subscription broken; the daemon polls meanwhile). After code
+produced no deliveries: tunnel or subscription broken; the daemon polls meanwhile). Plain `status`
+also reports, while `daemon.enabled`: an unhealthy daemon the gate has not recorded yet
+(`daemon:unhealthy`), each Notion page the daemon found gone (`daemon:page:<id>`) and a `hermes cron
+run` the daemon started that is still running after `feedback.stale_claim_minutes`
+(`daemon:wake_stuck`: check the job in Hermes; the daemon never kills it, and does not restart for
+updates until it ends). `uninstall` (and `install` with the daemon turned off) fails and keeps the
+unit file when `systemctl --user disable --now` fails or leaves the daemon active: stop it, then
+run it again. After code
 updates and `config.toml` edits (`config set` or by hand) the daemon restarts itself within about
 20 s; after a schema upgrade it waits for `todo-manager install`.
 
