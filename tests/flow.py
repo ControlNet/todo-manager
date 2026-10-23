@@ -96,12 +96,13 @@ def apply_op(conn: sqlite3.Connection, cfg: Config, ctx: ops.Ctx, op: dict[str, 
 
 
 def apply_feedback_ops(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any] | str,
-                       op_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Carry out ``op_list`` for the user's feedback item ``fb`` (``--feedback <id>``)."""
+                       op_list: list[dict[str, Any]], run: str | None = None) -> list[dict[str, Any]]:
+    """Carry out ``op_list`` for the user's feedback item ``fb`` (``--feedback <id>``, with
+    ``--run <run>`` when a feedback run that claimed it does so)."""
     if not op_list:
         return []
     fid = fb if isinstance(fb, str) else fb["id"]
-    ctx = ops.context(conn, cfg, feedback_id=fid)
+    ctx = ops.context(conn, cfg, feedback_id=fid, run=run)
     return [apply_op(conn, cfg, ctx, op) for op in op_list]
 
 
@@ -125,9 +126,9 @@ def resolve_feedback(conn: sqlite3.Connection, cfg: Config, run_id: str, items: 
                               "results": {}}
     for item in items:
         try:
-            results = apply_feedback_ops(conn, cfg, item["feedback"], item.get("ops") or [])
+            results = apply_feedback_ops(conn, cfg, item["feedback"], item.get("ops") or [], run=run_id)
             ops.feedback_resolve(conn, cfg, item["feedback"], outcome=item["outcome"], reply=item.get("reply"),
-                                 reason=item.get("reason"))
+                                 reason=item.get("reason"), run=run_id)
         except ops.OpError as exc:
             if exc.code not in ("SUPERSEDED", "NOT_READY"):
                 raise

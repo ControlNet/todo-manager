@@ -11,11 +11,13 @@ The Script Output lists feedback shows: Notion comments, tasks the user created 
 inside the Todo-Manager box of a page, and "next actor = Agent" requests, each with its task,
 agent work and recent thread.
 
-- Act with the commands of this skill, adding `--feedback <feedback id>`; then close the item:
-  `todo-manager feedback resolve <feedback id> --outcome applied|clarify|ignored [--reply "..."] [--reason "..."]`.
+- Act with the commands of this skill, adding `--feedback <feedback id> --run <run>` (this run's id, as in
+  `run done <run>`); then close the item:
+  `todo-manager feedback resolve <feedback id> --run <run> --outcome applied|clarify|ignored [--reply "..."] [--reason "..."]`.
+  STALE_RUN on an item: this run's claim on it expired and a later run took it over; stop working on it.
   `clarify` asks exactly one question in `--reply`; a reply is posted in the same Notion
   discussion. When a later answer settles a clarified managed-body edit, pass --settles with the original body-edit feedback ID; never release a newer revision.
-- A change the user asked for: `todo-manager task update <task> --feedback <feedback id> --set ...`
+- A change the user asked for: `todo-manager task update <task> --feedback <feedback id> --run <run> --set ...`
   (recorded as the user's own edit).
 - The user says the task now waits for someone ("submitted, now waiting for their approval"):
   status `waiting`, `waiting_on` and a `follow_up_date`: the date the user named, else a
@@ -35,8 +37,8 @@ agent work and recent thread.
 ## Delegation (agent work on the Hermes board)
 
 - `todo-manager delegate create --task <task> --brief "goal, background, constraints and delivery requirements" --allow read,analyze,draft`
-  on the user's request only: add `--feedback <feedback id>` or `--request <id> --said "..."`
-  (commands with `--run` refuse agent work). The card is created at once; Hermes schedules and
+  on the user's request only: add `--feedback <feedback id> --run <run>` or `--request <id> --said "..."`
+  (commands with `--run` alone refuse agent work). The card is created at once; Hermes schedules and
   runs it.
 - The user wants it done later ("after 5pm", "tomorrow morning"): add
   `--start-after "YYYY-MM-DD HH:MM"` (the user's local time). The card waits parked and starts by

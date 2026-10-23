@@ -534,10 +534,11 @@ def feedback(conn: sqlite3.Connection, cfg: Config, run_id: str, items: list[dic
     for fb in items:
         out += feedback_item(conn, cfg, fb, incomplete.get(fb["id"]))
     out.append("\n## Commands for this run (details: skill todo-manager, section \"Feedback run\")")
-    out += ["- act: the usual commands with `--feedback <feedback id>` (e.g. `todo-manager task update <task>"
-            " --feedback <id> --set ...`, `todo-manager delegate create --feedback <id> ...`)",
-            "- close each item: `todo-manager feedback resolve <feedback id> --outcome applied|clarify|ignored"
-            " [--reply \"...\"] [--reason \"...\"]`",
+    out += [f"- act: the usual commands with `--feedback <feedback id> --run {run_id}` (e.g. `todo-manager task"
+            f" update <task> --feedback <id> --run {run_id} --set ...`, `todo-manager delegate create --feedback <id>"
+            f" --run {run_id} ...`)",
+            f"- close each item: `todo-manager feedback resolve <feedback id> --run {run_id} --outcome"
+            " applied|clarify|ignored [--reply \"...\"] [--reason \"...\"]`",
             f"- finally: `todo-manager run done {run_id}`", "", FOOTER.format(run=run_id)]
     return "\n".join(out)
 

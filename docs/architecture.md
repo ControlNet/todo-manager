@@ -33,6 +33,9 @@ default) is the one resident process: it runs the feedback job's deterministic s
 Notion webhook events, local database changes and board changes, never a model, and asks Hermes
 to run the feedback job when feedback is waiting; while it is healthy the gate only claims. Source quiet windows and minimum model wake intervals are
 independent of cron schedules. Waiting on a person or a future retry does not by itself wake a model.
+The feedback gate claims items for a run with a lease (`feedback.stale_claim_minutes`); an expired
+claim goes to a later run. The run's commands carry its id (`--feedback F --run R`) and write or
+resolve F only while R still holds that claim, so a stalled run cannot act on what a later run took over.
 
 ## Responsibilities
 

@@ -149,12 +149,12 @@ try:
     output, woke, run = case.gate()
     assert woke and case.task in output
     item = next(f for f in feedback.claimed_by(case.conn, run) if f['kind'] == 'delegate_request')
-    ctx = ops.context(case.conn, case.cfg, feedback_id=item['id'])
+    ctx = ops.context(case.conn, case.cfg, feedback_id=item['id'], run=run)
     args = dict(task_id=case.task, title='Synthetic delegated draft', goal='Draft only', submit=False)
     decision = ops.delegate_create(case.conn, case.cfg, ctx, **args)
     again = ops.delegate_create(case.conn, case.cfg, ctx, **args)
     assert decision['delegation'] == again['delegation']
-    ops.feedback_resolve(case.conn, case.cfg, item['id'], outcome='applied', reply='Synthetic draft delegated')
+    ops.feedback_resolve(case.conn, case.cfg, item['id'], outcome='applied', reply='Synthetic draft delegated', run=run)
     from unittest.mock import patch
     from todo_manager.kanban import KanbanError
     original_create = case.kb.create
@@ -189,9 +189,10 @@ try:
     assert woke
     answer = next(f for f in feedback.claimed_by(case.conn, run) if f['source_id'] == comment_id)
     assert answer['payload']['delivery_kind'] == 'question'
-    answer_ctx = ops.context(case.conn, case.cfg, feedback_id=answer['id'])
+    answer_ctx = ops.context(case.conn, case.cfg, feedback_id=answer['id'], run=run)
     ops.delegate_answer(case.conn, case.cfg, answer_ctx, did, body='Use Markdown')
-    ops.feedback_resolve(case.conn, case.cfg, answer['id'], outcome='applied', reply='Sent to the requesting child')
+    ops.feedback_resolve(case.conn, case.cfg, answer['id'], outcome='applied', reply='Sent to the requesting child',
+                         run=run)
     case.gate()
     assert case.kb.snapshot(child)['task']['status'] == 'ready'
     assert case.kb.snapshot(root_card)['task']['status'] == 'blocked'
