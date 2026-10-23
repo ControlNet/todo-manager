@@ -231,15 +231,22 @@ class Installer:
     log: list[str] = field(default_factory=list)
     systemd: Runner = subprocess.run    # systemctl --user (the sync daemon's unit)
 
-    def hermes(self, *args: str) -> str:
-        cmd = [self.cfg.get("hermes.bin", "hermes"), *args]
+    def hermes_env(self) -> dict[str, str]:
         env = {k: v for k, v in os.environ.items() if not k.startswith("HERMES_") and k not in ("PYTHONPATH", "PYTHONHOME")}
         env["HERMES_HOME"] = str(self.paths.hermes_home)
         env["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
-        proc = self.runner(cmd, capture_output=True, text=True, timeout=120, env=env)
+        return env
+
+    def hermes(self, *args: str) -> str:
+        cmd = [self.cfg.get("hermes.bin", "hermes"), *args]
+        proc = self.runner(cmd, capture_output=True, text=True, timeout=120, env=self.hermes_env())
         if proc.returncode != 0:
             raise RuntimeError(f"{' '.join(cmd[:3])} failed (exit {proc.returncode}): {(proc.stdout or '')[-300:]}")
         return proc.stdout
+
+    def hermes_start(self, *args: str) -> subprocess.Popen:
+        """``hermes`` without waiting for it or cutting it short; its output goes to ours."""
+        return subprocess.Popen([self.cfg.get("hermes.bin", "hermes"), *args], env=self.hermes_env())
 
     # ---------------------------------------------------------------- framework files
 

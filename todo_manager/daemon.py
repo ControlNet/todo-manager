@@ -44,7 +44,7 @@ from .locks import LockBusy, file_lock, lock_path
 UNIT_NAME = "todo-manager-daemon.service"
 UNIT_MARK = "# todo-manager daemon unit (generated; overwritten by `todo-manager install`)"
 PULSE_SECONDS = 15
-STALL_SECONDS = 300    # no progress for this long: stop the heartbeat (above the 120 s Hermes wake call)
+STALL_SECONDS = 300    # no progress for this long: stop the heartbeat
 STALE_SECONDS = 90
 CODE_CHECK_SECONDS = 10
 CODE_SETTLE_SECONDS = 10
@@ -219,17 +219,18 @@ def default_board_db(cfg: Config) -> Path | None:
     return hermes_home / "kanban" / "boards" / str(cfg.get("kanban.board") or "todo-manager") / "kanban.db"
 
 
-def hermes_wake(cfg: Config) -> bool:
-    """Ask Hermes to run the feedback job now, unless the user paused it (``cron run`` would
-    resume a paused job)."""
+def hermes_wake(cfg: Config) -> subprocess.Popen | None:
+    """Start ``hermes cron run`` of the feedback job, unless the user paused it (``cron run`` would
+    resume a paused job). The command runs the job to its end, so it is left running: cut short,
+    the execution it owns looks abandoned to Hermes while the job is still finishing, and a second
+    ``cron run`` starts another execution of the job, one of which Hermes interrupts."""
     from . import hermes_install
     paths = hermes_install.Paths.from_config(cfg)
     name = hermes_install.JOBS["feedback"]["name"]
     job = hermes_install.load_jobs(paths).get(name)
     if not job or not job.get("enabled", True) or job.get("state") == "paused" or job.get("paused_at"):
-        return False
-    hermes_install.Installer(cfg, paths).hermes("cron", "run", job["id"])
-    return True
+        return None
+    return hermes_install.Installer(cfg, paths).hermes_start("cron", "run", job["id"])
 
 
 # --------------------------------------------------------------------------- the daemon
@@ -242,7 +243,7 @@ class Daemon:
 
     def __init__(self, cfg: Config, *, notion_factory: Callable[[sqlite3.Connection, Config], Any] | None = None,
                  kanban_factory: Callable[[Config], Any] | None = None,
-                 waker: Callable[[Config], bool] | None = None, board_db: Path | None = None,
+                 waker: Callable[[Config], Any] | None = None, board_db: Path | None = None,
                  stats: webhook.Stats | None = None, fingerprint: Callable[[], str] | None = None) -> None:
         from . import wiring
         self.cfg = cfg
@@ -279,6 +280,7 @@ class Daemon:
         self.last_summary: dict[str, Any] = {}
         self.silent = False
         self.woken_for: frozenset[str] = frozenset()
+        self.wake_proc: Any = None   # the `hermes cron run` of the last wake, until it ends
 
     # ------------------------------------------------------------ settings
     def setting(self, key: str, default: Any) -> Any:
@@ -563,11 +565,36 @@ class Daemon:
         items = feedback.pending(self.conn, stale_minutes=int(self.cfg.get("feedback.stale_claim_minutes", 60)))
         return frozenset(f["id"] for f in items if not ops.not_ready(self.conn, self.cfg, f))
 
+    def feedback_run_under_way(self) -> bool:
+        """A feedback run from its gate's claim until its agent's ``run done``, within the claim
+        lease (after it, the run is expired: ``ops.perform`` refuses its commands)."""
+        assert self.conn is not None
+        cutoff = clock.iso(clock.now() - timedelta(minutes=int(self.cfg.get("feedback.stale_claim_minutes", 60))))
+        return self.conn.execute(
+            "SELECT 1 FROM runs WHERE entry='feedback' AND started_at >= ? AND released_at IS NULL"
+            " AND agent_completed_at IS NULL AND (status='running' OR (status='woke' AND wake=1)) LIMIT 1",
+            (cutoff,)).fetchone() is not None
+
+    def waking(self) -> bool:
+        """The ``hermes cron run`` of the last wake has not ended: Hermes is still running the job
+        (also after its agent's ``run done``)."""
+        if self.wake_proc is None:
+            return False
+        code = self.wake_proc.poll()
+        if code is None:
+            return True
+        if code:
+            self.last_error = f"wake failed: hermes cron run exited {code} (output in the daemon's journal)"
+        self.wake_proc = None
+        return False
+
     def maybe_wake(self) -> bool:
         """Start the feedback job for claimable feedback: at most once a minute, and no more
         often than its own schedule while the same items stay unclaimed (a failing gate is not
-        restarted every minute, each run reporting the failure)."""
-        if self.conn is None:
+        restarted every minute, each run reporting the failure). Never while the job may still
+        be running (the `cron run` of the last wake, or a run the schedule started): Hermes then
+        interrupts one of the two executions. The next wake or scheduled run takes the feedback."""
+        if self.conn is None or self.waking():
             return False
         try:
             with file_lock(lock_path(self.cfg.home, "workspace"), blocking=True, timeout=self.lock_timeout,
@@ -575,6 +602,8 @@ class Daemon:
                 if not self.schema_ok():
                     return False
                 ready = self.ready_feedback()
+                if ready and self.feedback_run_under_way():
+                    return False
         except LockBusy:
             return False
         except sqlite3.Error as exc:
@@ -590,7 +619,8 @@ class Daemon:
             return False
         self.last["wake"], self.woken_for = clock.now(), ready
         try:
-            return bool(self.waker(self.cfg))
+            self.wake_proc = self.waker(self.cfg)
+            return self.wake_proc is not None
         except Exception as exc:  # noqa: BLE001 - the gate's own schedule still runs the job
             self.last_error = f"wake failed: {type(exc).__name__}: {str(exc)[:200]}"
             return False
@@ -676,7 +706,8 @@ class Daemon:
                     current = self.fingerprint()
                     if current != seen_code:
                         seen_code, changed_at = current, time.monotonic()
-                    elif changed_at is not None and time.monotonic() - changed_at >= self.code_settle_seconds:
+                    elif (changed_at is not None and time.monotonic() - changed_at >= self.code_settle_seconds
+                          and not self.waking()):   # stopping the unit would kill `cron run`
                         self.state = "restarting"
                         self.heartbeat(force=True)
                         return 0
