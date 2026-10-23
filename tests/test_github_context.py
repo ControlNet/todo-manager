@@ -3,7 +3,8 @@ the user's participation), content-versioned body edits, and mail/API duplicates
 
 TEST DOUBLE: ``FakeGitHubApi`` is an in-memory stand-in for the GitHub REST endpoints the
 adapters read (issues with ``since``, comments with ``since``/paging, events, reviews,
-notifications, single issue/PR objects). It is not the real service.
+notifications, single issue/PR objects, PR reviews and inline review comments). It is not the real
+service. A path in ``fail`` raises the given ``SourceError``.
 """
 
 import re
@@ -12,7 +13,7 @@ from datetime import timedelta
 
 from todo_manager import clock, gate_intake, ops
 from todo_manager.context import run_items
-from todo_manager.sources.base import FetchResult, Item, persist_fetch
+from todo_manager.sources.base import FetchResult, Item, SourceError, persist_fetch
 from todo_manager.sources.github import GitHubNotificationSource, GitHubRepoSource
 from todo_manager.sources import registry
 from todo_manager.sources.gmail import GmailSource
@@ -32,23 +33,41 @@ class FakeGitHubApi:
         self.issues: dict[int, dict] = {}
         self.comments: dict[int, list[dict]] = {}
         self.events: dict[int, list[dict]] = {}
+        self.reviews: dict[int, list[dict]] = {}
+        self.review_comments: dict[int, list[dict]] = {}
         self.notifications: list[dict] = []
         self.calls: list[str] = []
+        self.fail: dict[str, SourceError] = {}
 
     def issue(self, number, *, title, body, user="bob", created, pr=False, assignees=(), state="open"):
         self.issues[number] = {"number": number, "id": 1000 + number, "title": title, "body": body,
                                "user": {"login": user}, "state": state, "created_at": created,
-                               "updated_at": created, "comments": 0,
+                               "updated_at": created, "comments": 0, "review_comments": 0,
                                "assignees": [{"login": a} for a in assignees], "labels": [],
                                "html_url": f"https://github.com/{REPO}/{'pull' if pr else 'issues'}/{number}",
                                **({"pull_request": {}} if pr else {})}
         self.comments[number] = []
         self.events[number] = []
+        self.reviews[number] = []
+        self.review_comments[number] = []
 
     def comment(self, number, cid, user, body, at):
         self.comments[number].append({"id": cid, "user": {"login": user}, "body": body, "created_at": at,
                                       "updated_at": at, "html_url": f"https://github.com/{REPO}/issues/{number}#c{cid}"})
         self.issues[number]["comments"] = len(self.comments[number])
+        self.touch(number, at)
+
+    def review(self, number, rid, user, state, body, at, bot=False):
+        self.reviews[number].append({"id": rid, "user": {"login": user, **({"type": "Bot"} if bot else {})},
+                                     "state": state, "body": body, "submitted_at": at,
+                                     "html_url": f"https://github.com/{REPO}/pull/{number}#pullrequestreview-{rid}"})
+        self.touch(number, at)
+
+    def review_comment(self, number, cid, user, path, body, at):
+        self.review_comments[number].append({"id": cid, "user": {"login": user}, "path": path, "body": body,
+                                             "created_at": at, "updated_at": at,
+                                             "html_url": f"https://github.com/{REPO}/pull/{number}#discussion_r{cid}"})
+        self.issues[number]["review_comments"] = len(self.review_comments[number])
         self.touch(number, at)
 
     def edit_comment(self, number, cid, body, at):
@@ -70,6 +89,8 @@ class FakeGitHubApi:
 
     def paged(self, path, params=None, max_pages=50):
         self.calls.append(path)
+        if path in self.fail:
+            raise self.fail[path]
         params = params or {}
         since = params.get("since") or ""
         if path == "notifications":
@@ -80,17 +101,20 @@ class FakeGitHubApi:
         if not m:
             raise AssertionError(f"unexpected path {path}")
         kind, number, what = m.group(1), int(m.group(2)), m.group(3)
+        if kind == "pulls" and what == "reviews":
+            return list(self.reviews[number])
         if kind == "pulls":
-            return []
+            return [c for c in self.review_comments[number] if c["updated_at"] >= since]
         if what == "events":
             return list(self.events[number])
         return [c for c in self.comments[number] if c["updated_at"] >= since]
 
     def get(self, path, params=None):
         self.calls.append(path)
-        m = re.fullmatch(rf"repos/{REPO}/issues/comments/(\d+)", path)
+        m = re.fullmatch(rf"repos/{REPO}/(issues|pulls)/comments/(\d+)", path)
         if m:
-            return next(c for cs in self.comments.values() for c in cs if c["id"] == int(m.group(1)))
+            found = self.comments if m.group(1) == "issues" else self.review_comments
+            return next(c for cs in found.values() for c in cs if c["id"] == int(m.group(2)))
         m = re.fullmatch(rf"repos/{REPO}/issues/(\d+)/comments", path)
         if m:
             per_page, page = int(params["per_page"]), int(params["page"])
