@@ -8,12 +8,23 @@ ones ``FakeNotion`` records for its changes. No process, systemd or port is used
 import json
 from pathlib import Path
 
-from todo_manager import clock, daemon, db, delegation, feedback, gate_feedback, health, store, webhook
+from todo_manager import clock, daemon, db, delegation, feedback, gate_feedback, health, ops, runs, store, webhook
 from todo_manager.locks import file_lock, lock_path
 from todo_manager.net import HttpError
 from todo_manager.notion.sync import NotionSync, load_state
 from tests.fake_notion import USER_ID
 from tests.test_feedback import GateCase
+
+
+class FakeCronRun:
+    """TEST DOUBLE for the ``hermes cron run`` process a wake starts: ``returncode`` stays None
+    while Hermes is still running the job."""
+
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+    def poll(self):
+        return self.returncode
 
 
 class DaemonCase(GateCase):
@@ -22,6 +33,7 @@ class DaemonCase(GateCase):
         self.cfg.data["daemon"] = {"enabled": True}
         webhook.save_token(self.cfg.home, "tok")
         self.wakes = []
+        self.cron_exit = 0         # the started `cron run` has already finished, with this code
         self.board = self.tmp / "board.db"
         self.board.write_text("")
         self.d = daemon.Daemon(self.cfg, notion_factory=lambda conn, cfg: NotionSync(conn, cfg, self.client,
@@ -33,7 +45,8 @@ class DaemonCase(GateCase):
 
     def wake(self, cfg):
         self.wakes.append(clock.iso())
-        return True
+        self.cron_run = FakeCronRun(self.cron_exit)
+        return self.cron_run
 
     def settle(self):
         """Let start-up work finish and forget what it did."""
@@ -366,6 +379,76 @@ class WakeTests(DaemonCase):
         clock.advance(minutes=3)
         self.assertTrue(self.d.maybe_wake())
 
+    def test_no_wake_while_the_cron_run_it_started_is_still_running(self):
+        """2026-10-21: the agent had already called `run done`, Hermes was still finishing the
+        execution, and a second `cron run` made Hermes interrupt the new execution mid-agent."""
+        self.cron_exit = None
+        self.record("c1")
+        self.assertTrue(self.d.maybe_wake())
+        _, woke, run_id = self.gate()
+        self.assertTrue(woke)
+        ops.run_done(self.conn, self.cfg, run_id)
+        self.record("c2")
+        clock.advance(minutes=2)
+        self.assertFalse(self.d.maybe_wake(), "Hermes has not finished the first execution")
+        self.cron_run.returncode = 0
+        self.assertTrue(self.d.maybe_wake())
+        self.assertEqual(len(self.wakes), 2)
+
+    def test_a_failed_cron_run_is_reported(self):
+        self.cron_exit = 1
+        self.record("c1")
+        self.assertTrue(self.d.maybe_wake())
+        clock.advance(minutes=1)
+        self.d.maybe_wake()
+        self.assertIn("exited 1", self.d.last_error)
+
+    def test_no_wake_while_a_feedback_run_is_under_way(self):
+        """A run the schedule started: from the gate's claim until its agent's `run done`."""
+        self.gate()
+        self.record("c1")
+        _, woke, run_id = self.gate()
+        self.assertTrue(woke)
+        self.record("c2")
+        self.assertFalse(self.d.maybe_wake(), "its agent is still working")
+        clock.advance(minutes=10)
+        self.assertFalse(self.d.maybe_wake())
+        ops.run_done(self.conn, self.cfg, run_id)
+        self.assertTrue(self.d.maybe_wake())
+        self.assertEqual(len(self.wakes), 1)
+
+    def test_a_run_whose_agent_never_finished_counts_only_until_the_claim_lease_ends(self):
+        self.record("c1")
+        _, woke, _ = self.gate()
+        self.assertTrue(woke)
+        self.record("c2")
+        clock.advance(minutes=59)
+        self.assertFalse(self.d.maybe_wake())
+        clock.advance(minutes=2)
+        self.assertTrue(self.d.maybe_wake())
+
+    def test_a_run_past_its_claim_lease_without_run_done_is_closed(self):
+        self.record("c1")
+        _, _, killed = self.gate()
+        clock.advance(minutes=30)
+        self.record("c2")
+        _, _, working = self.gate()
+        clock.advance(minutes=31)
+        self.d.due(("claims",))
+        self.d.cycle()
+        closed = runs.get(self.conn, killed)
+        self.assertTrue(closed["released_at"])
+        self.assertIsNone(closed["agent_completed_at"], "its agent did not finish")
+        self.assertIn("run done", closed["error"])
+        self.assertIsNone(runs.get(self.conn, working)["released_at"], "still within its lease")
+        self.assertEqual(self.d.last_summary["claims"]["runs_expired"], 1)
+        _, woke, again = self.gate()
+        self.assertTrue(woke)
+        self.assertEqual([f["source_id"] for f in feedback.claimed_by(self.conn, again)], ["c1"],
+                         "its feedback goes to a later run as before")
+        self.assertEqual(ops.run_done(self.conn, self.cfg, killed)["duplicate"], True,
+                         "a late `run done` changes nothing")
+
 
 class HermesWakeTests(DaemonCase):
     def jobs(self, **feedback_job):
@@ -377,20 +460,36 @@ class HermesWakeTests(DaemonCase):
     def wake_with(self):
         from unittest import mock
         from todo_manager import hermes_install
-        with mock.patch.object(hermes_install.Installer, "hermes", autospec=True, return_value="") as run:
+        with mock.patch.object(hermes_install.Installer, "hermes_start", autospec=True, return_value="proc") as run:
             woke = daemon.hermes_wake(self.cfg)
         return woke, [c.args[1:] for c in run.call_args_list]
 
     def test_the_feedback_job_is_run_by_id(self):
         self.jobs()
-        self.assertEqual(self.wake_with(), (True, [("cron", "run", "j1")]))
+        self.assertEqual(self.wake_with(), ("proc", [("cron", "run", "j1")]))
 
     def test_a_paused_job_is_not_resumed_by_a_wake(self):
         self.jobs(enabled=False, state="paused", paused_at="2026-10-13T00:00:00Z")
-        self.assertEqual(self.wake_with(), (False, []))
+        self.assertEqual(self.wake_with(), (None, []))
 
     def test_no_job_no_wake(self):
-        self.assertEqual(self.wake_with(), (False, []))
+        self.assertEqual(self.wake_with(), (None, []))
+
+    def test_the_cron_run_is_started_and_never_cut_short(self):
+        """`hermes cron run` lasts as long as the job's execution; a killed one leaves an
+        execution whose owner is gone, which the next `cron run` reaps while it still runs."""
+        self.jobs()
+        script = self.tmp / "hermes-double"
+        script.write_text('#!/bin/sh\necho "$* $HERMES_HOME" > "$0.args"\n'
+                          'while [ ! -e "$0.go" ]; do sleep 0.05; done\n', encoding="utf-8")
+        script.chmod(0o755)
+        self.cfg.data.setdefault("hermes", {})["bin"] = str(script)
+        proc = daemon.hermes_wake(self.cfg)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        self.assertIsNone(proc.poll(), "the daemon does not wait for it")
+        Path(f"{script}.go").write_text("")
+        self.assertEqual(proc.wait(timeout=10), 0)
+        self.assertEqual(Path(f"{script}.args").read_text().split(), ["cron", "run", "j1", str(self.tmp / "hermes")])
 
 
 class WebhookSilenceTests(DaemonCase):
@@ -670,6 +769,24 @@ class CodeChangeTests(DaemonCase):
             fh.write("\n# edited\n")
         thread.join(timeout=15)
         self.assertEqual(result, [0], "systemd starts it again with the new settings")
+
+    def test_a_source_change_waits_for_the_cron_run_it_started(self):
+        """Stopping the unit would kill `hermes cron run` and the job's execution with it."""
+        import itertools
+        import threading
+        d = daemon.Daemon(self.cfg, notion_factory=lambda conn, cfg: None, kanban_factory=lambda cfg: None,
+                          waker=self.wake, board_db=None,
+                          fingerprint=lambda versions=itertools.chain(["v1"], itertools.repeat("v2")): next(versions))
+        d.code_check_seconds, d.code_settle_seconds = 0, 0.2
+        d.wake_proc = FakeCronRun(None)
+        result = []
+        thread = threading.Thread(target=lambda: result.append(d.run_forever()), daemon=True)
+        thread.start()
+        thread.join(timeout=3)
+        self.assertEqual(result, [], "still running the old code")
+        d.wake_proc.returncode = 0
+        thread.join(timeout=15)
+        self.assertEqual(result, [0])
 
 
 del GateCase   # imported only as a base

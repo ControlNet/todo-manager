@@ -55,7 +55,8 @@ main thread, about once a second:                                               
     ├─ local → board: messages, cards of new delegations, parked starts
     ├─ board → local: card events
     └─ local → Notion: dirty scan + outbox (after every cycle)
-  claimable feedback → `hermes cron run <feedback job>` (at most once a minute, never a paused job)
+  claimable feedback → `hermes cron run <feedback job>` (at most once a minute, never a paused job,
+  never while the job may still be running)
 ```
 
 ### Inbound: Notion → local
@@ -96,10 +97,16 @@ The daemon reads no Hermes table itself; the bridge stays the only access path.
 
 ### Waking the model
 
-After a cycle, if feedback is claimable the daemon runs `hermes cron run <job id>` at most once a
-minute. Hermes starts it on its next cron tick (60 s by default) and the gate claims as before.
-`cron run` would resume a paused job, so the daemon skips a job the user paused. Scheduled times
-(follow-ups, due dates) stay with cron.
+After a cycle, if feedback is claimable the daemon starts `hermes cron run <job id>` at most once a
+minute, and the gate claims as before. `cron run` runs the job to its end (past the agent's `run
+done`), so the daemon leaves it running and does not start another until it ends, nor while a
+feedback run the schedule started is under way (claimed, no `run done`, within
+`feedback.stale_claim_minutes`): a second execution of the job makes Hermes interrupt one of the
+two (2026-10-21: a 120 s timeout cut `cron run` short and the next wake started a second execution
+while the first was finishing). A source change waits for it too. `cron run` would resume a
+paused job, so the daemon skips a job the user paused. Scheduled times (follow-ups, due dates) stay
+with cron. A woken run whose agent never reported `run done` is closed (released, with an error)
+by the claims step once its lease expired.
 
 ### One syncer at a time
 

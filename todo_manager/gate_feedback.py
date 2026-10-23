@@ -61,7 +61,9 @@ def _step(conn: sqlite3.Connection, summary: dict[str, Any], problems: list[str]
 
 
 def fail_exhausted_claims(conn: sqlite3.Connection, cfg: Config) -> dict[str, int]:
-    """Feedback no run resolved after ``max_attempts`` claims (lease expired) is marked failed."""
+    """Feedback no run resolved after ``max_attempts`` claims (lease expired) is marked failed.
+    A woken run whose agent never reported ``run done`` (killed) is closed once its lease
+    expired; its unresolved feedback is claimed by a later run as before."""
     stale = int(cfg.get("feedback.stale_claim_minutes", 60))
     max_attempts = int(cfg.get("feedback.max_attempts", 3))
     cutoff = clock.iso(clock.now() - timedelta(minutes=stale))
@@ -70,7 +72,11 @@ def fail_exhausted_claims(conn: sqlite3.Connection, cfg: Config) -> dict[str, in
     with tx(conn):
         for r in rows:
             feedback.fail(conn, r["id"], r["attempts"])
-    return {"failed": len(rows)}
+        expired = conn.execute(
+            "UPDATE runs SET released_at=?, error=COALESCE(error, ?) WHERE entry='feedback' AND status='woke'"
+            " AND wake=1 AND released_at IS NULL AND agent_completed_at IS NULL AND started_at < ?",
+            (clock.iso(), f"lease of {stale} min expired without run done (agent did not finish)", cutoff)).rowcount
+    return {"failed": len(rows), "runs_expired": expired}
 
 
 def freshness_sections(conn: sqlite3.Connection, cfg: Config, lang: str | None = None) -> dict[str, Any]:
