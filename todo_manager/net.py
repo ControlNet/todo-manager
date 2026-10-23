@@ -6,6 +6,7 @@ Request bodies and tokens are never logged.
 
 from __future__ import annotations
 
+import http.client
 import json
 import socket
 import time
@@ -25,7 +26,8 @@ class HttpError(Exception):
 
 
 class HttpTimeout(Exception):
-    """Request sent but no response: outcome unknown for non-idempotent calls."""
+    """Request sent but no complete response (timeout, dropped connection, truncated or unreadable
+    body): outcome unknown for non-idempotent calls."""
 
 
 class RawBody:
@@ -87,9 +89,11 @@ def request_json(method: str, url: str, *, headers: dict[str, str] | None = None
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
-                return json.loads(raw) if raw else None
         except urllib.error.HTTPError as exc:
-            raw = exc.read()
+            try:
+                raw = exc.read()
+            except (http.client.HTTPException, OSError):
+                raw = b""   # the status is known; only the error details are lost
             try:
                 parsed = json.loads(raw) if raw else None
             except ValueError:
@@ -107,6 +111,14 @@ def request_json(method: str, url: str, *, headers: dict[str, str] | None = None
             if isinstance(exc.reason, (socket.timeout, TimeoutError)):
                 raise HttpTimeout(f"timeout: {method} {urllib.parse.urlsplit(url).path}") from exc
             raise HttpError(0, f"network error: {exc.reason}") from None
+        except (http.client.HTTPException, OSError) as exc:
+            # urllib wraps only errors while sending; these come after the request went out.
+            raise HttpTimeout(f"incomplete response ({type(exc).__name__}): {method} "
+                              f"{urllib.parse.urlsplit(url).path}") from exc
+        try:
+            return json.loads(raw) if raw else None
+        except ValueError as exc:
+            raise HttpTimeout(f"unreadable response: {method} {urllib.parse.urlsplit(url).path}") from exc
 
 
 def _retry_after(value: str | None) -> float | None:
