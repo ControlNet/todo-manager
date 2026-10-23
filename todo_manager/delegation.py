@@ -519,19 +519,25 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str 
                     _set(conn, d['id'], status='pending_submit', last_error=f'profile validation failed: {exc}')
                 _failed(stats, 'errors', str(exc))
                 continue
-            extra = [m["body"] for m in conn.execute(
-                "SELECT body FROM delegation_messages WHERE delegation_id=? AND kind='supplement' AND status='pending'"
-                " ORDER BY created_at", (d["id"],))]
-            notes = conn.execute("SELECT notes_text FROM notion_pages WHERE entity_type='task' AND entity_id=?",
-                                 (task["id"],)).fetchone()
-            body = card_body(d, task, _notion_url(conn, task), extra, notes["notes_text"] if notes else None)
-            if not _may_run(conn, get(conn, d['id'])):
-                stats['held'] += 1
-                continue
             later = waiting_start(d)
             with tx(conn):
-                _set(conn, d["id"], status="reconcile", submit_attempts=d["submit_attempts"] + 1,
-                     start_after=d["start_after"] if later else None)
+                # Read with the check, in one transaction: a message queued from here on
+                # (add_message does not take the kanban-submit lock) is not in the card and is
+                # sent once the card is linked. Not paused here: a pause/resume read is a spent pair.
+                folded = conn.execute("SELECT id, kind, body FROM delegation_messages WHERE delegation_id=?"
+                                      " AND kind IN ('supplement','pause','resume') AND status='pending'"
+                                      " ORDER BY created_at", (d["id"],)).fetchall() \
+                    if _may_run(conn, get(conn, d['id'])) else None
+                if folded is not None:
+                    _set(conn, d["id"], status="reconcile", submit_attempts=d["submit_attempts"] + 1,
+                         start_after=d["start_after"] if later else None)
+            if folded is None:
+                stats['held'] += 1
+                continue
+            notes = conn.execute("SELECT notes_text FROM notion_pages WHERE entity_type='task' AND entity_id=?",
+                                 (task["id"],)).fetchone()
+            body = card_body(d, task, _notion_url(conn, task), [m["body"] for m in folded if m["kind"] == "supplement"],
+                             notes["notes_text"] if notes else None)
             try:
                 card_id = kb.create(title=f"{d['title']} [{d['id']}]", body=body, idem_key=d["idem_key"],
                                     assignee=d.get("assignee"), tenant="todo-manager",
@@ -550,9 +556,8 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str 
                      last_error=None)
                 # Supplements are in the card body; a pause/resume pair before submission is spent.
                 # Position 0: in the card body, read by every run of the card.
-                conn.execute("UPDATE delegation_messages SET status='sent', sent_at=?, card_event_id=0 WHERE"
-                             " delegation_id=? AND kind IN ('supplement','pause','resume') AND status='pending'",
-                             (clock.iso(), d["id"]))
+                conn.executemany("UPDATE delegation_messages SET status='sent', sent_at=?, card_event_id=0 WHERE"
+                                 " id=? AND status='pending'", [(clock.iso(), m["id"]) for m in folded])
             stats["submitted"] += 1
     return stats
 
@@ -1694,34 +1699,36 @@ def _send_approvals(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[s
     each, then one reopen of that version's review. One reopen per approval would start a run
     with only the first, and leave the others no version in review to go to. A retry (some in
     ``sending``) asks the card first: once the review was reopened, the approvals that were
-    posted before it are sent; one that was not is void (that run started without it)."""
+    posted before it are sent; one that was not is void (that run started without it). While
+    the version still waits in review nothing was handed over: an attempted approval is checked
+    again, and one void meanwhile is not sent (its comment, if it landed, is withdrawn)."""
     a = conn.execute("SELECT * FROM approvals WHERE id=?", (msg["approval_id"],)).fetchone() \
         if msg.get("approval_id") else None
     if a is None:
         _refuse_approval(conn, d, msg, "unbound")
         return "superseded"
-    group = []
+    group, problems = [], {}
     for m in conn.execute("SELECT m.* FROM delegation_messages m JOIN approvals a ON a.id=m.approval_id"
                           " WHERE m.delegation_id=? AND m.kind='approval' AND a.delivery_id=?"
                           " AND m.status IN ('pending','sending','waiting_capacity') ORDER BY m.created_at, m.rowid",
                           (d["id"], a["delivery_id"])).fetchall():
         m = dict(m)
-        problem = None if m["status"] == "sending" else _approval_problem(conn, d, m)
-        if problem:
+        problem = _approval_problem(conn, d, m)
+        if problem and m["status"] != "sending":
             _refuse_approval(conn, d, m, problem)
         else:
-            group.append(m)
+            group.append(m)   # an attempted one may have been handed over: the card tells below
+            if problem:
+                problems[m["id"]] = problem
     if not group:
         return "superseded"
     anchor = conn.execute("SELECT source_event_id FROM deliveries WHERE id=?", (a["delivery_id"],)).fetchone()[0]
-    attempted = any(m["status"] == "sending" for m in group)
     snap = kb.snapshot(d["card_id"], after_event=0)
     verdict = transition_verdict(snap["task"]["status"], snap["events"], "reopen_review", anchor)
     if verdict == "already":
         for m in group:
-            if m["status"] == "sending" or _has_marker(snap, m["id"]):
-                if _has_marker(snap, m["id"]):                    # records its place; nothing is posted
-                    _post_comment(conn, kb, d, m, f"[{i18n.t('dlg.msg.approval')}] {m['body']}", snap)
+            if _has_marker(snap, m["id"]):
+                _post_comment(conn, kb, d, m, f"[{i18n.t('dlg.msg.approval')}] {m['body']}", snap)  # records its place
                 _sent_transition(conn, d, m, requeued=False, cfg=cfg, snap=snap)
             else:
                 _refuse_approval(conn, d, m, "sent_back_without_it")
@@ -1730,6 +1737,16 @@ def _send_approvals(conn: sqlite3.Connection, cfg: Config, kb: Kanban, d: dict[s
         newer = any(e["kind"] == "review_requested" and int(e["id"]) > int(anchor) for e in snap["events"])
         for m in group:
             _refuse_approval(conn, d, m, "newer_version" if newer else "not_in_review")
+        return "superseded"
+    for m in [m for m in group if m["id"] in problems]:
+        if _has_marker(snap, m["id"]) and not _has_marker(snap, f"{m['id']}:withdrawn"):
+            ap = conn.execute("SELECT * FROM approvals WHERE id=?", (m["approval_id"],)).fetchone()
+            kb.comment(d["card_id"], f"[{i18n.t('dlg.msg.approval')}] WITHDRAWN {ap['action']} for delivery"
+                       f" {ap['delivery_id']}: {i18n.t('dlg.reason.' + problems[m['id']])}. This approval is void;"
+                       f" do not act on it.\n[tm:{m['id']}:withdrawn]")
+        _refuse_approval(conn, d, m, problems[m["id"]])
+        group.remove(m)
+    if not group:
         return "superseded"
     if d["pause_requested"]:
         with tx(conn):

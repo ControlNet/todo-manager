@@ -115,6 +115,15 @@ class HermesKanbanIntegration(WorkspaceCase):
                 self.assertEqual(self.kb.schedule(card, "2026-10-05T06:00:00.000Z"), "blocked", "a worker block stays")
                 self.assertEqual(self.kb.release_schedule(card), "blocked", "and is not lifted")
 
+    def test_a_create_that_fails_after_the_card_was_written_is_uncertain(self):
+        # A route Hermes refuses (unknown field): create_task commits, the subscription raises.
+        route = {"platform": "matrix", "chat_id": "synthetic-no-client", "synthetic_unknown_field": "x"}
+        with self.assertRaises(KanbanError) as ctx:
+            self.kb.create(title="partial", body="b", idem_key="tm-partial", assignee="default",
+                           tenant="todo-manager", notify=route)
+        self.assertTrue(ctx.exception.uncertain, "the card exists: a retry must look it up first")
+        self.assertEqual([m["status"] for m in self.kb.find("tm-partial", "synthetic-no-marker")], ["blocked"])
+
     def test_a_delegation_with_a_later_start_runs_only_after_it(self):
         did = delegation.create(self.conn, self.cfg, task_id=self.task, title="起草回复", goal="Draft only",
                                 start_after="2026-10-05T06:00:00.000Z")
