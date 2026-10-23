@@ -15,7 +15,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from .. import clock, delegation, i18n
-from ..db import get_meta, loads
+from ..db import get_meta, loads, tx
 from . import body, schema
 from .client import NotionClient, NotionError
 from .sync import HOME_MARKER, save_state
@@ -235,6 +235,14 @@ def apply(conn: sqlite3.Connection, client: NotionClient, parent_page_id: str | 
     missing = tmap.missing() + pmap.missing()
     if missing:
         raise RuntimeError(f"data sources lack properties {missing}; fix the schema before continuing")
+    for kind, mapping in (("task", tmap), ("project", pmap)):
+        # A property recreated in Notion (a new id): what the pages showed in the old one is no
+        # baseline for the new one, so an empty new property is not read as the user clearing it.
+        old = loads(get_meta(conn, f"notion.props.{kind}"), {}) or {}
+        for field in sorted(f for f, pid in mapping.ids.items() if old.get(f) and old[f] != pid):
+            with tx(conn):
+                conn.execute("UPDATE notion_pages SET last_seen_props=json_remove(last_seen_props, ?)"
+                             " WHERE entity_type=? AND last_seen_props IS NOT NULL", (f"$.{field}", kind))
     save_state(conn, **{"props.task": tmap.ids, "props.project": pmap.ids})
     views = loads(get_meta(conn, "notion.views"), {}) or {}
     fresh = not views

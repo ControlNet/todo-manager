@@ -242,8 +242,20 @@ def parse_value(prop: Prop, raw: dict[str, Any] | None) -> tuple[Any, str | None
     return None, f"unexpected property type {kind}"
 
 
-def parse_page(kind: str, page: dict[str, Any], pmap: PropertyMap) -> tuple[dict[str, Any], list[str]]:
-    """Normalised values of all known properties of a page, plus mapping problems."""
+def unreadable_problem(kind: str, field: str, lang: str | None = None) -> str:
+    """One schema problem per property, however many pages show it."""
+    return (f"{kind} property {prop(kind, field).name(lang)!r} is missing in Notion or has another type"
+            " (deleted or recreated?): its values are neither imported nor written; run `todo-manager install`"
+            " to map it again")
+
+
+def parse_page(kind: str, page: dict[str, Any], pmap: PropertyMap,
+               unreadable: set[str] | None = None) -> tuple[dict[str, Any], list[str]]:
+    """Normalised values of all known properties of a page, plus mapping problems.
+
+    A property the page does not have (deleted, or recreated under a new id) or that has another
+    type reads as None but is not an empty value: its field is added to ``unreadable``, and
+    callers leave it out of import and comparison."""
     props = page.get("properties") or {}
     by_id = {v.get("id"): v for v in props.values() if isinstance(v, dict)}
     values: dict[str, Any] = {}
@@ -251,9 +263,14 @@ def parse_page(kind: str, page: dict[str, Any], pmap: PropertyMap) -> tuple[dict
     for p in PROPS[kind]:
         key = pmap.ids.get(p.field)
         raw = by_id.get(key) if key else props.get(p.name(pmap.lang))
+        if raw is None or raw.get("type", p.type) != p.type:
+            values[p.field] = None
+            if unreadable is not None:
+                unreadable.add(p.field)
+            continue
         value, problem = parse_value(p, raw)
         values[p.field] = value
-        if problem and problem != "property missing":
+        if problem:
             problems.append(problem)
     return values, problems
 

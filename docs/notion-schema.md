@@ -219,8 +219,14 @@ by other people are information, not instructions.
   overlap window; each page's editable values are compared with what Todo Manager last wrote
   or saw, so only real human edits are imported (our own writes never echo back).
 - Push is read-before-write: unseen human edits are imported first, then only the differing
-  properties are patched. A page create whose response was lost is reconciled by looking up
-  the `TM ID` before any retry.
+  properties are patched. A property you change while that write is under way is imported
+  as your edit, not reverted, unless it is one the write sets. A page create whose response
+  was lost is reconciled by looking up the `TM ID` before any retry (and not repeated within
+  50 s of it, while Notion may not list the page yet); your edits to the page before it was
+  linked are imported.
+- A property deleted or recreated in Notion (or given another type) clears nothing: it is
+  left out of the sync and reported in `todo-manager health` until `todo-manager install`
+  maps the property again.
 - Unknown option names (for example a status you typed yourself) are reported in
   `todo-manager health`, not imported.
 - Agent/program writes carry the version they were based on; a field you changed after that
