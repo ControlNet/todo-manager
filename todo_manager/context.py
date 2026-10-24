@@ -268,6 +268,10 @@ def intake(conn: sqlite3.Connection, cfg: Config, run_id: str, *, followups: lis
             task = store.get_task(conn, tid)
             if task:
                 out.append("- " + ("(due date passed) " if tid in passed else "") + task_line(task, titles))
+        if any((store.get_task(conn, tid) or {}).get("status") == "decision" for tid in followups):
+            out.append("A task in `decision` waits for the user's choice: never ask whether it was done and do not"
+                       " choose for the user; look for new material on it and update its question or next step,"
+                       " else report it `--checked`.")
         if passed:
             out.append("An event the user takes part in (meeting, review panel, seminar, workshop, presentation)"
                        " is done once it has ended: close it with its invitation or acceptance as evidence,"
