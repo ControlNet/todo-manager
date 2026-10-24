@@ -191,7 +191,8 @@ DUE_CHECK = "due:"   # followup_checks.due of a passed-due-date check: "due:YYYY
 
 def due_checks(conn: sqlite3.Connection, cfg: Config) -> list[tuple[str, str, str]]:
     """(task, check key, kind) of open tasks to look at again: a follow-up date that has come
-    (``followup``), or a due date that has passed (``due``: a task done outside the sources, a
+    (``followup``; also of a task in ``decision``, whose date the run or the user set to look at
+    it again), or a due date that has passed (``due``: a task done outside the sources, a
     meeting held or a form uploaded, is otherwise never seen again). One check per (task, date):
     it is claimed by a run and done when that run updates the task or reports it checked; a run
     that ends without either (``run done``) or never reports back (lease) leaves it due again, for
@@ -207,7 +208,7 @@ def due_checks(conn: sqlite3.Connection, cfg: Config) -> list[tuple[str, str, st
     rows = conn.execute(
         "SELECT t.id, substr(t.follow_up_date,1,10) AS due, 'followup' AS kind, f.state, f.claimed_at, f.attempts"
         " FROM tasks t LEFT JOIN followup_checks f ON f.task_id=t.id AND f.due=substr(t.follow_up_date,1,10)"
-        " WHERE t.status IN ('todo','in_progress','waiting') AND t.follow_up_date IS NOT NULL"
+        " WHERE t.status IN ('todo','in_progress','waiting','decision') AND t.follow_up_date IS NOT NULL"
         " AND substr(t.follow_up_date,1,10) <= ? AND (t.snooze_until IS NULL OR substr(t.snooze_until,1,10) <= ?)"
         + busy + " UNION ALL"
         " SELECT t.id, ? || substr(t.due_date,1,10), 'due', f.state, f.claimed_at, f.attempts"

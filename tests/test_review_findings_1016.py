@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-from todo_manager import clock, gate_intake, health, i18n, runs, store
+from todo_manager import clock, context, gate_intake, health, i18n, runs, store
 from todo_manager.hermes_assets import __file__ as assets_init
 from todo_manager.net import HttpError
 from todo_manager.sources.gmail import GmailSource
@@ -52,6 +52,28 @@ class AgentWorkDueCheckTests(Base):
         self.assertEqual(gate_intake.due_checks(self.conn, self.cfg), [])
         self.conn.execute("UPDATE delegations SET status='ended' WHERE id=?", (did,))   # the work is over
         self.assertEqual([k for _, _, k in gate_intake.due_checks(self.conn, self.cfg)], ["followup"])
+
+
+class DecisionFollowUpTests(Base):
+    """A task kept in `decision` was given a follow-up date to look at the reply again (seen
+    2026-10-23): the date never came due, as only todo/in_progress/waiting were checked."""
+
+    def test_a_decision_with_a_follow_up_date_is_looked_at_again_on_that_date(self):
+        today = clock.local_date(self.cfg.tz).isoformat()
+        store.update_task(self.conn, self.task, {"status": "decision"}, actor="agent", origin="test")
+        self.assertEqual(gate_intake.due_checks(self.conn, self.cfg), [])   # no date: nothing to look at
+        store.update_task(self.conn, self.task, {"follow_up_date": today}, actor="agent", origin="test")
+        self.assertEqual([(t, k) for t, _, k in gate_intake.due_checks(self.conn, self.cfg)],
+                         [(self.task, "followup")])
+
+    def test_the_context_says_a_decision_is_not_asked_whether_it_was_done(self):
+        today = clock.local_date(self.cfg.tz).isoformat()
+        store.update_task(self.conn, self.task, {"status": "decision", "follow_up_date": today},
+                          actor="agent", origin="test")
+        run_id = runs.start(self.conn, "intake")
+        text = context.intake(self.conn, self.cfg, run_id, followups=[self.task], digest=None, problems=[],
+                              reasons=["followups_due:1"])
+        self.assertIn("waits for the user's choice", text)
 
 
 class ProblemsOnlyWakeTests(WorkspaceCase):
