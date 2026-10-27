@@ -9,7 +9,8 @@
 * Each read re-reads an overlap window so edits (new ``edited.ts`` version) and deletions
   (a stored message missing from the window) become versioned items. Reactions and other
   non-semantic changes produce nothing. A message is reported deleted only when the listing
-  that contains it (the history window, or that thread's replies) was read in this run.
+  that contains it (the history window, or that thread's replies) was read in this run; the
+  replies of a thread not read in a run stay tracked until it is, within the overlap window.
 * Threads whose parent is older than the window: a bounded index (``thread_index_max`` threads
   active within ``thread_watch_days``) remembers the last reply read per thread, and a scan of
   older parents reads a thread again when it has a newer reply or activity inside the overlap
@@ -263,8 +264,12 @@ class SlackSource(SlackApi):
                            + [float(i.meta["ts"]) for i in items if i.kind != "deletion" and i.route == "batch"])
         horizon = now - self.watch_days * 86400
         kept = sorted(((ts, v) for ts, v in index.items() if v >= horizon), key=lambda kv: -kv[1])[:self.index_max]
+        # Replies of a thread not read in this run stay tracked (for deletions) until it is read again.
+        carried = {i: c for i, c in (state.get("window") or {}).items()
+                   if c.startswith("r:") and c[2:] not in read_threads}
         new_state = {"newest": max_ts, "last_message": last_message or None,
-                     "window": {i: c for i, c in seen.items() if float(i.split(":")[1]) >= max_ts - self.overlap * 60},
+                     "window": {i: c for i, c in {**carried, **seen}.items()
+                                if float(i.split(":")[1]) >= max_ts - self.overlap * 60},
                      "thread_index": {ts: f"{v:.6f}" for ts, v in kept}}
         for key in ("scanned_at", "scan_since", "scan_resume", "scan_pass_since"):
             new_state[key] = scan[key] if key in scan else state.get(key)
