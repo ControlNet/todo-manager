@@ -9,8 +9,8 @@ Legend for the evidence column:
 - **hermes** – automated test against the installed Hermes code (real Kanban database and
   dispatcher logic, real cron prompt scanner) in an isolated temporary `HERMES_HOME`.
 - **structural** – guaranteed by how the code is built (no code path exists for the failure).
-- **not yet verified** – depends on model judgement or real accounts; needs the real-sample
-  evaluation described at the end.
+- **not yet verified** – depends on model judgement or real accounts; the real-data review at
+  the end ("Real data") covers what one production workspace has shown so far.
 
 Run everything in parallel: `python3 -B -m tests.run --all` (`python3 -B -m tests.run` for the unit
 tests only); `python3 -B -m unittest discover -s tests -t .` is the sequential reference run.
@@ -281,29 +281,33 @@ reliability guarantee lost its test: where the interface changed, the scenario w
 Full suite: 551 tests, 0 failures (unit), plus 22 *hermes* integration tests against
 the installed Hermes code in a temporary `HERMES_HOME`.
 
-## Still to verify with real data
+## Real data (2026-10-11 to 2026-10-27)
 
-1. **Real-sample intake evaluation** (criteria 1–4, 6, 11): one sandbox run was decided by the
-   real model (above). Still to do: several runs over the remaining backlog with you reviewing
-   the created tasks *and* a sample of ignored items for misses, and feedback runs (comment
-   classification, criterion 11). Nothing is written to Notion during this evaluation.
-2. **Longer real runs** (criterion 21): Gmail, Slack and GitHub have been fetched read-only for real
-   once; incremental cursors, Gmail history expiry and Slack edits/deletions over days are so far
-   covered only by recorded-shape tests.
-3. **Delegation dry run on production Hermes** (criteria 10, 13–17): an email-draft delegation
-   on the real `todo-manager` board; nothing is sent. With `kanban.review_dispatch` on (the
-   current setting), Hermes' review worker may handle the delivery before you see it; decide
-   whether to keep it (`health` explains it).
-5. **Production switch to this version**: not done in this round (no change to the real Notion,
-   the production workspace, the existing cron jobs or Hermes' global configuration). Steps:
-   pause the owned jobs, back up/export, update the checkout, run `todo-manager status --details`,
-   then `todo-manager install` (review the plan) and resume only when ready. Schema remains v10;
-   native memory is not migrated by this reliability patch
-   (see operations.md, "Upgrading an existing workspace").
-4. **First production Notion setup and migration** require your confirmation (see the rollout
-   plan in the workspace notes). `todo-manager install` does the setup after you have created
-   the new top-level home page and added the integration to it; migrating the old system stays
-   the separate `migrate` command.
+The checklist that stood here (real-sample intake evaluation, longer real runs, a delegation on
+production Hermes, the production switch and the first Notion setup) has been done: one user's
+production workspace has run this version since 2026-10-11.
+
+- **Volume:** about 2,570 source items (Gmail 1,320, GitHub 760, Slack 500), 1,470 recorded
+  decisions, 406 intake and 48 feedback model wakes, 162 feedback items (92 property edits,
+  38 comments, 13 delegation requests, 13 direct requests, 6 box edits) and 28 delegations run
+  to the end on the real board, with `kanban.review_dispatch` on.
+- **Review:** a separate read-only reviewer job (a Hermes cron job outside this repository,
+  using the CLI and snapshots only) re-checked every new decision and task-history entry, the
+  sources they cite and a sample of ignored items from each source: a backfill on 2026-10-12,
+  then 100 bounded reviews from 2026-10-16 to 2026-10-27. Between 2026-10-11 and 2026-10-23 it
+  raised 27 distinct incidents, among them context left out of quoted mail (criterion 2),
+  follow-up checks not settled or never scheduled (criterion 4), ignored progress or
+  registration mail (criteria 3, 6), delegation hand-over and approval guards (criteria 15–17)
+  and Notion projection failures (managed-box updates Notion could not match, an invalid status
+  option, a silent webhook). Fixes are in the git history. The 13 reviews
+  after 2026-10-23 raised none.
+- **What this does not show:** no measured precision or recall over a whole mailbox or
+  workspace; attachments and images were not judged; the reviewer is itself a model working
+  on bounded samples; Gmail history expiry and Slack deletions between thread scans have not
+  occurred in production and rest on the source tests.
+
+Criteria 1–4, 6 and 11 above are therefore covered by this real-data review in addition to the
+listed unit tests; the limits above still apply.
 
 ## Reliability review after 8e177d3 (2026-10-06)
 
