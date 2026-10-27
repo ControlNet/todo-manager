@@ -108,7 +108,8 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
   time: only threads whose parent is within `slack.thread_watch_days` (30) are scanned, at most
   `slack.thread_index_max` (200) indexed per conversation; a reply in an older thread is not
   found. A message is reported deleted only when the listing that contained it was read in full
-  in that run.
+  in that run; a thread's replies stay tracked between scans while inside the overlap window, so
+  a reply deleted then is reported by the next scan that reads the thread.
 - Intake context budget: an oversize conversation is processed in segments over several runs
   (in message order); a segment not yet claimed waits while the conversation is active again.
   The first conversation of a run is always taken: a message longer than `wake.max_item_chars`

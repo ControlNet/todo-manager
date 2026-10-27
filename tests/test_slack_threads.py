@@ -171,6 +171,35 @@ class SlackThreadTests(SlackCase):
         [gone] = [i for i in result.new if i.kind == "deletion"]
         self.assertEqual((gone.external_id, gone.thread_key), (f"C1:{reply}", f"slack:C1:{parent}"))
 
+    def test_a_deletion_between_thread_scans_is_found_by_the_next_scan(self):
+        parent = self.known_old_thread()
+        reply = self.slack.post(self.now(), "numbers are in the sheet", user="U3", thread=float(parent))
+        clock.advance(minutes=61)
+        self.fetch()                                      # scanned: the reply is read and tracked
+        clock.advance(minutes=5)
+        before = len(self.slack.calls)
+        self.fetch()                                      # channel poll only: the scan is not due
+        self.assertNotIn("conversations.replies", [c[0] for c in self.slack.calls[before:]])
+        self.assertEqual(json.loads(self.cursor)["window"].get(f"C1:{reply}"), f"r:{parent}",
+                         "an unread thread keeps its tracked replies")
+        self.slack.delete(reply)
+        clock.advance(minutes=61)
+        result = self.fetch()                             # scanned again: the reply is gone
+        [gone] = [i for i in result.new if i.kind == "deletion"]
+        self.assertEqual((gone.external_id, gone.thread_key), (f"C1:{reply}", f"slack:C1:{parent}"))
+
+    def test_tracked_replies_of_an_unread_thread_leave_with_the_overlap_window(self):
+        start = self.now()
+        parent = self.slack.post(start - 3 * DAY, "who has the slides?")
+        self.slack.post(start - 3 * DAY + 600, "me", thread=float(parent))
+        reply = self.slack.post(start, "sent them", user="U3", thread=float(parent))
+        self.fetch(overlap_minutes=60)
+        self.assertIn(f"C1:{reply}", json.loads(self.cursor)["window"])
+        self.slack.post(start + 2 * 3600, "unrelated chat")   # moves the window past the reply
+        clock.advance(hours=3)
+        self.fetch(overlap_minutes=60, thread_scan_minutes=10 ** 6)
+        self.assertNotIn(f"C1:{reply}", json.loads(self.cursor)["window"], "outside the overlap window")
+
     def test_a_rate_limit_loses_nothing(self):
         parent = self.known_old_thread()
         reply = self.slack.post(self.now(), "ping on the review", thread=float(parent))
