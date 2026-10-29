@@ -40,6 +40,10 @@ agent work and recent thread.
   on the user's request only: add `--feedback <feedback id> --run <run>` or `--request <id> --said "..."`
   (commands with `--run` alone refuse agent work). The card is created at once; Hermes schedules and
   runs it.
+- Before writing the brief, look for material newer than the task: `todo-manager source search
+  "<words>" [--mine]` also finds mail not yet sorted into tasks (a request the user sent, an
+  approval, a reply). Put what it settles into the brief; never call a step unsent or unapproved
+  from the task fields alone.
 - The user wants it done later ("after 5pm", "tomorrow morning"): add
   `--start-after "YYYY-MM-DD HH:MM"` (the user's local time). The card waits parked and starts by
   itself then. Never put the waiting into the brief.

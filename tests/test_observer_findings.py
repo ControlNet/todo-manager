@@ -1,7 +1,8 @@
 """Findings of the trial observer's reviews (2026-10-11..14) that the intake prompt cannot fix.
 Synthetic workspace, mail and tasks only."""
 
-from todo_manager import clock, gate_intake, health, hermes_install, store
+from todo_manager import clock, delegation, gate_intake, health, hermes_install, store
+from todo_manager.sources.base import search_items
 from tests.flow import intake_context, run_id_of
 from tests.helpers import WorkspaceCase, mail
 from tests.test_sources import FakeHttp, gmail_message
@@ -78,3 +79,25 @@ class DeliveryMediumTests(WorkspaceCase):
         text = " ".join(hermes_install.asset("cron/feedback.md").split())
         self.assertIn("Keep the medium the user asked for", text)
         self.assertIn('"do not send" limits sending, not the format', text)
+
+
+class StaleStateInDelegationTests(WorkspaceCase):
+    """An approval reply was stored but not yet sorted into the task when the user asked for a
+    budget; the brief, built from the task alone, called the approval pending, and so did the
+    delivery."""
+
+    def test_material_not_yet_sorted_is_found_by_source_search(self):
+        self.add_items(mail("m1", "t1", "Could you approve my trip to the partner lab, 19-24 Nov?", me=True),
+                       mail("m2", "t1", "Sure, I approve your trip request.", minutes=10))
+        ids = [r["id"] for r in search_items(self.conn, "approve trip")]
+        self.assertEqual(ids, [self.item_id("m2"), self.item_id("m1")])
+
+    def test_the_brief_is_checked_against_newer_material(self):
+        text = " ".join(hermes_install.asset("cron/feedback.md").split())
+        self.assertIn("Before writing the brief, look for material newer than the task", text)
+        self.assertIn("never call a step unsent or unapproved from the task fields alone", text)
+
+    def test_the_worker_checks_a_current_state_before_stating_it(self):
+        protocol = delegation.WORKER_PROTOCOL.format(allowed="read", pause="X", language="English")
+        self.assertIn("describe the state when the card was made", protocol)
+        self.assertIn('`todo-manager source search "<words>" [--mine]`', protocol)
