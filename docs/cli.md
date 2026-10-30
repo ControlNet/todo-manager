@@ -95,6 +95,9 @@ todo-manager run done RUN_ID --checked TASK_ID_1 TASK_ID_2 --digest-reviewed
 
 These metavariables are returned business IDs, not files to create. Omit `--checked` when there
 are no unchanged follow-ups; a mutation that settled a follow-up needs no additional check.
+A settled check that leaves the task open without a follow-up date ahead moves its
+`follow_up_date` to the next look: as many days ahead as the task has been quiet (its newest
+evidence, else its creation), between `followup.recheck_min_days` and `recheck_max_days`.
 Omit `--digest-reviewed` unless that run's digest was actually reviewed. Confirmation ownership
 and current follow-up dates are validated transactionally. Any invalid confirmation rolls back
 all settlement changes. Retrying the same set is idempotent; a different set after completion

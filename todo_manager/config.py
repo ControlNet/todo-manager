@@ -124,6 +124,13 @@ DEFAULTS: dict[str, Any] = {
         "notify_profile": "",
 
     },
+    "followup": {
+        # A follow-up or passed-due check that changed no date moves the follow-up date to the next
+        # look: as many days ahead as the task has been quiet (newest evidence, else creation),
+        # within these bounds (PROPOSED values).
+        "recheck_min_days": 7,
+        "recheck_max_days": 28,
+    },
     "health": {
         "gate_idle_minutes": 60,  # a gate that has not run this long is reported
     },
