@@ -23,6 +23,7 @@ when you ask it in chat, e.g. "wait an hour of Slack silence before analysing" s
 | `feedback.max_items_per_run` | 20 | Feedback items per model run |
 | `feedback.max_attempts` | 3 | Model runs before an unapplied feedback item is marked failed (with a task comment) |
 | `kanban.max_retries` | 1 | A failed worker run parks the card for you instead of a respawn (always 1 for cards allowed an external action) |
+| `followup.recheck_min_days` / `recheck_max_days` | 7 / 28 | A follow-up or passed-due check that leaves the task open without a date ahead sets the next follow-up date as many days ahead as the task has been quiet, within these bounds; also a date you set, once it has passed and was looked at |
 | `health.gate_idle_minutes` | 60 | A gate that has not run this long is reported |
 | `daemon.debounce_seconds` / `kanban_min_interval_seconds` / `reconcile_minutes` / `webhook_silence_minutes` | 3 / 15 / 5 / 10 | Engineering defaults of the daemon: a burst is one read; board changes read cards at most every 15 s; a full Notion pass every 5 min while webhooks arrive (as the gate did: what the events miss, e.g. a body edit read within Notion's edit minute or a partly failed read, never waits longer than before); our write without a delivery for 10 min means the webhook is broken |
 

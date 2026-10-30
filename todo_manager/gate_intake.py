@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import batching, clock, context, prefs, runs
+from . import batching, clock, context, effects, prefs, runs, store
 from .config import Config
 from .db import dumps, get_meta, loads, set_meta, tx
 from .sources.base import SourceError, get_cursor, persist_fetch, record_fetch_error, retire_scopes
@@ -232,6 +232,42 @@ def due_checks(conn: sqlite3.Connection, cfg: Config) -> list[tuple[str, str, st
     return list(due.values())
 
 
+def next_look(conn: sqlite3.Connection, cfg: Config, task_id: str, *, actor: str, origin: str,
+              cause: str | None) -> str | None:
+    """The next follow-up date of an open task whose check was settled without a date ahead, or
+    the passed date would never come due again: as many days ahead as the task has been quiet
+    (its newest evidence, else its creation), within ``followup.recheck_*``. A date the user set
+    is moved too: it has passed and was looked at. Returns the date set, if any."""
+    task = store.get_task(conn, task_id)
+    today = clock.local_date(cfg.tz)
+    if (task is None or task["status"] in store.CLOSED_STATUSES
+            or (task.get("follow_up_date") or "")[:10] > today.isoformat()):
+        return None
+    quiet_since = conn.execute(
+        "SELECT MAX(s.occurred_at) FROM evidence_links e JOIN source_items s ON s.id=e.source_item_id"
+        " WHERE e.entity_type='task' AND e.entity_id=?", (task_id,)).fetchone()[0] or task["created_at"]
+    quiet = (today - clock.local_date(cfg.tz, clock.parse(quiet_since))).days
+    days = min(max(quiet, int(cfg.get("followup.recheck_min_days", 7))), int(cfg.get("followup.recheck_max_days", 28)))
+    date = (today + timedelta(days=days)).isoformat()
+    store.update_task(conn, task_id, {"follow_up_date": date}, actor=actor, origin=origin, cause_ref=cause,
+                      based_on_version=task["version"], override_human=True)
+    effects.task_push(conn, task_id)
+    return date
+
+
+def without_next_look(conn: sqlite3.Connection, cfg: Config) -> list[str]:
+    """Open tasks whose check of the current date was settled while no date ahead was set (checks
+    settled before ``next_look``): their date never comes due again."""
+    today = clock.local_date(cfg.tz).isoformat()
+    return [r["id"] for r in conn.execute(
+        "SELECT t.id FROM tasks t WHERE t.status IN ('todo','in_progress','waiting','decision')"
+        " AND (t.snooze_until IS NULL OR substr(t.snooze_until,1,10) <= ?) AND EXISTS ("
+        " SELECT 1 FROM followup_checks f WHERE f.task_id=t.id AND f.state='done' AND ("
+        "  (t.follow_up_date IS NOT NULL AND substr(t.follow_up_date,1,10) <= ? AND f.due=substr(t.follow_up_date,1,10))"
+        "  OR (t.follow_up_date IS NULL AND t.due_date IS NOT NULL AND f.due=? || substr(t.due_date,1,10))))",
+        (today, today, DUE_CHECK))]
+
+
 def due_followups(conn: sqlite3.Connection, cfg: Config) -> list[str]:
     """Tasks of ``due_checks``."""
     return [task for task, _, _ in due_checks(conn, cfg)]
@@ -280,6 +316,11 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[
         digest, digest_info = commit_digest_check(conn, cfg, commit_adapters)
         if digest_info:
             summary["digest"] = digest_info
+        with tx(conn):
+            moved = {t: next_look(conn, cfg, t, actor="program", origin="gate", cause=run_id)
+                     for t in without_next_look(conn, cfg)}
+        if moved:
+            summary["next_looks"] = moved
         checks = due_checks(conn, cfg)
         followups = [task for task, _, _ in checks]
         passed = [task for task, _, kind in checks if kind == "due"]

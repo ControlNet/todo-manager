@@ -352,11 +352,14 @@ def _link(conn: sqlite3.Connection, ctx: Ctx, entity_type: str, entity_id: str, 
     return _handle(conn, ctx, [i for i, _ in evidence], "processed")
 
 
-def _settle_followup(conn: sqlite3.Connection, ctx: Ctx, task_id: str) -> bool:
+def _settle_followup(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, task_id: str) -> bool:
     if ctx.run_id is None:
         return False
     cur = conn.execute("UPDATE followup_checks SET state='done', updated_at=? WHERE task_id=? AND run_id=?"
                        " AND state='claimed'", (clock.iso(), task_id, ctx.run_id))
+    if cur.rowcount:
+        gate_intake.next_look(conn, cfg, task_id, actor=ctx.actor, origin=ctx.origin,
+                              cause=ctx.cause or ctx.run_id)
     return cur.rowcount > 0
 
 
@@ -407,7 +410,7 @@ def task_create(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, *, title: str, 
         handled = _link(conn, ctx, "task", tid, evidence, did)
         if follow_up_of:
             store.link_tasks(conn, tid, follow_up_of, "follow_up_of")
-            _settle_followup(conn, ctx, follow_up_of)
+            _settle_followup(conn, cfg, ctx, follow_up_of)
         effects.task_push(conn, tid)
         return {"task": tid, "version": 1, "handled": handled}
 
@@ -458,7 +461,7 @@ def task_update(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, task_id: str, *
             if stopped:
                 report["agent_work_stopped"] = stopped
         report["handled"] = _link(conn, ctx, "task", task_id, evidence, did)
-        if _settle_followup(conn, ctx, task_id):
+        if _settle_followup(conn, cfg, ctx, task_id):
             report["followup"] = "checked"
         effects.task_push(conn, task_id)
         return report
@@ -644,7 +647,7 @@ def followup_checked(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, task_id: s
 
     def apply() -> dict[str, Any]:
         _decision(conn, ctx, "followup_checked", "task", task_id, [], reason)
-        return {"task": task_id, "followup": "checked" if _settle_followup(conn, ctx, task_id)
+        return {"task": task_id, "followup": "checked" if _settle_followup(conn, cfg, ctx, task_id)
                 else "nothing claimed by this run"}
 
     return perform(conn, ctx, "followup checked", {"task": task_id}, apply)
