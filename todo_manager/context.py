@@ -501,6 +501,14 @@ def feedback_item(conn: sqlite3.Connection, cfg: Config, fb: dict[str, Any], inc
     elif fb["kind"] == "delegate_request":
         out.append("The user set the task's next actor to Agent: start agent work with a concrete goal and"
                    " deliverable when the task makes it clear, otherwise clarify with one question.")
+        if p.get("done_criteria"):
+            out.append("Done when (the user's words): " + field(clip(p["done_criteria"], 500, more), more))
+        if p.get("start_after"):
+            out.append("Start after (the user's choice, pass it as --start-after): " + str(p["start_after"])[:40])
+    elif fb["kind"] == "comment" and p.get("to") == "agent":
+        out.append("Written in the Web UI to the agent working on this task: relay it to that agent work (the answer"
+                   " to its open question, else a supplement or a revision of the delivered version); when the task"
+                   " has no agent work, treat it as an ordinary comment.")
     elif fb["kind"] == "delegate_unassigned":
         out.append("The user moved the task away from Agent while agent work is active: pause, cancel or keep it"
                    " (ask only when unclear).")

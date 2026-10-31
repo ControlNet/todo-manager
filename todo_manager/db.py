@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 MIGRATIONS: dict[int, str] = {
     1: """
@@ -642,6 +642,47 @@ CREATE TABLE gmail_message_labels (
   keys TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+""",
+    # 17: feedback written in the Web UI (origin ``web``). The table is rebuilt (rows copied in
+    # order) because its CHECK lists the origins.
+    17: """
+CREATE TABLE feedback_v17 (
+  id TEXT PRIMARY KEY,
+  origin TEXT NOT NULL
+    CHECK (origin IN ('notion_comment','notion_property','notion_page','matrix','cli','kanban','web')),
+  source_id TEXT NOT NULL,
+  source_version TEXT NOT NULL DEFAULT '',
+  author TEXT,
+  author_is_user INTEGER NOT NULL DEFAULT 1,
+  received_at TEXT NOT NULL,
+  text TEXT,
+  payload TEXT NOT NULL DEFAULT '{}',
+  scope_type TEXT NOT NULL CHECK (scope_type IN ('task','project','delegation','global')),
+  scope_id TEXT,
+  kind TEXT,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','applied','clarify','ignored','superseded','failed')),
+  result TEXT,
+  applied_at TEXT,
+  rules_version INTEGER,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  claimed_run TEXT,
+  claimed_at TEXT,
+  reply_to TEXT,
+  hold_reason TEXT,
+  UNIQUE (origin, source_id, source_version)
+);
+INSERT INTO feedback_v17(id, origin, source_id, source_version, author, author_is_user, received_at, text, payload,
+  scope_type, scope_id, kind, status, result, applied_at, rules_version, attempts, last_error, claimed_run,
+  claimed_at, reply_to, hold_reason)
+  SELECT id, origin, source_id, source_version, author, author_is_user, received_at, text, payload, scope_type,
+    scope_id, kind, status, result, applied_at, rules_version, attempts, last_error, claimed_run, claimed_at,
+    reply_to, hold_reason FROM feedback ORDER BY rowid;
+DROP TABLE feedback;
+ALTER TABLE feedback_v17 RENAME TO feedback;
+CREATE INDEX feedback_status ON feedback(status);
+CREATE INDEX feedback_scope ON feedback(scope_type, scope_id);
 """,
 }
 

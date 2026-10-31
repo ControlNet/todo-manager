@@ -1,7 +1,7 @@
 """Human feedback: persisted before use, applied once, with its outcome recorded.
 
 Sources: Notion comments / property edits / page edits (the feedback job), Matrix and CLI (the
-main agent records what the user said with each change it makes, ``ops.context``). Each row keeps
+main agent records what the user said with each change it makes, ``ops.context``) and the Web UI. Each row keeps
 the original text, source id + version, author, scope and outcome.
 
 ``pending`` rows need interpretation by the model (the feedback job wakes for them);
@@ -18,7 +18,7 @@ from typing import Any
 from . import clock, effects, i18n, ids
 from .db import dumps, loads, tx
 
-ORIGINS = ("notion_comment", "notion_property", "notion_page", "matrix", "cli", "kanban")
+ORIGINS = ("notion_comment", "notion_property", "notion_page", "matrix", "cli", "kanban", "web")
 FINAL = ("applied", "clarify", "ignored", "superseded", "failed")
 
 

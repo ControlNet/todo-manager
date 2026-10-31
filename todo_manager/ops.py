@@ -186,7 +186,7 @@ def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, fe
                 raise OpError('INVALID', "a new --request needs --said with the user's words")
             said = prior['text']
         scope_type, _, scope_id = (scope or "global").partition(":")
-        fid, created = feedback.record(conn, origin=origin if origin in ("matrix", "cli") else "matrix",
+        fid, created = feedback.record(conn, origin=origin if origin in ("matrix", "cli", "web") else "matrix",
                                        source_id=request.strip(), text=said, scope_type=scope_type,
                                        scope_id=scope_id or None, kind="direct", author="user", author_is_user=True,
                                        # Audit-only registration: not queued and not yet applied.
@@ -806,7 +806,7 @@ def _feedback_record(conn: sqlite3.Connection, *, request: str, said: str, scope
     scope_type, _, scope_id = (scope or "global").partition(":")
     if scope_type not in ("task", "project", "delegation", "global"):
         raise OpError("INVALID", "--scope is task:<id>, project:<id> or global")
-    fid, created = feedback.record(conn, origin=origin if origin in ("matrix", "cli") else "matrix",
+    fid, created = feedback.record(conn, origin=origin if origin in ("matrix", "cli", "web") else "matrix",
                                    source_id=f"record:{request.strip()}", text=said, scope_type=scope_type,
                                    scope_id=scope_id or None, kind="direct", author="user", author_is_user=True)
     return {"feedback": fid, "created": created, "note": "the next feedback run interprets it"}

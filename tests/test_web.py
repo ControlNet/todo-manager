@@ -1,0 +1,325 @@
+"""The Web UI (docs/web-ui.md): its read model, its writes as the user, and the HTTP server with
+its sign-in. Kanban is ``FakeKanban`` (a test double); no Notion is involved."""
+
+import http.client
+import json
+import sqlite3
+
+from todo_manager import db, delegation, feedback, store
+from todo_manager.db import loads
+from todo_manager.kanban import FakeKanban
+from todo_manager.web import actions, server, views
+from tests.helpers import WorkspaceCase
+
+
+class WebCase(WorkspaceCase):
+    def setUp(self):
+        super().setUp()
+        self.kb = FakeKanban()
+        self.n = 0
+
+    def rid(self):
+        self.n += 1
+        return f"test-request-{self.n:04d}"
+
+    def act(self, task_id, action, **params):
+        return actions.act(self.conn, self.cfg, task_id, action, params, self.rid())
+
+    def task(self, title="Reply to Bob", **fields):
+        return store.create_task(self.conn, title, origin="intake", **fields)
+
+    def feedback_rows(self, task_id, kind):
+        return [feedback.get(self.conn, r["id"]) for r in self.conn.execute(
+            "SELECT id FROM feedback WHERE scope_type='task' AND scope_id=? AND kind=? ORDER BY rowid", (task_id, kind))]
+
+    def tick(self):
+        delegation.send_messages(self.conn, self.cfg, self.kb)
+        delegation.submit_pending(self.conn, self.cfg, self.kb)
+        delegation.sync_cards(self.conn, self.cfg, self.kb)
+
+    def in_review(self, task_id):
+        did = delegation.create(self.conn, self.cfg, task_id=task_id, title="Draft", goal="Draft only")
+        self.tick()
+        card = delegation.get(self.conn, did)["card_id"]
+        self.kb.worker_start(card)
+        self.kb.worker_review(card, "The draft is attached")
+        self.tick()
+        return did
+
+
+class ViewTests(WebCase):
+    def test_home_groups_follow_what_each_task_needs(self):
+        decide = self.task("Accept the invitation?", status="decision")
+        mine = self.task("Submit camera-ready", due_date="2026-10-04")
+        waiting = self.task("Fig 3 data", status="waiting", waiting_on="Alice", follow_up_date="2026-10-05")
+        review = self.task("Comparison table")
+        self.in_review(review)
+        snoozed = self.task("Later", snooze_until="2026-10-20")
+        home = views.home(self.conn, self.cfg)
+        ids = {g: [c["id"] for c in cards] for g, cards in home["groups"].items()}
+        self.assertEqual(ids["decide"], [decide])
+        self.assertEqual(ids["mine"], [mine])
+        self.assertEqual(ids["waiting"], [waiting])
+        self.assertEqual(ids["agent_wait"], [review])
+        self.assertNotIn(snoozed, sum(ids.values(), []))
+        self.assertEqual(home["snoozed"], 1)
+        card = home["groups"]["mine"][0]
+        self.assertTrue(card["overdue"])
+        self.assertTrue(home["groups"]["waiting"][0]["follow_up_due"])
+        self.assertEqual(home["groups"]["agent_wait"][0]["kind"], "review")
+
+    def test_detail_thread_shows_comments_replies_and_deliveries(self):
+        tid = self.task()
+        self.in_review(tid)
+        actions.comment(self.conn, self.cfg, tid, "Shorter please", "agent", self.rid())
+        fb = self.feedback_rows(tid, "comment")[0]
+        feedback.resolve(self.conn, fb["id"], "applied", {"reply": "Asked the agent for a shorter version"})
+        detail = views.task_detail(self.conn, self.cfg, tid)
+        kinds = [(e["who"], e["kind"]) for e in detail["thread"]]
+        self.assertIn(("agent", "result"), kinds)
+        self.assertIn(("me", "comment"), kinds)
+        self.assertIn(("hermes", "reply"), kinds)
+        mine = next(e for e in detail["thread"] if e["who"] == "me")
+        self.assertEqual((mine["text"], mine["to"], mine["origin"]), ("Shorter please", "agent", "web"))
+        self.assertEqual(detail["agent_work"]["status"], "review")
+        self.assertEqual(detail["agent_work"]["versions"][0]["kind"], "result")
+
+    def test_a_board_choice_shows_as_the_choice_with_the_users_note(self):
+        tid = self.task("Accept the invitation?", status="decision")
+        self.act(tid, "agent", note="Decline politely")
+        entry = next(e for e in views.thread(self.conn, tid) if e["kind"] == "delegate_request")
+        self.assertEqual((entry["choice"], entry["text"], entry["who"]), ("agent", "Decline politely", "me"))
+        other = self.task("Agree?", status="decision")
+        self.act(other, "agree")
+        entry = next(e for e in views.thread(self.conn, other) if e["kind"] == "decision_choice")
+        self.assertEqual((entry["choice"], entry["text"]), ("agree", ""))
+
+    def test_search_finds_tasks_projects_and_sources(self):
+        pid = store.create_project(self.conn, "Speech separation paper", origin="intake")
+        self.task("Camera-ready for the separation paper", project_id=pid)
+        self.task("Unrelated")
+        found = views.search(self.conn, self.cfg, "separation")
+        self.assertEqual([t["title"] for t in found["tasks"]], ["Camera-ready for the separation paper"])
+        self.assertEqual([p["id"] for p in found["projects"]], [pid])
+        self.assertEqual(views.search(self.conn, self.cfg, "  ")["tasks"], [])
+        self.assertEqual(views.search(self.conn, self.cfg, "100%_")["tasks"], [])
+
+    def test_stamp_changes_with_a_write(self):
+        tid = self.task()
+        before = views.stamp(self.conn)
+        self.act(tid, "snooze", until="2026-10-07")
+        self.assertNotEqual(before, views.stamp(self.conn))
+
+
+class ActionTests(WebCase):
+    def test_decision_choices_match_the_board(self):
+        agree = self.task("Agree?", status="decision")
+        self.act(agree, "agree")
+        self.assertEqual(store.get_task(self.conn, agree)["decision"], "agree")
+        choice = self.feedback_rows(agree, "decision_choice")
+        self.assertEqual((choice[0]["origin"], choice[0]["status"], choice[0]["payload"]["decision"]),
+                         ("web", "pending", "agree"))
+        done = self.task("Done?", status="decision")
+        self.act(done, "done")
+        t = store.get_task(self.conn, done)
+        self.assertEqual((t["status"], t["decision"]), ("done", None))
+        self.assertTrue(t["closed_reason"])
+        mine = self.task("Mine?", status="decision")
+        self.act(mine, "todo")
+        t = store.get_task(self.conn, mine)
+        self.assertEqual((t["status"], t["next_actor"]), ("todo", "me"))
+        history = store.history(self.conn, "task", mine)[-1]
+        self.assertEqual((history["actor"], history["origin"]), ("human", "web"))
+
+    def test_assign_to_agent_needs_nothing_and_carries_what_was_added(self):
+        plain = self.task("Draft the reply")
+        self.act(plain, "agent")
+        t = store.get_task(self.conn, plain)
+        self.assertEqual((t["status"], t["next_actor"]), ("todo", "agent"))
+        request = self.feedback_rows(plain, "delegate_request")
+        self.assertEqual(len(request), 1)
+        self.assertNotIn("done_criteria", request[0]["payload"])
+        decide = self.task("Accept the invitation?", status="decision")
+        self.act(decide, "agent", note="Decline politely", done_criteria="A draft I can send", start_after="")
+        request = self.feedback_rows(decide, "delegate_request")[0]
+        self.assertIn("Decline politely", request["text"])
+        self.assertEqual(request["payload"]["done_criteria"], "A draft I can send")
+        self.assertNotIn("start_after", request["payload"])
+        self.assertEqual(store.get_task(self.conn, decide)["next_actor"], "agent")
+
+    def test_agent_board_choices_settle_the_agent_work(self):
+        tid = self.task()
+        did = self.in_review(tid)
+        self.act(tid, "done")
+        self.assertEqual(store.get_task(self.conn, tid)["status"], "done")
+        kinds = [m["kind"] for m in self.conn.execute("SELECT kind FROM delegation_messages WHERE delegation_id=?",
+                                                      (did,))]
+        self.assertIn("accept", kinds)
+
+    def test_cancel_stops_agent_work(self):
+        tid = self.task()
+        did = delegation.create(self.conn, self.cfg, task_id=tid, title="Draft", goal="Draft only")
+        self.tick()
+        self.act(tid, "cancel")
+        self.assertEqual(store.get_task(self.conn, tid)["status"], "cancelled")
+        self.tick()
+        self.assertEqual(delegation.get(self.conn, did)["status"], "cancelled")
+
+    def test_time_and_waiting(self):
+        tid = self.task()
+        self.act(tid, "snooze", until="2026-10-09")
+        self.act(tid, "due", date="2026-10-12")
+        self.act(tid, "focus", on=True)
+        t = store.get_task(self.conn, tid)
+        self.assertEqual((t["snooze_until"][:10], t["due_date"][:10], t["focus"]), ("2026-10-09", "2026-10-12", 1))
+        self.act(tid, "wait", on="Alice", follow_up="2026-10-08")
+        t = store.get_task(self.conn, tid)
+        self.assertEqual((t["status"], t["next_actor"], t["waiting_on"]), ("waiting", "external", "Alice"))
+        self.act(tid, "todo")
+        self.assertEqual(store.get_task(self.conn, tid)["status"], "todo")
+        with self.assertRaises(actions.ActionError):
+            self.act(tid, "snooze", until="next week")
+        with self.assertRaises(actions.ActionError):
+            self.act(tid, "wait", on="")
+
+    def test_a_repeated_request_does_nothing_more(self):
+        tid = self.task()
+        first = actions.act(self.conn, self.cfg, tid, "agent", {}, "same-request-id")
+        again = actions.act(self.conn, self.cfg, tid, "agent", {}, "same-request-id")
+        self.assertTrue(again["duplicate"])
+        self.assertEqual(first["feedback"], again["feedback"])
+        self.assertEqual(len(self.feedback_rows(tid, "delegate_request")), 1)
+        c1 = actions.comment(self.conn, self.cfg, tid, "Hello", "hermes", "comment-id-1")
+        c2 = actions.comment(self.conn, self.cfg, tid, "Hello", "hermes", "comment-id-1")
+        self.assertEqual(c1["feedback"], c2["feedback"])
+        self.assertTrue(c2["duplicate"])
+
+    def test_comments_wait_for_the_feedback_job(self):
+        tid = self.task()
+        actions.comment(self.conn, self.cfg, tid, "Move it to next week", "hermes", self.rid())
+        row = self.feedback_rows(tid, "comment")[0]
+        self.assertEqual((row["origin"], row["status"], row["author_is_user"], row["payload"]), ("web", "pending", 1, {}))
+        for bad in [("", "hermes"), ("x", "everyone")]:
+            with self.assertRaises(actions.ActionError):
+                actions.comment(self.conn, self.cfg, tid, bad[0], bad[1], self.rid())
+
+    def test_pause_needs_agent_work(self):
+        tid = self.task()
+        with self.assertRaises(actions.ActionError):
+            self.act(tid, "pause")
+        delegation.create(self.conn, self.cfg, task_id=tid, title="Draft", goal="Draft only")
+        self.tick()
+        result = self.act(tid, "pause")
+        self.assertEqual(result["kind"], "pause")
+
+    def test_unknown_or_misplaced_actions_are_refused(self):
+        tid = self.task()
+        for action in ("agree", "explode"):
+            with self.assertRaises(actions.ActionError):
+                self.act(tid, action)
+        with self.assertRaises(actions.ActionError):
+            actions.act(self.conn, self.cfg, tid, "done", {}, "short")
+        with self.assertRaises(actions.ActionError) as caught:
+            self.act("task_missing", "done")
+        self.assertEqual(caught.exception.status, 404)
+
+
+class MigrationTests(WebCase):
+    def test_web_feedback_needs_schema_17_and_keeps_older_rows(self):
+        path = self.tmp / "old.sqlite"
+        old = sqlite3.connect(path, isolation_level=None)
+        old.row_factory = sqlite3.Row
+        db.migrate(old, target=16)
+        fid, _ = feedback.record(old, origin="cli", source_id="s", text="kept", scope_type="global")
+        with self.assertRaises(sqlite3.IntegrityError):
+            old.execute("UPDATE feedback SET origin='web' WHERE id=?", (fid,))
+        db.migrate(old)
+        self.assertEqual(db.schema_version(old), db.SCHEMA_VERSION)
+        self.assertEqual(feedback.get(old, fid)["text"], "kept")
+        feedback.record(old, origin="web", source_id="s2", text="new", scope_type="global")
+        old.close()
+
+
+class ServerTests(WebCase):
+    def setUp(self):
+        super().setUp()
+        self.site = server.WebServer(self.cfg, host="127.0.0.1", port=0)
+        self.site.start()
+        self.token = server.new_token(self.cfg.home)
+        self.tid = self.task(status="decision")
+
+    def tearDown(self):
+        self.site.stop()
+        super().tearDown()
+
+    def request(self, method, path, body=None, headers=None):
+        http_conn = http.client.HTTPConnection("127.0.0.1", self.site.port, timeout=10)
+        http_conn.request(method, path, body=body, headers=headers or {})
+        response = http_conn.getresponse()
+        data = response.read()
+        http_conn.close()
+        return response, data
+
+    def signed_in(self):
+        return {"Cookie": f"{server.COOKIE}={server.session_value(self.token)}"}
+
+    def test_sign_in_sets_a_cookie_only_for_the_token(self):
+        response, _ = self.request("GET", "/")
+        self.assertEqual((response.status, response.getheader("Location")), (303, "/login"))
+        response, _ = self.request("POST", "/login", "token=wrong", {"Content-Type": "application/x-www-form-urlencoded"})
+        self.assertEqual(response.getheader("Location"), "/login?failed=1")
+        self.assertIsNone(response.getheader("Set-Cookie"))
+        response, _ = self.request("POST", "/login", f"token={self.token}",
+                                   {"Content-Type": "application/x-www-form-urlencoded", "X-Forwarded-Proto": "https"})
+        cookie = response.getheader("Set-Cookie")
+        self.assertIn(server.session_value(self.token), cookie)
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("Secure", cookie)
+        response, data = self.request("GET", "/", headers=self.signed_in())
+        self.assertEqual(response.status, 200)
+        self.assertIn(b"<html", data)
+        server.new_token(self.cfg.home)   # a new token signs every browser out
+        response, _ = self.request("GET", "/api/home", headers=self.signed_in())
+        self.assertEqual(response.status, 401)
+
+    def test_api_reads_and_writes(self):
+        response, data = self.request("GET", "/api/home", headers=self.signed_in())
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(data)["groups"]["decide"][0]["id"], self.tid)
+        response, data = self.request("GET", f"/api/tasks/{self.tid}", headers=self.signed_in())
+        self.assertEqual(json.loads(data)["kind"], "decision")
+        response, _ = self.request("GET", "/api/tasks/task_missing", headers=self.signed_in())
+        self.assertEqual(response.status, 404)
+        body = json.dumps({"action": "done", "rid": "web-test-0001"})
+        response, data = self.request("POST", f"/api/tasks/{self.tid}/act", body, self.signed_in())
+        self.assertEqual(response.status, 403)
+        response, data = self.request("POST", f"/api/tasks/{self.tid}/act", body, {**self.signed_in(), "X-TM-Request": "1"})
+        self.assertEqual(response.status, 200, data)
+        self.assertEqual(store.get_task(self.conn, self.tid)["status"], "done")
+        response, data = self.request("POST", f"/api/tasks/{self.tid}/act", json.dumps({"action": "agree", "rid": "web-test-0002"}),
+                                      {**self.signed_in(), "X-TM-Request": "1"})
+        self.assertEqual((response.status, json.loads(data)["error"]), (400, "INVALID"))
+
+    def test_static_files_and_delivered_files_stay_inside_their_folders(self):
+        response, _ = self.request("GET", "/static/app.js", headers=self.signed_in())
+        self.assertEqual(response.status, 200)
+        response, _ = self.request("GET", "/static/../server.py")
+        self.assertEqual(response.status, 404)
+        response, _ = self.request("GET", "/static/%2e%2e/server.py")
+        self.assertEqual(response.status, 404)
+        did = delegation.create(self.conn, self.cfg, task_id=self.tid, title="Draft", goal="Draft only")
+        folder = self.cfg.home / "deliveries" / "delivery_x"
+        folder.mkdir(parents=True)
+        (folder / "draft.md").write_text("# Draft", encoding="utf-8")
+        self.conn.execute("INSERT INTO deliveries(id, delegation_id, card_id, seq, kind, summary, artifacts, received_at)"
+                          " VALUES ('delivery_x', ?, 'c', 1, 'result', 's', ?, '2026-10-05T00:00:00Z')",
+                          (did, json.dumps([{"path": "deliveries/delivery_x/draft.md"}, {"path": "config.toml"},
+                                            {"path": "../outside.md"}])))
+        response, data = self.request("GET", "/api/deliveries/delivery_x/files/0", headers=self.signed_in())
+        self.assertEqual((response.status, data, response.getheader("Content-Type")),
+                         (200, b"# Draft", "text/plain; charset=utf-8"))
+        for index in (1, 2, 3):
+            response, _ = self.request("GET", f"/api/deliveries/delivery_x/files/{index}", headers=self.signed_in())
+            self.assertEqual(response.status, 404)
+        response, data = self.request("GET", "/api/deliveries/delivery_x", headers=self.signed_in())
+        self.assertEqual(json.loads(data)["version"]["files"][0]["name"], "draft.md")

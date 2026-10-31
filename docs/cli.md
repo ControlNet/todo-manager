@@ -23,6 +23,7 @@ delegate list|show|create|message|answer|approve
 run show|done
 outbox retry ID...
 daemon run|status|enroll|token|reset-token|restart
+web token [--new]
 gmail-labels show
 ```
 
@@ -307,3 +308,9 @@ prints the token for Notion's Verify dialog; `daemon reset-token` forgets it and
 for a recreated subscription; `daemon restart`
 restarts the unit. `sync` and the feedback gate share the `sync` lock with the daemon. See
 [realtime-sync.md](realtime-sync.md).
+
+## Web UI
+
+`web token` prints the token the Web UI's sign-in page asks for, creating it on first use;
+`web token --new` replaces it, which signs every browser out. The daemon serves the page while
+`web.enabled` is true. See [web-ui.md](web-ui.md).
