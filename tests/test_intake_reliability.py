@@ -237,6 +237,18 @@ class ProjectGroupingTests(Base):
         self.assertIn("Open tasks without a project: 2", out)
         self.assertIn("--set project_id=", out)
 
+    def test_the_users_preferences_decide_which_work_gets_a_project(self):
+        """A run grouped three tasks of a research proposal into a new project although the
+        preferences allowed research projects for papers only (seen 2026-10-30)."""
+        from todo_manager import hermes_install
+        prompt = " ".join(hermes_install.asset("cron/intake.md").split())
+        self.assertIn("The user's preferences decide which work gets a project", prompt)
+        self.assertIn("however many tasks share it", prompt)
+        store.create_task(self.conn, "录制五分钟报告", origin="intake")
+        self.add_items(mail("m1", "t1", "Please send the poster thumbnail"))
+        clock.advance(minutes=61)
+        self.assertIn("if the user's preferences allow a project for that work", self.gate())
+
 
 class AmbiguityTests(Base):
     """An unclear item that could cost the user becomes a decision with one question. How many
