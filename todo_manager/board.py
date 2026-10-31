@@ -96,9 +96,10 @@ def apply(conn: sqlite3.Connection, task_id: str, edit: Edit, changed: dict[str,
             payload = loads(creation['payload'], {})
             payload['values'] = {**payload.get('values', {}), **edit.local,
                                  **({'decision': choice} if choice else {})}
+            text = _with_request(creation['text'] or '', payload, request if choice == 'agent' else None) or None
             replacement, _ = feedback.record(
                 conn, origin='notion_page', source_id=creation['source_id'],
-                source_version='creation-choice:' + fid, text=creation['text'],
+                source_version='creation-choice:' + fid, text=text,
                 scope_type='task', scope_id=task_id, kind='new_task', payload=payload,
                 author=author, author_is_user=True)
             feedback.supersede(conn, [creation['id']], 'creation choice changed', by=replacement)

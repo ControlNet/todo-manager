@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import json
 import mimetypes
+import re
 import secrets
 import sqlite3
 import threading
@@ -40,8 +41,10 @@ COOKIE_DAYS = 90
 MAX_BODY = 64 * 1024
 WRITE_HEADER = "X-TM-Request"
 LOCK_TIMEOUT_SECONDS = 30
-TEXT_TYPES = (".md", ".txt", ".json", ".csv", ".tsv", ".py", ".tex", ".bib", ".yaml", ".yml", ".toml", ".log",
-              ".html", ".js", ".css", ".sh")
+# Delivered files shown inline; anything else is plain text when it decodes as UTF-8, else a
+# download. Never a page or a script on this origin (the worker wrote them).
+INLINE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+                ".webp": "image/webp", ".pdf": "application/pdf"}
 SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
                                " frame-ancestors 'none'; base-uri 'none'",
@@ -137,7 +140,7 @@ class WebServer:
                 return self.read(lambda c: views.search(c, cfg, (q.get("q") or "")[:200]))
             case ["deliveries", delivery_id]:
                 return self.found(self.read(lambda c: views.delivery(c, delivery_id)))
-            case ["deliveries", delivery_id, "files", index] if index.isdigit():
+            case ["deliveries", delivery_id, "files", index] if re.fullmatch(r"[0-9]{1,6}", index):
                 path_ = self.found(self.read(lambda c: views.delivery_file(c, cfg, delivery_id, int(index))))
                 raise Reply(200, path_)
         raise Reply(404, {"error": "NOT_FOUND"})
@@ -188,11 +191,17 @@ class WebServer:
                 headers = dict(headers or {})
                 if isinstance(body, Path):
                     data = body.read_bytes()
-                    kind = mimetypes.guess_type(body.name)[0] or "application/octet-stream"
-                    if body.suffix.lower() in TEXT_TYPES:
-                        kind = "text/plain; charset=utf-8"   # shown as text, never run as a page
+                    kind = INLINE_TYPES.get(body.suffix.lower())
+                    if kind is None:
+                        try:
+                            data.decode("utf-8")
+                            kind = "text/plain; charset=utf-8"
+                        except UnicodeDecodeError:
+                            kind = "application/octet-stream"
+                            headers.setdefault("Content-Disposition", "attachment")
                     headers.setdefault("Content-Type", kind)
                     headers.setdefault("Cache-Control", "no-cache")
+                    headers.setdefault("Content-Security-Policy", "sandbox; default-src 'none'")
                 elif isinstance(body, bytes):
                     data = body
                 elif body is None:
@@ -237,6 +246,8 @@ class WebServer:
                     self.send(exc.status, {"error": exc.code, "message": str(exc)})
                 except sqlite3.Error as exc:
                     self.send(500, {"error": "STATE", "message": f"{type(exc).__name__}: {str(exc)[:200]}"})
+                except Exception as exc:  # noqa: BLE001 - answer instead of dropping the connection
+                    self.send(500, {"error": "INTERNAL", "message": type(exc).__name__})
 
             def do_GET(self) -> None:  # noqa: N802 - http.server API
                 url = urlsplit(self.path)

@@ -94,6 +94,14 @@ class ViewTests(WebCase):
         entry = next(e for e in views.thread(self.conn, other) if e["kind"] == "decision_choice")
         self.assertEqual((entry["choice"], entry["text"]), ("agree", ""))
 
+    def test_taking_over_from_the_agent_is_not_shown_as_a_choice(self):
+        tid = self.task()
+        delegation.create(self.conn, self.cfg, task_id=tid, title="Draft", goal="Draft only")
+        self.tick()
+        self.act(tid, "wait", on="Alice")
+        self.assertTrue(self.feedback_rows(tid, "delegate_unassigned"))
+        self.assertFalse([e for e in views.thread(self.conn, tid) if e.get("choice")])
+
     def test_search_finds_tasks_projects_and_sources(self):
         pid = store.create_project(self.conn, "Speech separation paper", origin="intake")
         self.task("Camera-ready for the separation paper", project_id=pid)
@@ -146,6 +154,16 @@ class ActionTests(WebCase):
         self.assertEqual(request["payload"]["done_criteria"], "A draft I can send")
         self.assertNotIn("start_after", request["payload"])
         self.assertEqual(store.get_task(self.conn, decide)["next_actor"], "agent")
+
+    def test_a_hand_over_note_reaches_a_task_still_being_read(self):
+        tid = self.task("Created in Notion", status="decision")
+        feedback.record(self.conn, origin="notion_page", source_id="page-1", text="Body", scope_type="task",
+                        scope_id=tid, kind="new_task", author_is_user=True, payload={"values": {}})
+        self.act(tid, "agent", note="Keep it short", done_criteria="One paragraph")
+        row = [r for r in self.feedback_rows(tid, "new_task") if r["status"] == "pending"][0]
+        self.assertIn("Keep it short", row["text"])
+        self.assertEqual((row["payload"]["done_criteria"], row["payload"]["values"]["decision"]),
+                         ("One paragraph", "agent"))
 
     def test_agent_board_choices_settle_the_agent_work(self):
         tid = self.task()
@@ -321,5 +339,18 @@ class ServerTests(WebCase):
         for index in (1, 2, 3):
             response, _ = self.request("GET", f"/api/deliveries/delivery_x/files/{index}", headers=self.signed_in())
             self.assertEqual(response.status, 404)
+        (folder / "page.htm").write_text("<script>alert(1)</script>", encoding="utf-8")
+        (folder / "blob.bin").write_bytes(b"\xff\xfe\x00")
+        self.conn.execute("UPDATE deliveries SET artifacts=? WHERE id='delivery_x'",
+                          (json.dumps([{"path": "deliveries/delivery_x/page.htm"},
+                                       {"path": "deliveries/delivery_x/blob.bin"}]),))
+        response, _ = self.request("GET", "/api/deliveries/delivery_x/files/0", headers=self.signed_in())
+        self.assertEqual(response.getheader("Content-Type"), "text/plain; charset=utf-8")
+        self.assertIn("sandbox", response.getheader("Content-Security-Policy"))
+        response, _ = self.request("GET", "/api/deliveries/delivery_x/files/1", headers=self.signed_in())
+        self.assertEqual((response.getheader("Content-Type"), response.getheader("Content-Disposition")),
+                         ("application/octet-stream", "attachment"))
+        response, _ = self.request("GET", "/api/deliveries/delivery_x/files/%C2%B2", headers=self.signed_in())
+        self.assertEqual(response.status, 404)
         response, data = self.request("GET", "/api/deliveries/delivery_x", headers=self.signed_in())
-        self.assertEqual(json.loads(data)["version"]["files"][0]["name"], "draft.md")
+        self.assertEqual(json.loads(data)["version"]["files"][0]["name"], "page.htm")

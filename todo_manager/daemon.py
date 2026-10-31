@@ -771,8 +771,11 @@ def run(cfg: Config) -> int:
     site = None
     if cfg.get("web.enabled", False):
         from .web.server import WebServer
-        site = WebServer(cfg)
-        site.start()
+        try:
+            site = WebServer(cfg)
+            site.start()
+        except OSError as exc:   # the page is off; the sync goes on
+            print(f"todo-manager daemon: web UI not started: {exc}", file=sys.stderr, flush=True)
     print(f"todo-manager daemon: {cfg.home}, webhook "
           f"{'on 127.0.0.1:' + str(receiver.port) if receiver else 'off'}, web UI "
           f"{'on ' + str(cfg.get('web.host')) + ':' + str(site.port) if site else 'off'}", file=sys.stderr, flush=True)

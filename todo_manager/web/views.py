@@ -18,7 +18,8 @@ from ..config import Config
 from ..db import get_meta, loads
 
 GROUPS = ("decide", "mine", "agent_wait", "agent_run", "waiting")
-CHOICE_KINDS = ("decision_choice", "delegate_request", "delegate_unassigned")
+CHOICE_KINDS = ("decision_choice", "delegate_request")
+DERIVED_KINDS = ("delegate_unassigned",)   # the program's wording only: shown by its reply
 THREAD_LIMIT = 60
 HISTORY_LIMIT = 30
 SEARCH_LIMIT = 20
@@ -216,7 +217,9 @@ def thread(conn: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:
             result = result if isinstance(result, dict) else {}
             payload = loads(r["payload"], {}) or {}
             text, choice = r["text"], None
-            if r["kind"] in CHOICE_KINDS:
+            if r["kind"] in DERIVED_KINDS:
+                text = None
+            elif r["kind"] in CHOICE_KINDS:
                 # The first line is the program's wording of the choice; the rest is the user's note.
                 choice = payload.get("decision") or "agent"
                 text = (text or "").partition("\n")[2]

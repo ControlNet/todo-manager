@@ -835,8 +835,10 @@
       S.more = false;
       S.dialog = null;
       await load();
+      return true;
     } catch (e) {
       if (e.message !== "login") toast(t("failed", { e: e.message }), true);
+      return false;
     } finally {
       S.sending = false;
       render();
@@ -903,7 +905,7 @@
     const action = does.split(":")[1];
     const line = (flow.line || "").trim();
     if (line && action !== "agent" && !(await send(line, "hermes", c.id))) return;
-    await act(action, params || {}, c.id);
+    if (!(await act(action, params || {}, c.id))) return;
     const labels = { agree: "agree", decline: "decline", agent: "agentTitle", todo: "setTodo", done: "markDone", cancel: "cancel" };
     flow.done.push({ title: c.title, choice: t(labels[action]) });
     flow.i += 1;
