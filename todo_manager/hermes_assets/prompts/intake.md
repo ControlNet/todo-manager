@@ -102,7 +102,9 @@ every NEW item one outcome:
 - Commit digest: per project `todo-manager project update <project> --run <run> --set recent_activity="..."`,
   then add `--digest-reviewed` to the final settlement. Never one task per commit.
 - Projects: a project is one ongoing piece of work the user owns (a paper or submission, a grant,
-  a system or lab service, a hiring round), not a kind of chore. When you create or update a task,
+  a system or lab service, a hiring round), not a kind of chore. The user's preferences decide which
+  work gets a project: where they say which kinds do, make or use a project only for those, however
+  many tasks share it; this rule covers what they leave open. When you create or update a task,
   the search you make for duplicates also shows its related open tasks: if it and at least two
   of them belong to one such piece of work, put them all in its project (an existing one first,
   `todo-manager project list`; else `todo-manager project create --run <run> --title "..." --set icon=<name>:<color>
