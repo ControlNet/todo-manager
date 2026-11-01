@@ -112,6 +112,19 @@ class ViewTests(WebCase):
         self.assertEqual(views.search(self.conn, self.cfg, "  ")["tasks"], [])
         self.assertEqual(views.search(self.conn, self.cfg, "100%_")["tasks"], [])
 
+    def test_search_shows_a_mail_thread_once_not_every_reply(self):
+        from todo_manager.sources.base import FetchResult, Item, persist_fetch
+        replies = [Item(source="gmail", account="primary", external_id=f"m{i}", conversation_key="gmail:primary:t1",
+                        thread_key="gmail:primary:t1", occurred_at=f"2026-10-0{i}T00:00:00+00:00", author="a@example.org",
+                        author_is_me=False, title="Re: Proposals due soon", body="reply", meta={}) for i in (1, 2, 3)]
+        other = Item(source="gmail", account="primary", external_id="m9", conversation_key="gmail:primary:t2",
+                     thread_key="gmail:primary:t2", occurred_at="2026-10-05T00:00:00+00:00", author="b@example.org",
+                     author_is_me=False, title="Your proposal", body="proposal", meta={})
+        persist_fetch(self.conn, "gmail", FetchResult(scope="test", items=[*replies, other], cursor="c1"))
+        found = views.search(self.conn, self.cfg, "proposal")["sources"]
+        self.assertEqual([(s["title"], s["at"][:10]) for s in found],
+                         [("Your proposal", "2026-10-05"), ("Re: Proposals due soon", "2026-10-03")])
+
     def test_a_built_in_notion_icon_gives_its_colour_not_its_name(self):
         builtin = store.create_project(self.conn, "Lab servers", origin="intake")
         emoji = store.create_project(self.conn, "Paper", origin="intake")

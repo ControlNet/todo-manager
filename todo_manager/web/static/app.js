@@ -35,7 +35,7 @@
       who_me: "我", who_hermes: "H", who_agent: "A", who_other: "他",
       b_decision: "需要你决定", b_chosen: "已选择「{c}」，等 Hermes 处理", b_answer: "Agent 在问", b_review: "Agent 交付了 v{n}",
       b_running: "Agent 在做", b_preparing: "已交给 Agent，准备中", b_waiting: "在等 {who}", b_closed: "已关闭",
-      b_change: "变化", b_paused: "已暂停",
+      b_change: "变化", b_paused: "已暂停", ps_active: "进行中", ps_paused: "已暂停", ps_done: "已完成", ps_archived: "已归档",
       agentTitle: "交给 Agent", agentNote: "补充说明", agentStart: "什么时候开始", agentDone: "做到什么算完成",
       optional: "可不填", now: "现在", tonight: "今晚 20:00", tomorrowAm: "明天 09:00", pickTime: "选时间…",
       snoozeTitle: "延后到", waitTitle: "等别人", waitWho: "等谁", followWhen: "什么时候跟进", followTitle: "下次跟进",
@@ -83,7 +83,7 @@
       who_me: "Me", who_hermes: "H", who_agent: "A", who_other: "?",
       b_decision: "Needs your decision", b_chosen: "Chose “{c}”; Hermes will handle it", b_answer: "The agent asks",
       b_review: "The agent delivered v{n}", b_running: "The agent is working", b_preparing: "Assigned to the agent, starting",
-      b_waiting: "Waiting on {who}", b_closed: "Closed", b_change: "What changed", b_paused: "Paused",
+      b_waiting: "Waiting on {who}", b_closed: "Closed", b_change: "What changed", b_paused: "Paused", ps_active: "Active", ps_paused: "Paused", ps_done: "Done", ps_archived: "Archived",
       agentTitle: "Assign to Agent", agentNote: "Anything to add", agentStart: "Start", agentDone: "Done when",
       optional: "Optional", now: "Now", tonight: "Tonight 20:00", tomorrowAm: "Tomorrow 09:00", pickTime: "Pick a time…",
       snoozeTitle: "Snooze until", waitTitle: "Wait for someone", waitWho: "Waiting on", followWhen: "Follow up",
@@ -224,7 +224,7 @@
   }
   async function loadDetail(id) {
     const data = await api("/api/tasks/" + encodeURIComponent(id));
-    if (S.detailId !== id) { S.more = false; S.draft = ""; S.target = defaultTarget(data); }
+    if (S.detailId !== id) { S.more = false; S.bannerOpen = false; S.draft = ""; S.target = defaultTarget(data); }
     S.detail = data; S.detailId = id;
   }
   const defaultTarget = (d) => (["answer", "review", "running"].includes(d.kind) && d.agent_work ? "agent" : "hermes");
@@ -282,9 +282,9 @@
   };
   const pdot = (p) => (p ? `<span class="pdot" style="background:${projectColor(p)}"></span>` : "");
 
-  function metaOf(c) {
+  function metaOf(c, view) {
     const bits = [];
-    if (c.project) bits.push(esc(c.project.title));
+    if (c.project && view !== "p:" + c.project.id) bits.push(esc(c.project.title));
     if (c.kind === "waiting" && c.waiting_on) bits.push(esc(c.waiting_on));
     if (c.next_step && c.kind !== "waiting") bits.push(esc(c.next_step));
     return bits.join(" · ");
@@ -301,7 +301,7 @@
     const badge = badgeOf(c);
     return `<button class="row${on}" data-go="${esc(taskHash(c.id, view))}">
       <span class="main"><span class="title">${esc(c.title)}</span>
-      <span class="meta">${pdot(c.project)}${metaOf(c) || esc(kindLabel(c))}</span></span>
+      <span class="meta">${view === "p:" + (c.project && c.project.id) ? "" : pdot(c.project)}${metaOf(c, view) || esc(kindLabel(c))}</span></span>
       ${badge ? `<span class="pill ${badge[1]}">${esc(badge[0])}</span>` : ""}</button>`;
   }
 
@@ -478,6 +478,8 @@
     ];
     return groups.map(([title, items]) => [title, items.filter(Boolean)]).filter(([, items]) => items.length);
   }
+  const bannerText = (text) => (text.length > 160 && !S.bannerOpen
+    ? `<span class="v clamp" data-unclamp="1">${esc(text)}</span>` : `<span class="v">${esc(text)}</span>`);
   function button(item, cls) {
     const [label, does, tone] = item;
     return `<button class="${cls || "btn"}${tone ? " " + tone : ""}" data-do="${esc(does)}">${esc(t(label))}</button>`;
@@ -576,9 +578,9 @@
           ${d.notion_url ? `<a href="${esc(d.notion_url)}" target="_blank" rel="noopener noreferrer">Notion ↗</a>` : ""}</div>`}
         <h2>${esc(d.title)}</h2>
         ${compact ? "" : `<div class="props">${props}</div>`}
-        ${b ? `<section class="banner ${b[0]}"><span class="k">${esc(b[1])}</span>${b[2] ? `<span class="v">${esc(b[2])}</span>` : ""}
+        ${b ? `<section class="banner ${b[0]}"><span class="k">${esc(b[1])}</span>${b[2] ? bannerText(b[2]) : ""}
           ${b[3] ? `<a href="${esc(b[3])}">${esc(t("viewDelivery"))} →</a>` : ""}</section>` : ""}
-        ${d.change_note && !compact && !["answer", "review", "running"].includes(d.kind) ? `<section class="banner accent"><span class="k">${esc(t("b_change"))}</span><span class="v">${esc(d.change_note)}</span></section>` : ""}
+        ${d.change_note && !compact && !["answer", "review", "running", "closed"].includes(d.kind) ? `<section class="banner accent"><span class="k">${esc(t("b_change"))}</span>${bannerText(d.change_note)}</section>` : ""}
         <div class="actions">${actionsFor(d).map((a) => button(a)).join("")}
           <button class="btn ghost" data-more="1" aria-expanded="${S.more}">${esc(t("more"))}</button></div>
         ${more}
@@ -611,7 +613,7 @@
     const field = (label, text) => (text ? `<div class="block"><span class="label">${esc(label)}</span><span class="v">${esc(text)}</span></div>` : "");
     return `<section class="page span" id="page-scroll">
       <div class="crumb"><a href="#/projects">${esc(t("projects"))}</a><span>›</span></div>
-      <div class="view-head"><h1>${esc(p.icon ? p.icon + " " : "")}${esc(p.title)}</h1><span class="sub">${esc(p.status)}</span></div>
+      <div class="view-head"><h1>${esc(p.icon ? p.icon + " " : "")}${esc(p.title)}</h1><span class="sub">${esc(t("ps_" + p.status))}</span></div>
       <div class="split"><div class="card"><span class="label">${esc(t("openTasks"))} · ${open.length}</span>
           ${open.map((c) => row(c, "p:" + p.id)).join("") || `<span class="muted">${esc(t("empty"))}</span>`}
           ${closed.length ? `<details><summary>${esc(t("closedTasks"))} · ${closed.length}</summary>${closed.slice(0, 50).map((c) => row(c, "p:" + p.id)).join("")}</details>` : ""}</div>
@@ -996,7 +998,7 @@
   // ------------------------------------------------------------------ events
   document.addEventListener("click", async (e) => {
     const el = e.target.closest("[data-go],[data-do],[data-more],[data-target],[data-send],[data-back],[data-expand],[data-palette]," +
-      "[data-close],[data-opt],[data-dlg-ok],[data-dlg-clear],[data-project],[data-decide],[data-preview],[data-theme-cycle]");
+      "[data-close],[data-opt],[data-dlg-ok],[data-dlg-clear],[data-project],[data-decide],[data-preview],[data-theme-cycle],[data-unclamp]");
     if (!el) return;
     if (el.dataset.close !== undefined) {
       if (el.classList.contains("scrim") && e.target !== el) return;   // a click inside the modal
@@ -1012,6 +1014,7 @@
     }
     if (el.dataset.do !== undefined) return doIt(el.dataset.do);
     if (el.dataset.more !== undefined) { S.more = !S.more; return render(); }
+    if (el.dataset.unclamp !== undefined) { S.bannerOpen = true; return render(); }
     if (el.dataset.target !== undefined) { S.target = el.dataset.target; return render(); }
     if (el.dataset.back !== undefined) {
       const r = route();

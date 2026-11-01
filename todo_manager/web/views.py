@@ -341,12 +341,18 @@ def search(conn: sqlite3.Connection, cfg: Config, query: str) -> dict[str, Any]:
     found_projects = [projects[r["id"]] for r in conn.execute(
         f"SELECT id FROM projects WHERE {sql} ORDER BY updated_at DESC LIMIT ?", (*params, SEARCH_LIMIT))]
     sql, params = where(["s.title", "s.excerpt", "s.author"])
-    items = []
+    items, threads = [], set()
     for r in conn.execute(
-            f"SELECT s.id, s.source, s.title, s.excerpt, s.author, s.occurred_at, s.url,"
+            f"SELECT s.id, s.source, s.title, s.excerpt, s.author, s.occurred_at, s.url, s.thread_key,"
             f" (SELECT e.entity_id FROM evidence_links e WHERE e.source_item_id=s.id AND e.entity_type='task' LIMIT 1)"
             f" AS task_id FROM source_items s WHERE {sql} ORDER BY s.occurred_at DESC LIMIT ?",
-            (*params, SEARCH_LIMIT)):
+            (*params, SEARCH_LIMIT * 4)):
+        if len(items) == SEARCH_LIMIT:
+            break
+        if r["thread_key"] in threads:
+            continue   # a thread once, by its latest message
+        if r["thread_key"]:
+            threads.add(r["thread_key"])
         items.append({"id": r["id"], "source": r["source"], "title": r["title"] or r["excerpt"], "author": r["author"],
                       "at": r["occurred_at"], "url": r["url"], "task": r["task_id"]})
     return {"tasks": [card(conn, t, projects, sources, on) for t in tasks], "projects": found_projects,

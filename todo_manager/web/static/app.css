@@ -136,7 +136,7 @@ a { color: var(--accent-ink); }
 .crumb a:hover { color: var(--ink); }
 .detail h2 { margin: 0; font-size: 26px; font-weight: 800; line-height: 1.3; letter-spacing: -0.01em; }
 .props { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
-.prop { border-radius: 16px; background: var(--sunken); padding: 10px 12px; display: flex; flex-direction: column; gap: 2px;
+.prop { min-width: 0; border-radius: 16px; background: var(--sunken); padding: 10px 12px; display: flex; flex-direction: column; gap: 2px;
   border: 0; text-align: left; }
 button.prop:hover { box-shadow: inset 0 0 0 1px var(--border-strong); }
 .prop .k { font-size: 12px; font-weight: 600; color: var(--muted); }
@@ -149,6 +149,7 @@ button.prop:hover { box-shadow: inset 0 0 0 1px var(--border-strong); }
 .banner.ok { background: var(--ok-soft); color: var(--ok-ink); }
 .banner .k { font-size: 12px; font-weight: 800; opacity: 0.85; }
 .banner .v { white-space: pre-wrap; overflow-wrap: anywhere; }
+.banner .v.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
 .banner a { color: inherit; font-weight: 700; }
 .label { font-size: 12px; font-weight: 800; color: var(--muted); letter-spacing: 0.02em; }
 .block { display: flex; flex-direction: column; gap: 6px; }
@@ -271,6 +272,7 @@ details > summary { cursor: pointer; color: var(--muted); font-weight: 600; font
   background: transparent; text-align: left; width: 100%; }
 .palette .hit.on, .palette .hit:hover { background: var(--sunken); }
 .palette .hit .t { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.palette .hit .muted { flex: 0 0 auto; white-space: nowrap; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--hero-bg); color: var(--hero-fg);
   padding: 12px 18px; border-radius: 14px; box-shadow: var(--shadow); z-index: 60; font-weight: 600; max-width: calc(100vw - 32px); }
 .toast.error { background: var(--danger-ink); color: #fff; }
