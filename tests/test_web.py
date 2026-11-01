@@ -112,6 +112,19 @@ class ViewTests(WebCase):
         self.assertEqual(views.search(self.conn, self.cfg, "  ")["tasks"], [])
         self.assertEqual(views.search(self.conn, self.cfg, "100%_")["tasks"], [])
 
+    def test_a_built_in_notion_icon_gives_its_colour_not_its_name(self):
+        builtin = store.create_project(self.conn, "Lab servers", origin="intake")
+        emoji = store.create_project(self.conn, "Paper", origin="intake")
+        store.update_project(self.conn, builtin, {"icon": "server:blue"}, actor="agent", origin="intake")
+        store.update_project(self.conn, emoji, {"icon": "🎙️"}, actor="agent", origin="intake")
+        self.task("Swap the slot", project_id=builtin)
+        listed = {p["id"]: p for p in views.project_list(self.conn, self.cfg)}
+        self.assertEqual((listed[builtin]["icon"], listed[builtin]["color"]), (None, "blue"))
+        self.assertEqual((listed[emoji]["icon"], listed[emoji]["color"]), ("🎙️", None))
+        self.assertEqual(views.project_detail(self.conn, self.cfg, builtin)["color"], "blue")
+        card = views.task_list(self.conn, self.cfg)[0]
+        self.assertEqual((card["project"]["icon"], card["project"]["color"]), (None, "blue"))
+
     def test_stamp_changes_with_a_write(self):
         tid = self.task()
         before = views.stamp(self.conn)

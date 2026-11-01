@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from .. import clock, delegation, store
+from .. import clock, delegation, project_icons, store
 from ..config import Config
 from ..db import get_meta, loads
 
@@ -57,9 +57,20 @@ def kind_of(conn: sqlite3.Connection, task: dict[str, Any]) -> tuple[str, str | 
     return "todo", label
 
 
+def _look(icon: str | None) -> dict[str, Any]:
+    """A built-in Notion icon (``name:color``) shows as its colour; an emoji as itself; others not."""
+    value = project_icons.normalize(icon)
+    name, sep, color = (value or "").partition(":")
+    if sep and name not in ("custom_emoji", "external"):
+        return {"icon": None, "color": color}
+    if value is None or sep or value == "file":
+        return {"icon": None, "color": None}
+    return {"icon": value, "color": None}
+
+
 def _projects(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
-    return {p["id"]: {"id": p["id"], "title": p["title"], "icon": p.get("icon"), "status": p["status"]}
-            for p in (dict(r) for r in conn.execute("SELECT id, title, icon, status FROM projects"))}
+    return {p["id"]: {"id": p["id"], "title": p["title"], "status": p["status"]} | _look(p["icon"])
+            for p in conn.execute("SELECT id, title, icon, status FROM projects")}
 
 
 def _sources(conn: sqlite3.Connection, task_ids: list[str]) -> dict[str, str]:
@@ -161,8 +172,8 @@ def project_list(conn: sqlite3.Connection, cfg: Config, *, cards: list[dict[str,
                 per["waiting"] += 1
     out = []
     for p in store.list_projects(conn):
-        out.append({k: p.get(k) for k in ("id", "title", "icon", "status", "domain", "goal", "next_step",
-                                          "blockers", "recent_activity", "updated_at")}
+        out.append({k: p.get(k) for k in ("id", "title", "status", "domain", "goal", "next_step",
+                                          "blockers", "recent_activity", "updated_at")} | _look(p.get("icon"))
                    | {"counts": counts.get(p["id"], {"open": 0, "decision": 0, "agent": 0, "waiting": 0})})
     order = {"active": 0, "paused": 1}
     return sorted(out, key=lambda p: (order.get(p["status"], 2), -p["counts"]["open"], p["title"]))
@@ -173,8 +184,8 @@ def project_detail(conn: sqlite3.Connection, cfg: Config, project_id: str) -> di
     if p is None:
         return None
     repos = [dict(r) for r in conn.execute("SELECT * FROM project_repos WHERE project_id=?", (project_id,))]
-    return {**{k: p.get(k) for k in ("id", "title", "icon", "status", "domain", "goal", "next_step", "blockers",
-                                     "recent_activity", "updated_at")},
+    return {**{k: p.get(k) for k in ("id", "title", "status", "domain", "goal", "next_step", "blockers",
+                                     "recent_activity", "updated_at")}, **_look(p.get("icon")),
             "repos": [r["repo"] for r in repos],
             "tasks": task_list(conn, cfg, project=project_id, closed=True)[:200]}
 

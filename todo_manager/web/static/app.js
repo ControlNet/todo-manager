@@ -271,12 +271,16 @@
   const kindLabel = (c) => (c.kind === "closed" ? t(c.status === "done" ? "k_done" : "k_cancelled") : t("k_" + c.kind));
   const kindTone = (c) => ({ decision: "warn", answer: "accent", review: "accent", running: "", waiting: "", todo: "", closed: "ok" })[c.kind] || "";
   const PROJECT_COLORS = ["#5B47E0", "#E0457B", "#0E9F6E", "#D97706", "#2F80ED", "#9B51E0", "#00A3A3", "#C2410C"];
-  const projectColor = (id) => {
+  // The colours of Notion's built-in icons, so a project looks the same as on its Notion page.
+  const NOTION_COLORS = { blue: "#337EA9", green: "#448361", red: "#D44C47", purple: "#9065B0", orange: "#D9730D",
+    yellow: "#CB912F", brown: "#9F6B53", pink: "#C14C8A", gray: "#787774", lightgray: "#A3A29E" };
+  const projectColor = (p) => {
+    if (NOTION_COLORS[p.color]) return NOTION_COLORS[p.color];
     let h = 0;
-    for (const ch of String(id || "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    for (const ch of String(p.id || "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
     return PROJECT_COLORS[h % PROJECT_COLORS.length];
   };
-  const pdot = (p) => (p ? `<span class="pdot" style="background:${projectColor(p.id)}"></span>` : "");
+  const pdot = (p) => (p ? `<span class="pdot" style="background:${projectColor(p)}"></span>` : "");
 
   function metaOf(c) {
     const bits = [];
@@ -352,7 +356,7 @@
         <span class="label">${esc(t(i.key))}</span><span class="count">${i.count === "" ? "" : esc(i.count)}</span></button>`).join("")}</div>
       ${projects.length ? `<div class="nav-group"><button class="nav-head${cur === "projects" ? " on" : ""}" data-go="#/projects">${esc(t("projects"))} ›</button>
         ${projects.map((p) => `<button class="nav-item${cur === "p:" + p.id ? " on" : ""}" data-go="#/tasks/p:${esc(p.id)}">
-          <span class="pdot" style="background:${projectColor(p.id)}"></span><span class="label">${esc(p.title)}</span>
+          <span class="pdot" style="background:${projectColor(p)}"></span><span class="label">${esc(p.title)}</span>
           <span class="count">${p.counts.open || ""}</span></button>`).join("")}</div>` : ""}
       <div class="nav-foot">${freshness()}
         <button class="linkish" data-theme-cycle="1">${esc(t("theme"))}: ${esc(t(themeName()))}</button>
@@ -593,7 +597,7 @@
     const list = S.projects || [];
     return `<section class="page span" id="page-scroll"><div class="view-head"><h1>${esc(t("projects"))}</h1></div>
       <div class="tiles">${list.map((p) => `<button class="ptile" data-go="#/projects/${esc(p.id)}">
-        <span class="name"><span class="icon" style="color:${projectColor(p.id)}">${esc(p.icon || "■")}</span>${esc(p.title)}</span>
+        <span class="name"><span class="icon" style="color:${projectColor(p)}">${esc(p.icon || "■")}</span>${esc(p.title)}</span>
         <span class="next">${esc(p.next_step || p.goal || "")}</span>
         <span class="nums"><span><b>${p.counts.open}</b>${esc(t("nOpen"))}</span>
           ${p.counts.decision ? `<span><b>${p.counts.decision}</b>${esc(t("nDecide"))}</span>` : ""}
@@ -822,6 +826,11 @@
         el.focus();
         if (sel !== null && sel !== undefined && el.setSelectionRange) try { el.setSelectionRange(sel, sel); } catch (e) { /* not text */ }
       }
+    }
+    // Beside the list (tablet and desktop) a task is always open: the first one, not an empty pane.
+    if (r.page === "tasks" && !r.task && window.matchMedia("(min-width: 768px)").matches) {
+      const first = [...$app.querySelectorAll("[data-go]")].find((el) => /^#\/tasks\/[^/]+\/./.test(el.dataset.go));
+      if (first) location.replace(first.dataset.go);
     }
   }
 

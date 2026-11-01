@@ -356,6 +356,18 @@ class BoardTests(DaemonCase):
         self.assertEqual(len(reads), 2)
 
 
+    def test_a_web_ui_write_reaches_notion_and_its_comment_wakes_the_feedback_job(self):
+        from todo_manager.web import actions
+        page = db.open_existing(self.cfg.db_path)   # the Web UI's own connection, as in its server thread
+        self.addCleanup(page.close)
+        actions.act(page, self.cfg, self.task, "due", {"date": "2026-11-20"}, "web-request-0001")
+        actions.comment(page, self.cfg, self.task, "下周再提醒我", "hermes", "web-request-0002")
+        self.loop(1)
+        self.assertEqual(self.fake.prop(self.page, "截止日期"), "2026-11-20")
+        self.assertTrue(self.d.maybe_wake())
+        self.assertEqual(len(self.wakes), 1)
+
+
 class WakeTests(DaemonCase):
     def test_no_feedback_no_wake(self):
         self.assertFalse(self.d.maybe_wake())
