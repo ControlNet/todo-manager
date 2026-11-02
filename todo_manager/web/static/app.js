@@ -412,7 +412,7 @@
         + `<div class="stats"><button class="stat warn" data-go="#/decide"><b>${g.decide.length}</b><span>${esc(t("g_decide"))}</span></button>
            <button class="stat" data-go="#/tasks/agent"><b>${g.agent_wait.length}</b><span>${esc(t("g_agent_wait"))}</span></button>
            <div class="stat"><b>${S.home.done_week}</b><span>${esc(t("doneWeek"))}</span></div></div>`
-        + tile("decide", g.decide, view, 5) + tile("mine", g.mine, view, 8) + tile("agent_wait", g.agent_wait, view, 5)
+        + tile("decide", g.decide, view, 5) + tile("agent_wait", g.agent_wait, view, 5) + tile("mine", g.mine, view, 8)
         + tile("agent_run", g.agent_run, view, 4) + tile("waiting", waitDue.length ? waitDue : [], view, 5);
     } else if (view === "decide") {
       body = (g.decide.length ? `<button class="btn primary" data-go="#/decide">${esc(t("decideOneByOne"))}</button>` : "")
@@ -424,7 +424,7 @@
     } else if (S.list && S.listKey === view) {
       const by = {};
       for (const c of S.list) (by[c.kind] = by[c.kind] || []).push(c);
-      const order = [["decision", "decide"], ["todo", "mine"], ["answer", "agent_wait"], ["review", "agent_wait"],
+      const order = [["decision", "decide"], ["answer", "agent_wait"], ["review", "agent_wait"], ["todo", "mine"],
         ["running", "agent_run"], ["waiting", "waiting"]];
       const seen = new Set();
       for (const [kind, key] of order) {

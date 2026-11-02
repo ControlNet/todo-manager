@@ -18,7 +18,7 @@ from .. import clock, delegation, project_icons, store
 from ..config import Config
 from ..db import get_meta, loads
 
-GROUPS = ("decide", "mine", "agent_wait", "agent_run", "waiting")
+GROUPS = ("decide", "agent_wait", "mine", "agent_run", "waiting")
 CHOICE_KINDS = ("decision_choice", "delegate_request")
 DERIVED_KINDS = ("delegate_unassigned",)   # the program's wording only: shown by its reply
 THREAD_LIMIT = 60
