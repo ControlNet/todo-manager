@@ -153,6 +153,19 @@ class ViewTests(WebCase):
         self.assertEqual(look(views.project_detail(self.conn, self.cfg, builtin)), (None, image, "blue"))
         self.assertEqual(look(views.task_list(self.conn, self.cfg)[0]["project"]), (None, image, "blue"))
 
+    def test_a_comment_hermes_has_taken_shows_as_being_handled(self):
+        tid = self.task()
+        actions.comment(self.conn, self.cfg, tid, "Move it to Friday", "hermes", self.rid())
+        fid = self.feedback_rows(tid, "comment")[0]["id"]
+        status = lambda: next(e for e in views.task_detail(self.conn, self.cfg, tid)["thread"] if e["who"] == "me")["status"]
+        self.assertEqual(status(), "pending")
+        before = views.stamp(self.conn)
+        feedback.claim(self.conn, "run_1", [fid])
+        self.assertEqual(status(), "processing")
+        self.assertNotEqual(before, views.stamp(self.conn))   # the page refreshes to show it
+        clock.advance(minutes=self.cfg.get("feedback.stale_claim_minutes") + 1)   # a run that died: the next one takes it
+        self.assertEqual(status(), "pending")
+
     def test_stamp_changes_with_a_write(self):
         tid = self.task()
         before = views.stamp(self.conn)

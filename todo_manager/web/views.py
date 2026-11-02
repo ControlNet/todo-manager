@@ -226,10 +226,12 @@ def _handover_question(conn: sqlite3.Connection, task_id: str) -> str | None:
     return (loads(row["result"], {}) or {}).get("reply") if row else None
 
 
-def thread(conn: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:
+def thread(conn: sqlite3.Connection, task_id: str, stale_minutes: float = 60) -> list[dict[str, Any]]:
     """The task's conversation: what the user said (any surface) with the replies, the program's
-    own comments, and what the agent asked or delivered."""
+    own comments, and what the agent asked or delivered. What a feedback run has taken (and not
+    held longer than ``stale_minutes``, after which the next run takes it) shows as processing."""
     entries: list[dict[str, Any]] = []
+    taken_since = clock.iso(clock.now() - timedelta(minutes=stale_minutes))
     dids = [d["id"] for d in delegation.for_task(conn, task_id)]
     scopes = [("task", task_id)] + [("delegation", d) for d in dids]
     for scope_type, scope_id in scopes:
@@ -248,7 +250,9 @@ def thread(conn: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:
             if text or choice:
                 entries.append({"at": r["received_at"], "who": "me" if r["author_is_user"] else "other",
                                 "origin": r["origin"], "kind": r["kind"], "text": text, "choice": choice,
-                                "status": r["status"], "id": r["id"], "to": payload.get("to")})
+                                "status": "processing" if r["status"] == "pending" and r["claimed_run"]
+                                and (r["claimed_at"] or "") >= taken_since else r["status"],
+                                "id": r["id"], "to": payload.get("to")})
             if result.get("reply"):
                 entries.append({"at": r["applied_at"] or r["received_at"], "who": "hermes", "kind": "reply",
                                 "text": result["reply"], "reply_to": r["id"]})
@@ -287,7 +291,8 @@ def task_detail(conn: sqlite3.Connection, cfg: Config, task_id: str) -> dict[str
             "agent_work": _delegation_view(conn, current) if current else None,
             "agent_question": (_delegation_view(conn, current)["question"] if current else None)
             or (_handover_question(conn, task_id) if base["agent"] == "blocked" else None),
-            "sources": evidence, "thread": thread(conn, task_id), "pending_feedback": pending,
+            "sources": evidence, "thread": thread(conn, task_id, cfg.get("feedback.stale_claim_minutes", 60)),
+            "pending_feedback": pending,
             "notes": notes["notes_text"] if notes else None,
             "notion_url": delegation._notion_url(conn, task),
             "links": [{"task": l["other_task_id"], "kind": l["kind"],
@@ -376,6 +381,7 @@ def stamp(conn: sqlite3.Connection) -> str:
         "SELECT (SELECT MAX(updated_at) FROM tasks), (SELECT MAX(updated_at) FROM projects),"
         " (SELECT MAX(updated_at) FROM delegations), (SELECT MAX(received_at) FROM deliveries),"
         " (SELECT MAX(COALESCE(applied_at, received_at)) FROM feedback), (SELECT COUNT(*) FROM feedback),"
+        " (SELECT MAX(claimed_at) FROM feedback),"
         " (SELECT MAX(created_at) FROM outbox WHERE op='comment'), (SELECT MAX(last_success_at) FROM cursors)"
     ).fetchone()
     return "|".join(str(v or "") for v in row)

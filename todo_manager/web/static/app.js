@@ -31,7 +31,7 @@
       noDiscussion: "还没有讨论", history: "改动记录", links: "相关任务",
       toHermes: "给 Hermes", toAgentTarget: "给 Agent", send: "发送",
       ph_hermes: "告诉 Hermes 要怎么处理…", ph_answer: "回答 Agent 的问题…", ph_review: "要改什么…", ph_running: "补充给 Agent…",
-      st_pending: "等待处理", st_applied: "已处理", st_clarify: "需要你补充", st_ignored: "没有执行", st_failed: "处理失败",
+      st_pending: "等待处理", st_processing: "Hermes 处理中", st_applied: "已处理", st_clarify: "需要你补充", st_ignored: "没有执行", st_failed: "处理失败",
       who_me: "我", who_hermes: "H", who_agent: "A", who_other: "他",
       b_decision: "需要你决定", b_chosen: "已选择「{c}」，等 Hermes 处理", b_answer: "Agent 在问", b_review: "Agent 交付了 v{n}",
       b_running: "Agent 在做", b_preparing: "已交给 Agent，准备中", b_waiting: "在等 {who}", b_closed: "已关闭",
@@ -79,7 +79,7 @@
       toHermes: "To Hermes", toAgentTarget: "To Agent", send: "Send",
       ph_hermes: "Tell Hermes what to do…", ph_answer: "Answer the agent…", ph_review: "What should change…",
       ph_running: "Add info for the agent…",
-      st_pending: "Waiting", st_applied: "Done", st_clarify: "Needs more from you", st_ignored: "Not done", st_failed: "Failed",
+      st_pending: "Waiting", st_processing: "Hermes on it", st_applied: "Done", st_clarify: "Needs more from you", st_ignored: "Not done", st_failed: "Failed",
       who_me: "Me", who_hermes: "H", who_agent: "A", who_other: "?",
       b_decision: "Needs your decision", b_chosen: "Chose “{c}”; Hermes will handle it", b_answer: "The agent asks",
       b_review: "The agent delivered v{n}", b_running: "The agent is working", b_preparing: "Assigned to the agent, starting",
@@ -519,7 +519,7 @@
       const cls = m.who === "me" ? "me" : m.who === "agent" ? "agent" : "";
       let info = stamp(m.at);
       if (m.who === "me" && m.status) {
-        const tone = { pending: "accent", applied: "ok", clarify: "warn" }[m.status] || "";
+        const tone = { processing: "accent", applied: "ok", clarify: "warn" }[m.status] || "";
         info = `<span class="pill ${tone}">${esc(t("st_" + m.status))}</span><span>${esc(info)}</span>`;
       } else {
         info = `<span>${esc(info)}</span>`;
