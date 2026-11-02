@@ -66,6 +66,7 @@ HOME_MARKER = "home.marker"
 # yet: when it was sent (or became uncertain) and the values it sent.
 CREATE_PENDING = "notion.create_pending:"
 CREATE_VISIBLE_SECONDS = 50   # an empty TM ID lookup this soon after such a create is not definite
+WAIT_FOR_DISCUSSION_ATTEMPTS = 5   # a reply waits this many attempts (a minute apart) for the comment it answers
 
 
 @dataclass
@@ -1031,6 +1032,8 @@ class NotionSync:
             page_id = row["page_id"]
         else:
             raise outbox.Permanent("comment without target")
+        if p.get("under") and not p.get("discussion_id") and not reconcile:
+            self._find_discussion(item, page_id)
         marker = 'TM effect ' + _h(p.get('key') or item['id'])[:24]
         text = p['text'] + '\n\n' + marker
         if reconcile:
@@ -1068,6 +1071,23 @@ class NotionSync:
                 raise
         self._record_bot_comment(c, page_id, p.get("key"))
         return {"comment_id": c["id"]}
+
+    def _find_discussion(self, item: dict[str, Any], page_id: str) -> None:
+        """The discussion of the bot comment ``under`` names: waited for while that comment is still
+        on its way (a few attempts), else the reply starts a discussion of its own."""
+        p = item["payload"]
+        row = self.conn.execute("SELECT discussion_id FROM notion_comments WHERE ref=? AND page_id=? AND is_bot=1",
+                                (p["under"], page_id)).fetchone()
+        if row and row["discussion_id"]:
+            p["discussion_id"] = row["discussion_id"]
+            with tx(self.conn):
+                self.conn.execute('UPDATE outbox SET payload=? WHERE id=?', (dumps(p), item['id']))
+            return
+        on_its_way = self.conn.execute(
+            "SELECT 1 FROM outbox WHERE target='notion' AND dedupe_key=? AND status IN ('pending','failed','uncertain',"
+            "'in_flight')", ("comment:" + p["under"],)).fetchone()
+        if on_its_way and item["attempts"] < WAIT_FOR_DISCUSSION_ATTEMPTS:
+            raise outbox.Retryable("the comment it answers is not on the page yet", retry_after=60)
 
     def _record_bot_comment(self, c: dict[str, Any], page_id: str, key: str | None) -> None:
         with tx(self.conn):

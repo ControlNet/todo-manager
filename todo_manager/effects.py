@@ -65,11 +65,14 @@ def delivery_push(conn: sqlite3.Connection, delivery_id: str, task_id: str) -> s
                           dedupe_key=f"delivery:{delivery_id}", payload={"delivery_id": delivery_id})
 
 
-def task_comment(conn: sqlite3.Connection, task_id: str, key: str, text: str, discussion_id: str | None = None) -> None:
-    """A short bot comment on the task page. ``key`` identifies the logical comment once."""
+def task_comment(conn: sqlite3.Connection, task_id: str, key: str, text: str, discussion_id: str | None = None,
+                 under: str | None = None) -> None:
+    """A short bot comment on the task page. ``key`` identifies the logical comment once;
+    ``under`` is the key of an earlier bot comment whose discussion it goes in."""
     outbox.enqueue(conn, target="notion", op="comment", entity_type="task", entity_id=task_id,
                    dedupe_key=f"comment:{key}", payload={"task_id": task_id, "text": text,
-                                                          "discussion_id": discussion_id, "key": key, "comment_protocol": 1})
+                                                          "discussion_id": discussion_id, "key": key, "comment_protocol": 1,
+                                                          **({"under": under} if under else {})})
 
 
 def page_comment(conn: sqlite3.Connection, page_id: str, key: str, text: str, discussion_id: str | None = None) -> None:

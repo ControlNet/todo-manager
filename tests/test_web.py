@@ -81,6 +81,7 @@ class ViewTests(WebCase):
         self.assertIn(("hermes", "reply"), kinds)
         mine = next(e for e in detail["thread"] if e["who"] == "me")
         self.assertEqual((mine["text"], mine["to"], mine["origin"]), ("Shorter please", "agent", "web"))
+        self.assertFalse([e for e in detail["thread"] if e["kind"] == "note"], "its copy on the Notion page is not shown again")
         self.assertEqual(detail["agent_work"]["status"], "review")
         self.assertEqual(detail["agent_work"]["versions"][0]["kind"], "result")
 

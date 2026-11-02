@@ -5,6 +5,7 @@ import json
 from datetime import timedelta
 
 from todo_manager import clock, delegation, feedback, gate_feedback, ops, store
+from todo_manager.web import actions
 from todo_manager.kanban import FakeKanban
 from todo_manager.net import HttpError
 from todo_manager.ops import OpError
@@ -302,6 +303,41 @@ class DirectAndReplyTests(GateCase):
         self.gate()
         [reply] = [c for c in self.bot_comments() if c["rich_text"][0]["plain_text"].startswith("要取消这个任务吗？\n\nTM effect ")]
         self.assertEqual(reply["parent"]["page_id"], self.sync.state.home_page_id)
+
+    def test_a_web_comment_is_on_the_notion_page_with_the_reply_in_its_discussion(self):
+        self.gate()
+        actions.comment(self.conn, self.cfg, self.task, "截止前一天提醒我", "hermes", "web-rid-0001")
+        actions.comment(self.conn, self.cfg, self.task, "只要摘要", "agent", "web-rid-0002")
+        _, woke, run_id = self.gate()
+        self.assertTrue(woke)
+        texts = self.bot_texts(self.page)
+        self.assertTrue(any(t.startswith("我（Web）：截止前一天提醒我\n") for t in texts), texts)
+        self.assertTrue(any(t.startswith("我（Web）→ Agent：只要摘要\n") for t in texts), texts)
+        claimed = feedback.claimed_by(self.conn, run_id)
+        self.assertEqual([f["origin"] for f in claimed], ["web", "web"], "the mirrored comments are not read back")
+        mirror = next(c for c in self.bot_comments() if "截止前一天提醒我" in c["rich_text"][0]["plain_text"])
+        self.decide(run_id, [{"feedback": claimed[0]["id"], "outcome": "applied", "reply": "好的，会提前一天提醒。"},
+                             {"feedback": claimed[1]["id"], "outcome": "applied", "reply": "已转告 Agent。"}])
+        self.gate()
+        reply = next(c for c in self.bot_comments() if c["rich_text"][0]["plain_text"].startswith("好的，会提前一天提醒。"))
+        self.assertEqual(reply["discussion_id"], mirror["discussion_id"])
+
+    def test_a_reply_to_a_web_comment_waits_for_the_comment_to_reach_notion(self):
+        self.gate()
+        actions.comment(self.conn, self.cfg, self.task, "截止前一天提醒我", "hermes", "web-rid-0003")
+        later = clock.iso(clock.now() + timedelta(minutes=10))   # say Notion refused it for a while
+        self.conn.execute("UPDATE outbox SET next_attempt_at=? WHERE dedupe_key LIKE 'comment:web:%'", (later,))
+        _, woke, run_id = self.gate()
+        [fb] = feedback.claimed_by(self.conn, run_id)
+        self.decide(run_id, [{"feedback": fb["id"], "outcome": "applied", "reply": "好的，会提前一天提醒。"}])
+        self.gate()
+        self.assertFalse([c for c in self.bot_comments() if "提前一天提醒" in c["rich_text"][0]["plain_text"]],
+                         "not before the comment it answers")
+        clock.advance(minutes=11)
+        self.gate()
+        mirror = next(c for c in self.bot_comments() if "截止前一天提醒我" in c["rich_text"][0]["plain_text"])
+        reply = next(c for c in self.bot_comments() if c["rich_text"][0]["plain_text"].startswith("好的，会提前一天提醒。"))
+        self.assertEqual(reply["discussion_id"], mirror["discussion_id"])
 
     def test_a_reply_to_a_page_edit_is_a_new_comment_on_the_task_page(self):
         original = self.fake.markdown[self.page]

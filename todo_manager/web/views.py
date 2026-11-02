@@ -259,8 +259,8 @@ def thread(conn: sqlite3.Connection, task_id: str, stale_minutes: float = 60) ->
     for r in conn.execute("SELECT payload, created_at FROM outbox WHERE target='notion' AND op='comment'"
                           " AND entity_type='task' AND entity_id=? ORDER BY created_at", (task_id,)):
         p = loads(r["payload"], {})
-        if str(p.get("key") or "").startswith(("reply:", "dlv:")):
-            continue   # shown with the feedback it answers / as the agent's delivery
+        if str(p.get("key") or "").startswith(("reply:", "dlv:", "web:")):
+            continue   # shown with the feedback it answers / as the agent's delivery / as the user's comment
         entries.append({"at": r["created_at"], "who": "hermes", "kind": "note", "text": p.get("text") or ""})
     for did in dids:
         for v in delegation.deliveries(conn, did):

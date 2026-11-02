@@ -21,6 +21,7 @@ from typing import Any
 from .. import board, delegation, effects, feedback, ops, store
 from ..config import Config
 from ..db import get_meta, tx
+from ..i18n import t
 from . import views
 
 RID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
@@ -164,14 +165,20 @@ def _pause(conn: sqlite3.Connection, cfg: Config, task: dict[str, Any], action: 
 
 
 def comment(conn: sqlite3.Connection, cfg: Config, task_id: str, text: Any, to: Any, rid: Any) -> dict[str, Any]:
-    """What the user wrote on a task: for the feedback job (to Hermes, or meant for the agent)."""
+    """What the user wrote on a task: for the feedback job (to Hermes, or meant for the agent).
+    A copy goes to the task's Notion page (as the integration, marked as the user's), and the
+    reply is posted in its discussion (``ops._queue_reply``)."""
     rid = check_rid(rid)
     if store.get_task(conn, task_id) is None:
         raise ActionError("NOT_FOUND", f"no task {task_id}", 404)
     body = _text(text, "text", required=True)
     if to not in ("hermes", "agent"):
         raise ActionError("INVALID", "to is hermes or agent")
-    fid, created = feedback.record(conn, origin="web", source_id=f"comment:{task_id}", source_version=rid, text=body,
-                                   scope_type="task", scope_id=task_id, kind="comment", author="user",
-                                   author_is_user=True, payload={"to": to} if to == "agent" else {})
+    with tx(conn):
+        fid, created = feedback.record(conn, origin="web", source_id=f"comment:{task_id}", source_version=rid,
+                                       text=body, scope_type="task", scope_id=task_id, kind="comment", author="user",
+                                       author_is_user=True, payload={"to": to} if to == "agent" else {})
+        if created:
+            said = t("web.comment_to_agent" if to == "agent" else "web.comment", _lang(conn, cfg), text=body)
+            effects.task_comment(conn, task_id, f"web:{fid}", said)
     return {"feedback": fid, "duplicate": not created}

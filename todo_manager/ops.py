@@ -683,9 +683,9 @@ def digest_done(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, reason: str | N
 # --------------------------------------------------------------------------- feedback
 
 def _queue_reply(conn: sqlite3.Connection, fb: dict[str, Any], text: str) -> None:
-    """The reply goes to the comment thread it answers, else to the task's page; when there is
-    no such page (chat/CLI feedback without a task, or the page is in the trash) to the Notion
-    home page."""
+    """The reply goes to the comment thread it answers (for a Web UI comment, the discussion of
+    its copy on the page), else to the task's page; when there is no such page (chat/CLI feedback
+    without a task, or the page is in the trash) to the Notion home page."""
     key = f"reply:{fb['id']}"
     comment = fb["origin"] == "notion_comment"
     thread = fb.get("reply_to") if comment else None
@@ -694,7 +694,8 @@ def _queue_reply(conn: sqlite3.Connection, fb: dict[str, Any], text: str) -> Non
         trashed = conn.execute("SELECT 1 FROM notion_pages WHERE entity_type='task' AND entity_id=? AND trashed=1",
                                (task,)).fetchone()
         if not trashed:
-            effects.task_comment(conn, task, key, text, discussion_id=thread)
+            effects.task_comment(conn, task, key, text, discussion_id=thread,
+                                 under=f"web:{fb['id']}" if fb["origin"] == "web" and fb["kind"] == "comment" else None)
             return
     elif comment and (fb["payload"] or {}).get("page_id"):
         effects.page_comment(conn, fb["payload"]["page_id"], key, text, discussion_id=thread)

@@ -79,7 +79,7 @@ def due(conn: sqlite3.Connection, target: str | None = None, limit: int = 50) ->
     sql += (" AND NOT EXISTS (SELECT 1 FROM outbox older WHERE older.target=outbox.target "
             "AND older.op=outbox.op AND older.entity_id=outbox.entity_id AND older.rowid<outbox.rowid "
             "AND outbox.op IN ('push_task','push_project') "
-            "AND older.status IN ('uncertain','in_flight')) ORDER BY created_at LIMIT ?")
+            "AND older.status IN ('uncertain','in_flight')) ORDER BY created_at, rowid LIMIT ?")   # in the order queued
     params.append(limit)
     rows = conn.execute(sql, params).fetchall()
     return [{**dict(r), "payload": loads(r["payload"], {})} for r in rows]

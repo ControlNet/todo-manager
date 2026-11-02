@@ -209,6 +209,8 @@
   "setup.view_update": "Update the filter of the linked view \"{name}\" ({what})",
   "sync.closed_in_notion": "You marked the task as {status} in Notion",
   "web.closed": "You marked the task as {status} in the Web UI",
+  "web.comment": "Me (Web): {text}",
+  "web.comment_to_agent": "Me (Web) → Agent: {text}",
   "sync.comment_held_resolved": "⏸️ Your comment on \"{title}\" was not handled: its discussion was resolved before Todo Manager got to it. Reopen the discussion to have it handled, or delete the comment to drop it: {text}",
   "sync.restored": "Page was restored from the Notion trash",
   "sync.set_to_agent": "You set \"{field}\" to Agent",
