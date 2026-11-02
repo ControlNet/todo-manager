@@ -201,6 +201,28 @@ def _open_task_matter(conn: sqlite3.Connection, item: Item) -> bool:
 
 
 _GITHUB_MATTER = re.compile(r"^github:([^/\s]+)/([^#\s]+)#(\d+)$")
+_GITHUB_LINK = re.compile(r"github\.com/([\w.-]+)/([\w.-]+)/(?:pull|issues)/(\d+)", re.IGNORECASE)
+_GITHUB_REF = re.compile(r"(?<![\w./-])([\w.-]+)/([\w.-]+)#(\d+)(?!\d)")
+WATCH_MAX = 200   # matters watched for open tasks, most recently updated tasks first
+
+
+def open_task_matters(conn: sqlite3.Connection) -> list[str]:
+    """GitHub PRs and issues open tasks wait for: matters of their evidence, and the links and
+    ``owner/repo#N`` references in their text (a task from a chat that waits for a PR)."""
+    found: dict[str, None] = {}
+    for r in conn.execute(
+            "SELECT s.thread_key FROM evidence_links e JOIN source_items s ON s.id=e.source_item_id"
+            " JOIN tasks t ON t.id=e.entity_id WHERE e.entity_type='task' AND t.status NOT IN ('done','cancelled')"
+            " AND s.thread_key LIKE 'github:%#%' ORDER BY t.updated_at DESC"):
+        if _GITHUB_MATTER.match(r[0]):
+            found[r[0].lower()] = None
+    for r in conn.execute(
+            "SELECT title || ' ' || COALESCE(next_step,'') || ' ' || COALESCE(done_criteria,'') || ' '"
+            " || COALESCE(waiting_on,'') || ' ' || COALESCE(summary,'') FROM tasks"
+            " WHERE status NOT IN ('done','cancelled') ORDER BY updated_at DESC"):
+        for owner, repo, number in [*_GITHUB_LINK.findall(r[0]), *_GITHUB_REF.findall(r[0])]:
+            found[f"github:{owner}/{repo.removesuffix('.git')}#{number}".lower()] = None
+    return list(found)[:WATCH_MAX]
 
 
 def _open_task_names(conn: sqlite3.Connection, matter: str) -> bool:

@@ -38,7 +38,7 @@ def prepare(entry: str, conn: Any, cfg: config.Config) -> str:
     if entry == "intake":
         from .gate_intake import run_gate
         from .sources.registry import commit_sources, conversation_sources
-        return run_gate(conn, cfg, conversation_sources(cfg), commit_sources(cfg))[0]
+        return run_gate(conn, cfg, conversation_sources(cfg, conn), commit_sources(cfg))[0]
     from .gate_feedback import run_gate as run_feedback
     return run_feedback(conn, cfg, notion=wiring.notion_sync(conn, cfg), kanban=wiring.kanban(cfg))[0]
 

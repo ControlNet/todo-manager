@@ -6,10 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Config, read_env_secret
-from .github import CommitSource, GitHubClient, GitHubNotificationSource, GitHubRepoSource
+from .github import CommitSource, GitHubClient, GitHubNotificationSource, GitHubRepoSource, GitHubWatchSource
 
 
-def conversation_sources(cfg: Config) -> list[Any]:
+def conversation_sources(cfg: Config, conn: Any = None) -> list[Any]:
+    """With ``conn``, also the state of GitHub PRs and issues open tasks wait for."""
     adapters: list[Any] = []
     ident = cfg.section("identity")
     email = cfg.section("email")
@@ -32,6 +33,12 @@ def conversation_sources(cfg: Config) -> list[Any]:
             adapters.append(GitHubNotificationSource(client, set(gh.get("repos", [])), ident.get("github_logins", []),
                                                      bot_logins=gh.get("bot_logins", []),
                                                      overlap_minutes=int(gh.get("overlap_minutes", 30))))
+        if conn is not None and gh.get("watch_open_tasks", True):
+            from .base import open_task_matters
+            adapters.append(GitHubWatchSource(client, set(gh.get("repos", [])), ident.get("github_logins", []),
+                                              bot_logins=gh.get("bot_logins", []),
+                                              matters=lambda: open_task_matters(conn),
+                                              watch_minutes=int(gh.get("watch_minutes", 15))))
     slack = cfg.section("slack")
     if slack.get("enabled"):
         from .slack import SlackDirectory, SlackSource

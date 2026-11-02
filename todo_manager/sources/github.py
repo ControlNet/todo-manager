@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -516,6 +517,85 @@ class GitHubNotificationSource:
                 unavailable.append(f"{what}: {status}")
             return None
         return data if isinstance(data, dict) else None
+
+
+class GitHubWatchSource:
+    """The state of PRs and issues open tasks wait for, read directly.
+
+    GitHub does not notify the actor of their own action, and the notifications ``since`` filter
+    skips a thread whose only change is the user's own merge or close, although the thread's shown
+    ``updated_at`` moves. So the user's own merge or close is otherwise never seen. Every
+    ``watch_minutes`` each watched matter outside tracked repos (those read their events) costs one
+    GET; a change of state (merged, closed with its reason, reopened), or a closed state when the
+    matter is first watched, is an ``if_open_task`` event. Its id carries the state and its time,
+    so the same change is stored once even when another task watches the matter later."""
+
+    name = "github"
+    scope = "watched"
+
+    def __init__(self, client: GitHubClient, tracked_repos: set[str], my_logins: list[str],
+                 bot_logins: list[str] | None = None, *, matters: Callable[[], list[str]],
+                 watch_minutes: int = 15):
+        self.client = client
+        self.tracked = {r.lower() for r in tracked_repos}
+        self.me = {m.lower() for m in my_logins}
+        self.bots = {b.lower() for b in bot_logins or []}
+        self.matters = matters
+        self.watch_minutes = watch_minutes
+
+    def due(self, cursor_row: dict[str, Any] | None) -> bool:
+        last = clock.parse((cursor_row or {}).get("last_success_at"))
+        return last is None or clock.now() - last >= timedelta(minutes=self.watch_minutes)
+
+    def fetch(self, cursor: str | None, last_success_at: str | None = None) -> FetchResult:
+        previous = (json.loads(cursor) if cursor and cursor.startswith("{") else {}).get("states") or {}
+        states: dict[str, str] = {}
+        items: list[Item] = []
+        for key in self.matters():
+            m = re.fullmatch(r"github:([^/\s]+/[^#\s]+)#(\d+)", key)
+            if not m or m.group(1).lower() in self.tracked:
+                continue
+            repo, number = m.group(1).lower(), int(m.group(2))
+            try:
+                thread = self.client.get(f"repos/{repo}/issues/{number}")
+            except SourceError as exc:
+                if "HTTP 404" in str(exc) or "HTTP 410" in str(exc):   # deleted or no longer accessible
+                    if key in previous:
+                        states[key] = previous[key]
+                    continue
+                raise
+            if not isinstance(thread, dict):
+                continue
+            pr = thread.get("pull_request")
+            merged_at = (pr or {}).get("merged_at")
+            state = "merged" if merged_at else thread.get("state") or "?"
+            states[key] = state
+            if state == previous.get(key) or (key not in previous and state == "open"):
+                continue
+            items.append(self._item(repo, number, key, thread, state, pr is not None, merged_at))
+        return FetchResult(scope=self.scope, items=items, cursor=json.dumps({"states": states}, sort_keys=True),
+                           meta={"watched": len(states), "poll_interval_minutes": self.watch_minutes})
+
+    def _item(self, repo: str, number: int, key: str, thread: dict[str, Any], state: str, is_pr: bool,
+              merged_at: str | None) -> Item:
+        reason = thread.get("state_reason") if not is_pr else None
+        at = merged_at or (thread.get("closed_at") if state != "open" else None) or thread.get("updated_at") \
+            or clock.iso()
+        actor = (thread.get("closed_by") or {}) if state != "open" else {}
+        login = actor.get("login") or ""
+        opener = (thread.get("user") or {}).get("login") or "?"
+        what = {"merged": "merged", "closed": f"closed ({reason})" if reason else "closed",
+                "open": "reopened"}.get(state, state)
+        by = f" by {login}" if login else ""
+        title = f"{'PullRequest' if is_pr else 'Issue'} {repo}#{number}: {thread.get('title')}"
+        return Item(source="github", account=repo, external_id=f"state:{number}:{state}:{at}", kind="event",
+                    conversation_key=key, thread_key=key, occurred_at=_gh_time(at), author=login or None,
+                    author_is_me=login.lower() in self.me, title=title,
+                    url=thread.get("html_url") or f"https://github.com/{repo}/{'pull' if is_pr else 'issues'}/{number}",
+                    route="if_open_task",
+                    body=f"[state: {state}; opened by {opener}]\n{what}{by} at {at}",
+                    meta={"number": number, "state": state, "state_reason": reason, "is_pr": is_pr,
+                          "opener": opener, "watched": True})
 
 
 class CommitSource:
