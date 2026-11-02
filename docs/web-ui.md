@@ -17,6 +17,15 @@ The page listens on `127.0.0.1:8656` by default. Open `http://127.0.0.1:8656` on
 machine and paste the token. `todo-manager web token --new` replaces the token and signs every
 browser out.
 
+A password of your own signs in too, besides the token. It is asked for twice (or read from
+stdin), never given on the command line, and kept only as a scrypt hash; setting or removing it
+signs every browser out:
+
+```bash
+todo-manager web password           # set or change it (at least 8 characters)
+todo-manager web password --clear   # remove it: only the token signs in
+```
+
 `web.host` and `web.port` choose where it listens; the daemon restarts when they change:
 
 ```bash
@@ -25,8 +34,8 @@ todo-manager config set web.host 192.168.1.20 --human # one address, e.g. a LAN 
 todo-manager config set web.port 8656 --human
 ```
 
-The page itself speaks plain HTTP, so on any address other than loopback the token and the
-session cookie cross the network unencrypted. That is fine on a network only you can reach
+The page itself speaks plain HTTP, so on any address other than loopback the token (or password)
+and the session cookie cross the network unencrypted. That is fine on a network only you can reach
 (a VPN such as Tailscale or WireGuard); for anything wider, keep the default and publish the
 port through a tunnel you control, for example a Cloudflare Tunnel hostname with Cloudflare
 Access (or another login) in front of it: the token is then the second lock, not the only one.
@@ -85,8 +94,9 @@ apply it twice.
 
 ## Security
 
-- One secret: the token in `state/web-token` (mode 0600). The session cookie is derived from it
-  (HMAC), `HttpOnly`, `SameSite=Lax`, 90 days.
+- The token in `state/web-token` (mode 0600), and the password if one is set, as a scrypt hash in
+  `state/web-password` (mode 0600). The session cookie is derived from both (HMAC), `HttpOnly`,
+  `SameSite=Lax`, 90 days.
 - Writes also need the `X-TM-Request: 1` header, which a page of another site cannot add without
   the browser asking first.
 - The page loads nothing from other sites (Content-Security-Policy `default-src 'self'`). Text

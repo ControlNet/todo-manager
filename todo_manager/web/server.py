@@ -1,9 +1,10 @@
 """The Web UI server: a page, its static files and a JSON API, on loopback (``web.host`` /
 ``web.port``), run by the daemon in a thread of its own.
 
-Login: one secret, the web token (``todo-manager web token``, kept in ``state/web-token``). The
-login form takes it once and sets a session cookie derived from it, so a new token signs every
-browser out. Writes (POST under ``/api/``) also need the ``X-TM-Request`` header, which a page
+Login: the web token (``todo-manager web token``, kept in ``state/web-token``), or a password the
+user chose (``todo-manager web password``, kept as a scrypt hash in ``state/web-password``). The
+login form takes either once and sets a session cookie derived from both, so a new token or
+password signs every browser out. Writes (POST under ``/api/``) also need the ``X-TM-Request`` header, which a page
 of another site cannot send without the browser asking first.
 
 Every request opens its own database connection under the shared workspace lock (like a
@@ -69,6 +70,51 @@ def new_token(home: Path) -> str:
     token = secrets.token_urlsafe(32)
     _write_private(token_path(home), token)
     return token
+
+
+def password_path(home: Path) -> Path:
+    return home / "state" / "web-password"
+
+
+def load_password(home: Path) -> str | None:
+    try:
+        return password_path(home).read_text(encoding="utf-8").strip() or None
+    except FileNotFoundError:
+        return None
+
+
+SCRYPT = {"n": 2 ** 14, "r": 8, "p": 1}
+
+
+def _scrypt(password: str, salt: bytes, n: int, r: int, p: int) -> bytes:
+    return hashlib.scrypt(password.encode(), salt=salt, n=n, r=r, p=p, maxmem=64 * 1024 * 1024, dklen=32)
+
+
+def set_password(home: Path, password: str) -> None:
+    salt = secrets.token_bytes(16)
+    digest = _scrypt(password, salt, **SCRYPT)
+    _write_private(password_path(home), f"scrypt${SCRYPT['n']}${SCRYPT['r']}${SCRYPT['p']}${salt.hex()}${digest.hex()}")
+
+
+def clear_password(home: Path) -> None:
+    password_path(home).unlink(missing_ok=True)
+
+
+def check_password(home: Path, given: str) -> bool:
+    stored = load_password(home)
+    if stored is None or not given:
+        return False
+    try:
+        _, n, r, p, salt, digest = stored.split("$")
+        return hmac.compare_digest(_scrypt(given, bytes.fromhex(salt), int(n), int(r), int(p)), bytes.fromhex(digest))
+    except ValueError:
+        return False
+
+
+def session_key(home: Path) -> str | None:
+    """What the session cookie is derived from: the token, and the password's hash when one is set."""
+    parts = [x for x in (load_token(home), load_password(home)) if x]
+    return "\n".join(parts) or None
 
 
 def session_value(token: str) -> str:
@@ -179,12 +225,12 @@ class WebServer:
                         or '"https"' in (self.headers.get("Cf-Visitor") or ""))
 
             def signed_in(self) -> bool:
-                token = load_token(web.cfg.home)
-                if token is None:
+                key = session_key(web.cfg.home)
+                if key is None:
                     return False
                 for part in (self.headers.get("Cookie") or "").split(";"):
                     name, _, value = part.strip().partition("=")
-                    if name == COOKIE and hmac.compare_digest(value, session_value(token)):
+                    if name == COOKIE and hmac.compare_digest(value, session_value(key)):
                         return True
                 return False
 
@@ -302,10 +348,12 @@ class WebServer:
                     given = parse_qs(self.body().decode("utf-8", "replace")).get("token", [""])[-1].strip()
                 except Reply as r:
                     return self.send(r.status, r.body)
-                if token is None or not given or not hmac.compare_digest(given.encode(), token.encode()):
+                by_token = token is not None and given and hmac.compare_digest(given.encode(), token.encode())
+                if not (by_token or check_password(web.cfg.home, given)):
                     return self.send(303, None, {"Location": "/login?failed=1"})
                 self.send(303, None, {"Location": "/",
-                                      "Set-Cookie": self.cookie(session_value(token), COOKIE_DAYS * 86400)})
+                                      "Set-Cookie": self.cookie(session_value(session_key(web.cfg.home)),
+                                                                COOKIE_DAYS * 86400)})
 
             def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - quiet: no URLs in logs
                 pass

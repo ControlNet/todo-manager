@@ -24,6 +24,7 @@ run show|done
 outbox retry ID...
 daemon run|status|enroll|token|reset-token|restart
 web token [--new]
+web password [--clear]
 gmail-labels show
 ```
 
@@ -312,5 +313,7 @@ restarts the unit. `sync` and the feedback gate share the `sync` lock with the d
 ## Web UI
 
 `web token` prints the token the Web UI's sign-in page asks for, creating it on first use;
-`web token --new` replaces it, which signs every browser out. The daemon serves the page while
+`web token --new` replaces it, which signs every browser out. `web password` sets a password of
+your own that signs in besides the token (asked for, or read from stdin; `--clear` removes it).
+The daemon serves the page while
 `web.enabled` is true. See [web-ui.md](web-ui.md).

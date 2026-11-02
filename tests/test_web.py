@@ -366,6 +366,24 @@ class ServerTests(WebCase):
         response, _ = self.request("GET", "/api/home", headers=self.signed_in())
         self.assertEqual(response.status, 401)
 
+    def test_a_password_the_user_chose_signs_in_besides_the_token(self):
+        form = {"Content-Type": "application/x-www-form-urlencoded"}
+        old = self.signed_in()
+        server.set_password(self.cfg.home, "plum orchard 42")
+        response, _ = self.request("GET", "/api/home", headers=old)
+        self.assertEqual(response.status, 401)   # a new password signs every browser out
+        response, _ = self.request("POST", "/login", "token=plum+orchard+41", form)
+        self.assertEqual(response.getheader("Location"), "/login?failed=1")
+        for secret in ("plum+orchard+42", self.token):
+            response, _ = self.request("POST", "/login", f"token={secret}", form)
+            cookie = response.getheader("Set-Cookie")
+            self.assertIn(server.session_value(server.session_key(self.cfg.home)), cookie)
+        self.assertNotIn("plum orchard 42", server.password_path(self.cfg.home).read_text())
+        server.clear_password(self.cfg.home)
+        response, _ = self.request("POST", "/login", "token=plum+orchard+42", form)
+        self.assertEqual(response.getheader("Location"), "/login?failed=1")
+        self.assertEqual(server.session_key(self.cfg.home), self.token)
+
     def test_api_reads_and_writes(self):
         response, data = self.request("GET", "/api/home", headers=self.signed_in())
         self.assertEqual(response.status, 200)
@@ -430,3 +448,30 @@ class ServerTests(WebCase):
         self.assertEqual(response.status, 404)
         response, data = self.request("GET", "/api/deliveries/delivery_x", headers=self.signed_in())
         self.assertEqual(json.loads(data)["version"]["files"][0]["name"], "page.htm")
+
+
+class PasswordCommandTests(WorkspaceCase):
+    def invoke(self, *args, stdin=""):
+        import contextlib, io, sys
+        from todo_manager import cli
+        out = io.StringIO()
+        old = sys.stdin
+        sys.stdin = io.StringIO(stdin)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                code = cli.main(["--home", str(self.tmp), *args])
+        finally:
+            sys.stdin = old
+        return code, out.getvalue()
+
+    def test_the_password_is_read_from_stdin_never_from_the_command_line(self):
+        code, text = self.invoke("web", "password", stdin="short\n")
+        self.assertNotEqual(code, 0)
+        self.assertIsNone(server.load_password(self.tmp))
+        code, text = self.invoke("web", "password", stdin="plum orchard 42\n")
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("plum orchard 42", text)
+        self.assertTrue(server.check_password(self.tmp, "plum orchard 42"))
+        code, _ = self.invoke("web", "password", "--clear")
+        self.assertEqual(code, 0)
+        self.assertIsNone(server.load_password(self.tmp))

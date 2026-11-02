@@ -155,9 +155,11 @@ def cmd_gmail_labels(args: argparse.Namespace) -> int:
 
 
 def cmd_web(args: argparse.Namespace) -> int:
-    """The Web UI's sign-in token (docs/web-ui.md)."""
+    """The Web UI's sign-in token or password (docs/web-ui.md)."""
     from .web import server
     cfg = config.load(args.home)
+    if args.action == "password":
+        return _web_password(args, cfg, server)
     token = server.load_token(cfg.home)
     if token is None or args.new:
         token = server.new_token(cfg.home)
@@ -165,6 +167,29 @@ def cmd_web(args: argparse.Namespace) -> int:
     if not cfg.get("web.enabled"):
         print("note: web.enabled is false; turn it on with `todo-manager config set web.enabled true --human`",
               file=sys.stderr)
+    return 0
+
+
+WEB_PASSWORD_MIN = 8
+
+
+def _web_password(args: argparse.Namespace, cfg: Any, server: Any) -> int:
+    # Asked for, or read from stdin, never taken as an argument: it would stay in the shell history.
+    if args.clear:
+        server.clear_password(cfg.home)
+        print("password removed; the token still signs in")
+        return 0
+    if sys.stdin.isatty():
+        import getpass
+        password = getpass.getpass("New Web UI password: ").strip()
+        if password != getpass.getpass("Again: ").strip():
+            return _fail("MISMATCH", "the two passwords differ; nothing changed")
+    else:
+        password = sys.stdin.readline().strip()
+    if len(password) < WEB_PASSWORD_MIN:
+        return _fail("TOO_SHORT", f"use at least {WEB_PASSWORD_MIN} characters; nothing changed")
+    server.set_password(cfg.home, password)
+    print("password set; every browser signs in again (the token still works too)")
     return 0
 
 
@@ -716,10 +741,12 @@ def build_parser() -> argparse.ArgumentParser:
     dms.add_parser("restart", help="systemctl --user restart the daemon")
     s.set_defaults(fn=cmd_daemon)
 
-    s = sub.add_parser("web", help="the Web UI: print its sign-in token")
+    s = sub.add_parser("web", help="the Web UI: its sign-in token, or a password of your own")
     ws = s.add_subparsers(dest="action", required=True)
     x = ws.add_parser("token", help="print the token the sign-in page asks for (created on first use)")
     x.add_argument("--new", action="store_true", help="replace it: every browser has to sign in again")
+    x = ws.add_parser("password", help="set a password that signs in besides the token (asked for, or read from stdin)")
+    x.add_argument("--clear", action="store_true", help="remove it: only the token signs in")
     s.set_defaults(fn=cmd_web)
 
     s = sub.add_parser("config", help="show or change config.toml settings (sources, quiet windows, sizes)")
