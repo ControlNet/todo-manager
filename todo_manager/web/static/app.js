@@ -120,6 +120,7 @@
     me: null, home: null, list: null, listKey: null, detail: null, detailId: null, more: false,
     target: "hermes", draft: "", stamp: null, projects: null, project: null, delivery: null, filePreview: null,
     search: { q: "", res: null, sel: 0 }, decide: null, sending: false, dialog: null,
+    pressed: null, stale: false, outbox: null, shown: false, layer: "", opener: null, open: {},
   };
 
   // ------------------------------------------------------------------ server
@@ -143,6 +144,10 @@
     return data;
   }
   const rid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)).replace(/[^A-Za-z0-9]/g, "").slice(0, 32);
+  // One request id per thing the user means to do: trying it again after a failure sends the same
+  // id, so the server does it once even when only the answer was lost.
+  const rids = new Map();
+  const ridFor = (key) => { if (!rids.has(key)) rids.set(key, rid()); return rids.get(key); };
 
   function toast(text, error) {
     const el = document.createElement("div");
@@ -224,6 +229,8 @@
   }
   async function loadDetail(id) {
     const data = await api("/api/tasks/" + encodeURIComponent(id));
+    const r = route();
+    if (r.page === "tasks" && r.task !== id) return;   // the user has moved on to another task
     if (S.detailId !== id) { S.more = false; S.bannerOpen = false; S.draft = ""; }
     S.detail = data; S.detailId = id;
   }
@@ -237,9 +244,10 @@
     } else if (r.page === "projects") {
       jobs.push(api("/api/projects").then((p) => { S.projects = p; }));
     } else if (r.page === "project") {
-      jobs.push(api("/api/projects/" + encodeURIComponent(r.id)).then((p) => { S.project = p; }));
+      jobs.push(api("/api/projects/" + encodeURIComponent(r.id)).then((p) => { if (route().id === r.id) S.project = p; }));
     } else if (r.page === "delivery") {
       jobs.push(api("/api/deliveries/" + encodeURIComponent(r.id)).then(async (d) => {
+        if (route().id !== r.id) return;
         if (!S.delivery || S.delivery.version.id !== d.version.id) S.filePreview = null;
         S.delivery = d;
         await loadDetail(d.task.id);
@@ -249,6 +257,7 @@
   }
 
   async function refresh() {
+    S.stale = false;
     try {
       await load();
       render();
@@ -257,13 +266,28 @@
     }
   }
 
+  // A change from elsewhere waits while the user is in the middle of something: a dialog, the
+  // search, a write, or typing. It shows when that ends (settle). The comment box is not waited
+  // for: its region never holds the draft, so a refresh leaves it alone, and a reply must show
+  // while the box keeps focus after sending.
+  const typing = () => {
+    const el = document.activeElement;
+    if (!el || el.id === "draft") return false;
+    return el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && !["checkbox", "radio"].includes(el.type));
+  };
+  const busy = () => !!(S.dialog || S.palette || S.pressed || S.sending || typing());
   async function poll() {
-    if (document.hidden || S.sending) return;
+    if (document.hidden) return;
     try {
       const { stamp: now } = await api("/api/stamp");
-      if (S.stamp !== null && now !== S.stamp) await refresh();
+      if (S.stamp !== null && now !== S.stamp) {
+        if (busy()) S.stale = true; else await refresh();
+      }
       S.stamp = now;
     } catch (e) { /* the next poll tries again */ }
+  }
+  function settle() {
+    if (S.stale && !busy()) refresh();
   }
 
   // ------------------------------------------------------------------ pieces
@@ -298,7 +322,7 @@
     return null;
   }
   function row(c, view) {
-    const on = S.detailId === c.id ? " on" : "";
+    const on = route().task === c.id ? " on" : "";
     const badge = badgeOf(c);
     return `<button class="row${on}" data-go="${esc(taskHash(c.id, view))}">
       <span class="main"><span class="title">${esc(c.title)}</span>
@@ -330,14 +354,30 @@
   }
 
   // ------------------------------------------------------------------ navigation
+  // One line icon set (24 px grid, drawn in currentColor).
+  const ICONS = {
+    today: '<rect x="3.5" y="5" width="17" height="15.5" rx="3"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
+    decide: '<path d="M12 3.5 20.5 12 12 20.5 3.5 12Z"/>',
+    agent: '<path d="M12 3.5Q13 11 20.5 12Q13 13 12 20.5Q11 13 3.5 12Q11 11 12 3.5Z"/>',
+    waiting: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+    all: '<path d="M9 6.5h10.5M9 12h10.5M9 17.5h10.5M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01"/>',
+    projects: '<rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/>'
+      + '<rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/>',
+    search: '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>',
+    theme: '<circle cx="12" cy="12" r="8.5"/><path class="solid" d="M12 3.5a8.5 8.5 0 0 1 0 17Z"/>',
+    back: '<path d="m14.5 6-6 6 6 6"/>',
+  };
+  const icon = (name) => `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
+  const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+
   function navItems() {
     const n = (S.home && S.home.counts) || {};
     return [
-      { key: "today", hash: "#/tasks/today", glyph: "◎", count: (n.decide || 0) + (n.mine || 0) + (n.agent_wait || 0) },
-      { key: "decide", hash: "#/tasks/decide", glyph: "◆", count: n.decide || 0, badge: n.decide },
-      { key: "agent", hash: "#/tasks/agent", glyph: "✦", count: (n.agent_wait || 0) + (n.agent_run || 0), badge: n.agent_wait },
-      { key: "waiting", hash: "#/tasks/waiting", glyph: "◷", count: n.waiting || 0 },
-      { key: "all", hash: "#/tasks/all", glyph: "≡", count: S.home ? S.home.open : 0 },
+      { key: "today", hash: "#/tasks/today", count: (n.decide || 0) + (n.mine || 0) + (n.agent_wait || 0) },
+      { key: "decide", hash: "#/tasks/decide", count: n.decide || 0, badge: n.decide },
+      { key: "agent", hash: "#/tasks/agent", count: (n.agent_wait || 0) + (n.agent_run || 0), badge: n.agent_wait },
+      { key: "waiting", hash: "#/tasks/waiting", count: n.waiting || 0 },
+      { key: "all", hash: "#/tasks/all", count: S.home ? S.home.open : 0 },
     ];
   }
   function currentNav(r) {
@@ -352,7 +392,7 @@
     const projects = ((S.home && S.home.projects) || []).filter((p) => p.status === "active" || p.counts.open);
     return `<nav class="nav" aria-label="${esc(t("today"))}">
       <div class="brand"><span class="logo">TM</span><span>Todo Manager</span></div>
-      <button class="nav-search" data-palette="1"><span>${esc(t("search"))}</span><span>⌘K</span></button>
+      <button class="nav-search" data-palette="1"><span>${esc(t("search"))}</span><kbd>${MAC ? "⌘K" : "Ctrl K"}</kbd></button>
       <div class="nav-group">${navItems().map((i) => `<button class="nav-item${cur === i.key ? " on" : ""}" data-go="${i.hash}">
         <span class="label">${esc(t(i.key))}</span><span class="count">${i.count === "" ? "" : esc(i.count)}</span></button>`).join("")}</div>
       ${projects.length ? `<div class="nav-group"><button class="nav-head${cur === "projects" ? " on" : ""}" data-go="#/projects">${esc(t("projects"))} ›</button>
@@ -367,19 +407,19 @@
   function rail(r) {
     const cur = currentNav(r);
     return `<nav class="rail" aria-label="${esc(t("today"))}"><span class="logo">TM</span>
-      ${navItems().concat([{ key: "projects", hash: "#/projects", glyph: "▦" }]).map((i) => `<button class="rail-item${cur === i.key ? " on" : ""}" data-go="${i.hash}" aria-label="${esc(t(i.key))}">
-        <span class="g">${i.glyph}</span>${esc(t(i.key))}${i.badge ? `<span class="badge">${i.badge}</span>` : ""}</button>`).join("")}
-      <button class="rail-item" data-palette="1" aria-label="${esc(t("search"))}"><span class="g">⌕</span>${esc(t("search"))}</button>
+      ${navItems().concat([{ key: "projects", hash: "#/projects" }]).map((i) => `<button class="rail-item${cur === i.key ? " on" : ""}" data-go="${i.hash}" aria-label="${esc(t(i.key))}">
+        ${icon(i.key)}${esc(t(i.key))}${i.badge ? `<span class="badge">${i.badge}</span>` : ""}</button>`).join("")}
+      <button class="rail-item" data-palette="1" aria-label="${esc(t("search"))}">${icon("search")}${esc(t("search"))}</button>
       <span class="grow"></span>
-      <button class="rail-item" data-theme-cycle="1" aria-label="${esc(t("theme"))}"><span class="g">◐</span></button></nav>`;
+      <button class="rail-item" data-theme-cycle="1" aria-label="${esc(t("theme"))}">${icon("theme")}</button></nav>`;
   }
   function tabbar(r) {
     const cur = currentNav(r);
     const n = (S.home && S.home.counts) || {};
-    const tabs = [["today", "#/tasks/today", "◎"], ["decide", "#/decide", "◆", n.decide], ["agent", "#/tasks/agent", "✦", n.agent_wait],
-      ["projects", "#/projects", "▦"], ["search", "#/search", "⌕"]];
-    return `<nav class="tabbar" aria-label="${esc(t("today"))}">${tabs.map(([k, h, g, b]) => `<button class="tab${cur === k ? " on" : ""}" data-go="${h}">
-      <span class="g">${g}</span>${esc(t(k))}${b ? `<span class="badge">${b}</span>` : ""}</button>`).join("")}</nav>`;
+    const tabs = [["today", "#/tasks/today"], ["decide", "#/decide", n.decide], ["agent", "#/tasks/agent", n.agent_wait],
+      ["projects", "#/projects"], ["search", "#/search"]];
+    return `<nav class="tabbar" aria-label="${esc(t("today"))}">${tabs.map(([k, h, b]) => `<button class="tab${cur === k ? " on" : ""}" data-go="${h}">
+      ${icon(k)}${esc(t(k))}${b ? `<span class="badge">${b}</span>` : ""}</button>`).join("")}</nav>`;
   }
 
   // ------------------------------------------------------------------ task lists
@@ -514,7 +554,9 @@
   }
 
   function threadView(d) {
-    if (!d.thread.length) return `<span class="muted">${esc(t("noDiscussion"))}</span>`;
+    const sending = S.outbox && S.outbox.task === d.id ? `<div class="msg me pending"><span class="avatar me">${esc(t("who_me"))}</span>
+      <div class="body"><div class="bubble">${esc(S.outbox.text)}</div><div class="info"><span class="pill">${esc(t("st_pending"))}</span></div></div></div>` : "";
+    if (!d.thread.length) return sending || `<span class="muted">${esc(t("noDiscussion"))}</span>`;
     return d.thread.map((m) => {
       const cls = m.who === "me" ? "me" : m.who === "agent" ? "agent" : "";
       let info = stamp(m.at);
@@ -532,7 +574,7 @@
       const bubble = m.text ? `<div class="bubble">${esc(m.text)}</div>` : "";
       return `<div class="msg ${cls}"><span class="avatar ${cls}">${esc(t("who_" + m.who))}</span>
         <div class="body">${choice}${bubble}<div class="info">${info}</div></div></div>`;
-    }).join("");
+    }).join("") + sending;
   }
 
   // One box: everything goes to Hermes, which relays to the agent what is meant for it.
@@ -540,8 +582,8 @@
     const ph = t({ answer: "ph_answer", review: "ph_review", running: "ph_running" }[d.kind] || "ph_hermes");
     return `<div class="composer">
       <div class="compose-row"><label class="sr" for="draft">${esc(ph)}</label>
-        <textarea id="draft" rows="2" placeholder="${esc(ph)}">${esc(S.draft)}</textarea>
-        <button class="btn primary" data-send="1"${S.sending ? " disabled" : ""}>${esc(t("send"))}</button></div>
+        <textarea id="draft" rows="2" placeholder="${esc(ph)}"></textarea>
+        <button class="btn primary" data-send="1">${esc(t("send"))}</button></div>
     </div>`;
   }
 
@@ -552,12 +594,12 @@
       : `<div class="prop"><span class="k">${esc(label)}</span>${v}</div>`;
   }
 
-  function detailView(d, opts) {
+  function detailBody(d, opts) {
     const compact = opts && opts.compact;
     const b = banner(d);
     const actor = { me: t("a_me"), agent: t("a_agent"), external: t("a_external") }[d.next_actor];
     const props = [
-      prop(t("p_status"), kindLabel(d)), prop(t("p_actor"), actor),
+      b ? "" : prop(t("p_status"), kindLabel(d)), prop(t("p_actor"), actor),
       prop(t("p_due"), d.due ? day(d.due) : "", { warn: d.overdue, does: d.kind === "closed" ? "" : "dlg:due" }),
       d.kind === "waiting" || d.follow_up ? prop(t("p_follow"), d.follow_up ? day(d.follow_up) : "", { warn: d.follow_up_due, does: "dlg:followup" }) : "",
       d.snoozed ? prop(t("p_snooze"), day(d.snooze_until), { does: "dlg:snooze" }) : "",
@@ -571,12 +613,12 @@
       ${d.sources.map((s) => `<div class="source"><span class="tag">${esc(s.source)}</span>
         ${s.url ? `<a class="text" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title || s.author || s.id)}</a>`
           : `<span class="text">${esc(s.title || s.author || s.id)}</span>`}<span class="when">${esc(day((s.at || "").slice(0, 10)))}</span></div>`).join("")}</div></div>` : "";
-    const history = d.history.length ? `<details><summary>${esc(t("history"))}</summary><div class="history">
+    const history = d.history.length ? `<details data-keep="history"><summary>${esc(t("history"))}</summary><div class="history">
       ${d.history.slice().reverse().map((h) => `<span>${esc(stamp(h.at))} · ${esc(h.actor)}/${esc(h.origin)} · ${esc(Object.keys(h.changes).join(", "))}</span>`).join("")}</div></details>` : "";
-    return `<div class="back"><button data-back="1" aria-label="back">‹</button><span class="muted">${esc(d.project ? d.project.title : "")}</span></div>
+    return `<div class="back"><button data-back="1" aria-label="back">${icon("back")}</button><span class="muted">${esc(d.project ? d.project.title : "")}</span></div>
       <div class="detail-body" id="detail-scroll">
         ${compact ? "" : `<div class="crumb"><span class="project">${pdot(d.project)} ${esc(d.project ? d.project.title : t("noProject"))}</span>
-          <span class="pill ${kindTone(d)}">${esc(kindLabel(d))}</span><span class="grow"></span>
+          ${b ? "" : `<span class="pill ${kindTone(d)}">${esc(kindLabel(d))}</span>`}<span class="grow"></span>
           ${d.notion_url ? `<a href="${esc(d.notion_url)}" target="_blank" rel="noopener noreferrer">Notion ↗</a>` : ""}</div>`}
         <h2>${esc(d.title)}</h2>
         ${compact ? "" : `<div class="props">${props}</div>`}
@@ -593,7 +635,7 @@
           `<a href="${esc(taskHash(l.task))}">${esc(l.title || l.task)}</a>`).join("")}</div>` : ""}
         <div class="thread"><span class="label">${esc(t("discussion"))}</span>${threadView(d)}</div>
         ${compact ? "" : history}
-      </div>${composer(d)}`;
+      </div>`;
   }
 
   // ------------------------------------------------------------------ pages
@@ -607,9 +649,9 @@
           ${p.counts.decision ? `<span><b>${p.counts.decision}</b>${esc(t("nDecide"))}</span>` : ""}
           ${p.counts.agent ? `<span><b>${p.counts.agent}</b>${esc(t("nAgent"))}</span>` : ""}</span></button>`).join("")}</div></section>`;
   }
-  function projectPage() {
+  function projectPage(r) {
     const p = S.project;
-    if (!p) return `<section class="page span"></section>`;
+    if (!p || p.id !== r.id) return `<section class="page span"></section>`;
     const open = p.tasks.filter((c) => c.kind !== "closed");
     const closed = p.tasks.filter((c) => c.kind === "closed");
     const field = (label, text) => (text ? `<div class="block"><span class="label">${esc(label)}</span><span class="v">${esc(text)}</span></div>` : "");
@@ -618,7 +660,7 @@
       <div class="view-head"><h1>${p.image || p.icon ? pdot(p) + " " : ""}${esc(p.title)}</h1><span class="sub">${esc(t("ps_" + p.status))}</span></div>
       <div class="split"><div class="card"><span class="label">${esc(t("openTasks"))} · ${open.length}</span>
           ${open.map((c) => row(c, "p:" + p.id)).join("") || `<span class="muted">${esc(t("empty"))}</span>`}
-          ${closed.length ? `<details><summary>${esc(t("closedTasks"))} · ${closed.length}</summary>${closed.slice(0, 50).map((c) => row(c, "p:" + p.id)).join("")}</details>` : ""}</div>
+          ${closed.length ? `<details data-keep="closed"><summary>${esc(t("closedTasks"))} · ${closed.length}</summary>${closed.slice(0, 50).map((c) => row(c, "p:" + p.id)).join("")}</details>` : ""}</div>
         <div class="card">${field(t("projGoal"), p.goal)}${field(t("projNext"), p.next_step)}${field(t("projBlockers"), p.blockers)}
           ${field(t("projRecent"), p.recent_activity)}${field(t("projRepos"), (p.repos || []).join("\n"))}</div></div></section>`;
   }
@@ -679,10 +721,10 @@
     return out.join("");
   }
 
-  function deliveryPage() {
+  function deliveryPage(r) {
     const x = S.delivery;
     const d = S.detail;
-    if (!x || !d) return `<section class="page span"></section>`;
+    if (!x || !d || x.version.id !== r.id) return `<section class="page span"></section>`;
     const results = x.delegation.versions.filter((v) => v.kind === "result" || v.id === x.version.id);
     const files = x.version.files;
     return `<section class="page span" id="page-scroll">
@@ -700,7 +742,7 @@
               <a class="btn small" href="/api/deliveries/${esc(x.version.id)}/files/${f.index}" download="${esc(f.name)}">${esc(t("download"))}</a>`
               : `<span class="muted">${esc(t("notCopied"))}</span>`}</div>`).join("")}</div>
           ${S.filePreview ? `<pre class="preview">${esc(S.filePreview)}</pre>` : ""}</div>` : ""}
-      </div><div class="card" style="padding:0;overflow:hidden">${detailView(d, { compact: true })}</div></div></section>`;
+      </div><div class="card" style="padding:0;overflow:hidden">${detailBody(d, { compact: true }) + composer(d)}</div></div></section>`;
   }
 
   function searchResults(res, palette) {
@@ -758,9 +800,15 @@
       ${esc(label)}${sub ? `<small>${esc(sub)}</small>` : ""}</button>`).join("")}</div>`;
   }
   const dateChoices = (kind) => {
-    const list = kind === "snooze" ? [[addDays(1), t("tomorrow")], [nextWeekday(1), t("nextMonday")], [addDays(7), t("inWeek")]]
-      : [[addDays(3), t("inThree")], [nextWeekday(1), t("nextMonday")], [addDays(7), t("inWeek")]];
-    return list.map(([v, label]) => [v, label, day(v)]).concat([["pick", t("pickDate"), ""]]);
+    // [date, name, whether the name already says the weekday]
+    const list = kind === "snooze" ? [[addDays(1), t("tomorrow")], [nextWeekday(1), t("nextMonday"), true], [addDays(7), t("inWeek")]]
+      : [[addDays(3), t("inThree")], [nextWeekday(1), t("nextMonday"), true], [addDays(7), t("inWeek")]];
+    const when = (v, named) => {
+      const d = dateOf(v);
+      const md = `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+      return named ? md : `${t("weekday")[d.getUTCDay()]} ${md}`;
+    };
+    return list.map(([v, label, named]) => [v, label, when(v, named)]).concat([["pick", t("pickDate"), ""]]);
   };
   function dialogView() {
     const g = S.dialog;
@@ -804,7 +852,7 @@
       <h3>${esc(t(title))}</h3><span class="task">${esc(d.title)}</span>${body}
       <div class="modal-foot">${g.kind === "due" ? `<button class="btn" data-dlg-clear="1">${esc(t("clear"))}</button>` : ""}
         <button class="btn" data-close="1">${esc(t("cancel"))}</button>
-        ${ok ? `<button class="btn primary" data-dlg-ok="${ok}"${S.sending ? " disabled" : ""}>${esc(okLabel)}</button>` : ""}</div></div></div>`;
+        ${ok ? `<button class="btn primary" data-dlg-ok="${ok}">${esc(okLabel)}</button>` : ""}</div></div></div>`;
   }
   function paletteView() {
     return `<div class="scrim" data-close="1"><div class="modal palette" role="dialog" aria-modal="true" aria-label="${esc(t("search"))}">
@@ -813,6 +861,90 @@
   }
 
   // ------------------------------------------------------------------ render
+  // A selector that finds the same control after a render: its id, or its first data-* attribute
+  // and its place among the controls that share it.
+  function selOf(el) {
+    if (!el || el === document.body || !el.tagName) return null;
+    if (el.id) return { sel: "#" + CSS.escape(el.id), n: 0 };
+    const a = [...el.attributes].find((x) => x.name.startsWith("data-"));
+    if (!a) return null;
+    const sel = `${el.tagName.toLowerCase()}[${a.name}="${CSS.escape(a.value)}"]`;
+    return { sel, n: [...document.querySelectorAll(sel)].indexOf(el) };
+  }
+  const findSel = (s) => (s ? document.querySelectorAll(s.sel)[s.n] || null : null);
+  let lastPressed = null;
+
+  // The page is a few regions, each written only when its HTML changes: what the user is doing in
+  // the others (focus, selection, scroll, an open <details>) is left alone, and a poll that brings
+  // nothing new changes nothing.
+  const written = new WeakMap();
+  function patch(el, html) {
+    if (written.get(el) === html) return false;
+    el.innerHTML = html;
+    written.set(el, html);
+    return true;
+  }
+  let R = null;
+  function regions() {
+    if (R) return R;
+    $app.innerHTML = `<div class="region" id="r-nav"></div><div class="region" id="r-main"></div>
+      <article class="detail closed" id="r-detail"><div class="region" id="r-body"></div><div class="region" id="r-compose"></div></article>
+      <div class="region" id="r-tabs"></div>`;
+    R = {};
+    for (const k of ["nav", "main", "detail", "body", "compose", "tabs"]) R[k] = document.getElementById("r-" + k);
+    return R;
+  }
+
+  // ------------------------------------------------------------------ motion
+  // Short and quiet, and only for what the user did: never for what a poll brought.
+  const motion = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  // A class that runs its animation once; it is taken off when it ends so it can run again.
+  function play(el, cls) {
+    if (!el) return;
+    el.classList.remove(cls);
+    void el.offsetWidth;
+    el.classList.add(cls);
+    const end = (e) => {
+      if (e.target !== el) return;
+      el.classList.remove(cls);
+      el.removeEventListener("animationend", end);
+    };
+    el.addEventListener("animationend", end);
+  }
+  const leave = (el) => new Promise((done) => {
+    if (!el) return done();
+    el.addEventListener("animationend", (e) => { if (e.target === el) done(); });
+    el.classList.add("leave");
+    setTimeout(done, (parseFloat(motion("--t1")) || 0) + 60);
+  });
+  // Where the tiles and rows of the list are, so that after the user's own change they slide to
+  // their new places (FLIP) rather than jump.
+  const flipKey = (el) => (el.classList.contains("tile") ? "t:" + el.getAttribute("aria-label") : "r:" + el.dataset.go);
+  function measure() {
+    const list = document.getElementById("list-scroll");
+    if (!list || !list.offsetParent || !parseFloat(motion("--t2"))) return null;
+    const at = new Map();
+    for (const el of list.querySelectorAll(".tile, .row")) at.set(flipKey(el), el.getBoundingClientRect().top);
+    return at;
+  }
+  function flip(before) {
+    const list = document.getElementById("list-scroll");
+    if (!list || !before) return;
+    const now = new Map();
+    for (const el of list.querySelectorAll(".tile, .row")) now.set(el, el.getBoundingClientRect().top);
+    for (const [el, top] of now) {
+      const was = before.get(flipKey(el));
+      if (was === undefined) continue;
+      let dy = was - top;
+      const tile = el.classList.contains("row") && el.closest(".tile");
+      if (tile && now.has(tile) && before.has(flipKey(tile))) dy -= before.get(flipKey(tile)) - now.get(tile);   // it moves with its tile
+      if (Math.abs(dy) < 1) continue;
+      el.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }],
+        { duration: parseFloat(motion("--t2")), easing: motion("--ease") || "ease" });
+    }
+  }
+  let shownId = null;
+
   function render() {
     if (!S.home) return;
     const r = route();
@@ -821,65 +953,126 @@
       const el = document.getElementById(id);
       if (el) keep[id] = el.scrollTop;
     }
-    const focus = document.activeElement && document.activeElement.id;
-    const sel = focus && document.activeElement.selectionStart;
-    let main;
+    const active = document.activeElement;
+    const focus = selOf(active);
+    const range = active && typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null;
+    const layer = S.dialog ? "dialog" : S.palette ? "palette" : "";
+    if (layer && !S.layer) S.opener = selOf(active && active !== document.body && !$overlay.contains(active) ? active : lastPressed);
+    const $ = regions();
+    let main = "";
+    let d = null, loading = false;
     if (r.page === "tasks") {
-      const d = S.detail && S.detailId === r.task ? S.detail : null;
-      main = listView(r.view) + `<article class="detail${d ? "" : " closed"}" aria-label="${esc(d ? d.title : "")}">
-        ${d ? detailView(d) : `<div class="empty-detail"></div>`}</article>`;
+      // Another task on its way keeps the one shown, dimmed, until it comes.
+      d = S.detail && r.task && (S.detailId === r.task || S.shown) ? S.detail : null;
+      loading = !!d && S.detailId !== r.task;
+      main = listView(r.view);
     } else if (r.page === "projects") main = projectsPage();
-    else if (r.page === "project") main = projectPage();
-    else if (r.page === "delivery") main = deliveryPage();
+    else if (r.page === "project") main = projectPage(r);
+    else if (r.page === "delivery") main = deliveryPage(r);
     else if (r.page === "search") main = searchPage();
     else if (r.page === "decide") main = decidePage();
-    $app.innerHTML = sidebar(r) + rail(r) + main + tabbar(r);
-    $overlay.innerHTML = S.dialog ? dialogView() : S.palette ? paletteView() : "";
+    S.shown = !!d;
+    const opened = !!d && $.detail.classList.contains("closed");
+    patch($.nav, sidebar(r) + rail(r));
+    patch($.main, main);
+    $.detail.hidden = r.page !== "tasks";
+    $.detail.classList.toggle("closed", !d);
+    $.detail.setAttribute("aria-label", d ? d.title : "");
+    if (loading) $.detail.setAttribute("aria-busy", "true"); else $.detail.removeAttribute("aria-busy");
+    patch($.body, d ? detailBody(d) : r.page === "tasks" ? `<div class="empty-detail"></div>` : "");
+    patch($.compose, d ? composer(d) : "");
+    patch($.tabs, tabbar(r));
+    patch($overlay, S.dialog ? dialogView() : S.palette ? paletteView() : "");
+    // A task opened: on a phone the detail slides in, beside the list it rises into place.
+    if (d && !loading && d.id !== shownId) {
+      if (opened && window.matchMedia("(max-width: 767px)").matches) play($.detail, "slide");
+      else play(document.getElementById("detail-scroll"), "enter");
+    }
+    if (!loading) shownId = d ? d.id : null;
+    if (layer && !S.layer) play($overlay.querySelector(".scrim"), "opening");
+    const box = document.getElementById("draft");
+    if (box && box.value !== S.draft) box.value = S.draft;
+    for (const el of document.querySelectorAll("details[data-keep]")) el.open = !!S.open[el.dataset.keep];
     document.body.style.overflow = window.matchMedia("(max-width: 767px)").matches && r.page === "tasks" && r.task ? "hidden" : "";
     for (const [id, top] of Object.entries(keep)) {
       const el = document.getElementById(id);
       if (el) el.scrollTop = top;
     }
-    if (focus) {
-      const el = document.getElementById(focus);
-      if (el) {
-        el.focus();
-        if (sel !== null && sel !== undefined && el.setSelectionRange) try { el.setSelectionRange(sel, sel); } catch (e) { /* not text */ }
-      }
+    const el = findSel(focus);
+    if (el && el !== document.activeElement) {
+      el.focus({ preventScroll: true });
+      if (range && el.setSelectionRange) try { el.setSelectionRange(range[0], range[1]); } catch (e) { /* not text */ }
     }
+    if (layer === "dialog" && S.layer !== "dialog") {
+      // A dialog opens on its first field.
+      const modal = $overlay.querySelector(".modal");
+      const first = modal && (modal.querySelector("textarea, input, select") || modal.querySelector(".option.on, .option"));
+      if (first) first.focus();
+    } else if (!layer && S.layer) {
+      const back = findSel(S.opener);
+      if (back) back.focus({ preventScroll: true });
+      S.opener = null;
+    }
+    S.layer = layer;
+    markPressed();
     // Beside the list (tablet and desktop) a task is always open: the first one, not an empty pane.
     if (r.page === "tasks" && !r.task && window.matchMedia("(min-width: 768px)").matches) {
-      const first = [...$app.querySelectorAll("[data-go]")].find((el) => /^#\/tasks\/[^/]+\/./.test(el.dataset.go));
+      const first = [...$app.querySelectorAll("[data-go]")].find((x) => /^#\/tasks\/[^/]+\/./.test(x.dataset.go));
       if (first) location.replace(first.dataset.go);
     }
+    settle();
   }
 
   // ------------------------------------------------------------------ doing things
+  // One write at a time. The pressed button shows it is working; the others dim only when it
+  // takes a while.
+  let dimTimer = null;
+  function hold(el) {
+    S.pressed = el ? selOf(el) : null;
+    clearTimeout(dimTimer);
+    document.documentElement.classList.remove("writing");
+    if (el) dimTimer = setTimeout(() => document.documentElement.classList.add("writing"), 150);
+    for (const b of document.querySelectorAll("button[aria-busy]")) b.removeAttribute("aria-busy");
+    markPressed();
+  }
+  function markPressed() {
+    const el = findSel(S.pressed);
+    if (el) el.setAttribute("aria-busy", "true");
+  }
+
   async function act(action, params, taskId) {
+    if (S.sending) return false;
     const id = taskId || S.detailId;
+    const key = JSON.stringify(["act", id, action, params || {}]);
+    let done = false;
     S.sending = true;
-    render();
     try {
-      await api(`/api/tasks/${encodeURIComponent(id)}/act`, { action, params: params || {}, rid: rid() });
+      await api(`/api/tasks/${encodeURIComponent(id)}/act`, { action, params: params || {}, rid: ridFor(key) });
+      rids.delete(key);
+      done = true;
       S.more = false;
       S.dialog = null;
       await load();
       return true;
     } catch (e) {
       if (e.message !== "login") toast(t("failed", { e: e.message }), true);
-      return false;
+      return done;
     } finally {
       S.sending = false;
+      const before = done ? measure() : null;
       render();
+      flip(before);
     }
   }
   async function send(text, to, taskId) {
     const body = (text || "").trim();
-    if (!body) return false;
+    if (!body || S.sending) return false;
+    const id = taskId || S.detailId;
+    const key = JSON.stringify(["comment", id, to, body]);
     S.sending = true;
-    render();
     try {
-      await api(`/api/tasks/${encodeURIComponent(taskId || S.detailId)}/comment`, { text: body, to, rid: rid() });
+      await api(`/api/tasks/${encodeURIComponent(id)}/comment`, { text: body, to, rid: ridFor(key) });
+      rids.delete(key);
       return true;
     } catch (e) {
       if (e.message !== "login") toast(t("failed", { e: e.message }), true);
@@ -887,6 +1080,36 @@
     } finally {
       S.sending = false;
     }
+  }
+  function setDraft(text) {
+    S.draft = text;
+    const box = document.getElementById("draft");
+    if (box) box.value = text;
+  }
+  const toBottom = () => {
+    const el = document.getElementById("detail-scroll");
+    if (el) el.scrollTop = el.scrollHeight;
+  };
+  // The comment shows at once, marked as waiting; the box is empty again for the next one. If
+  // sending fails the text goes back in the box.
+  async function sendDraft() {
+    const box = document.getElementById("draft");
+    const text = (box ? box.value : S.draft).trim();
+    const task = S.detailId;
+    if (!text || !task) return;
+    S.outbox = { task, text };
+    setDraft("");
+    render();
+    const fresh = document.getElementById("draft");
+    if (fresh) fresh.focus({ preventScroll: true });
+    toBottom();
+    const ok = await send(text, "hermes", task);
+    if (ok) {
+      try { await load(); } catch (e) { /* the next poll shows it */ }
+    } else if (!S.draft && S.detailId === task) setDraft(text);
+    S.outbox = null;
+    render();
+    if (ok) toBottom();
   }
 
   function startTime(g) {
@@ -925,12 +1148,10 @@
 
   async function decideChoice(does, params) {
     const flow = S.decide;
+    if (!flow || S.sending) return;
     const c = flow.cards[flow.i];
-    if (does === "skip") {
-      flow.i += 1;
-      flow.line = "";
-      return render();
-    }
+    if (!c) return;
+    if (does === "skip") return advance(flow);
     if (does === "dlg:agent") {
       S.dialog = { kind: "agent", task: c, note: flow.line || "", decideFlow: true };
       return render();
@@ -945,10 +1166,17 @@
     if (!(await act(action, params || {}, c.id))) return;
     const labels = { agent: "agentTitle", todo: "setTodo", wait: "waitFor", snooze: "snooze", done: "markDone", cancel: "cancel" };
     flow.done.push({ title: c.title, choice: t(labels[action]).replace(/…$/, "") });
+    S.dialog = null;
+    return advance(flow);
+  }
+  // The card handed over leaves, the next one comes in, and the progress bar fills.
+  async function advance(flow) {
+    await leave(document.querySelector(".decide-card"));
     flow.i += 1;
     flow.line = "";
-    S.dialog = null;
     render();
+    play(document.querySelector(".decide-card, .done-hero"), "enter");
+    play(document.querySelectorAll(".progress span")[flow.i], "fill");
   }
 
   function startDecide() {
@@ -1021,10 +1249,22 @@
   }
 
   // ------------------------------------------------------------------ events
+  // What writes: one at a time, and the pressed one shows it is working.
+  const WRITES = "[data-send],[data-dlg-ok],[data-dlg-clear],[data-project],[data-decide],[data-do^='act:'],[data-do^='say:']";
+  async function write(el) {
+    if (el.dataset.send !== undefined) return sendDraft();
+    if (el.dataset.dlgOk !== undefined) return dialogOk(el.dataset.dlgOk);
+    if (el.dataset.dlgClear !== undefined) return act("due", { date: "" }, S.dialog.task.id);
+    if (el.dataset.project !== undefined) return act("project", { project: el.dataset.project }, S.dialog.task.id);
+    if (el.dataset.decide !== undefined) return decideChoice(el.dataset.decide);
+    return doIt(el.dataset.do);
+  }
+
   document.addEventListener("click", async (e) => {
     const el = e.target.closest("[data-go],[data-do],[data-more],[data-send],[data-back],[data-expand],[data-palette]," +
       "[data-close],[data-opt],[data-dlg-ok],[data-dlg-clear],[data-project],[data-decide],[data-preview],[data-theme-cycle],[data-unclamp]");
     if (!el) return;
+    lastPressed = el;
     if (el.dataset.close !== undefined) {
       if (el.classList.contains("scrim") && e.target !== el) return;   // a click inside the modal
       S.dialog = null;
@@ -1032,6 +1272,12 @@
       return render();
     }
     e.preventDefault();
+    if (el.matches(WRITES)) {
+      if (S.pressed) return;
+      hold(el);
+      try { await write(el); } finally { hold(null); settle(); }
+      return;
+    }
     if (el.dataset.go !== undefined) {
       S.palette = false;
       S.dialog = null;
@@ -1047,26 +1293,10 @@
     if (el.dataset.expand !== undefined) { S.expanded = { ...(S.expanded || {}), [el.dataset.expand]: true }; return render(); }
     if (el.dataset.palette !== undefined) { return openPalette(); }
     if (el.dataset.themeCycle !== undefined) return cycleTheme();
-    if (el.dataset.send !== undefined) {
-      const box = document.getElementById("draft");
-      S.draft = box ? box.value : S.draft;
-      if (await send(S.draft, "hermes")) {
-        S.draft = "";
-        await refresh();
-      } else render();
-      return;
-    }
     if (el.dataset.opt !== undefined) {
-      const g = S.dialog;
-      const who = document.getElementById("dlg-who");
-      if (who) g.who = who.value;
-      g.value = el.dataset.opt;
+      S.dialog.value = el.dataset.opt;
       return render();
     }
-    if (el.dataset.dlgOk !== undefined) return dialogOk(el.dataset.dlgOk);
-    if (el.dataset.dlgClear !== undefined) return act("due", { date: "" }, S.dialog.task.id);
-    if (el.dataset.project !== undefined) return act("project", { project: el.dataset.project }, S.dialog.task.id);
-    if (el.dataset.decide !== undefined) return decideChoice(el.dataset.decide);
     if (el.dataset.preview !== undefined) {
       try {
         const res = await fetch(`/api/deliveries/${encodeURIComponent(S.delivery.version.id)}/files/${el.dataset.preview}`, { credentials: "same-origin" });
@@ -1082,22 +1312,24 @@
     if (e.target.id === "decide-line" && S.decide) S.decide.line = e.target.value;
     if (e.target.id === "search-input") searchFor(e.target.value, false);
     if (e.target.id === "palette-input") searchFor(e.target.value, true);
-    if (e.target.id === "dlg-start" && S.dialog) {
-      S.dialog.note = document.getElementById("dlg-note").value;
-      S.dialog.done = document.getElementById("dlg-done").value;
+    // What is typed in a dialog is kept, so nothing redrawn under it loses it.
+    const field = { "dlg-note": "note", "dlg-done": "done", "dlg-who": "who", "dlg-at": "at", "dlg-date": "picked" }[e.target.id];
+    if (field && S.dialog) S.dialog[field] = e.target.value;
+    if (e.target.id === "dlg-start" && S.dialog && S.dialog.start !== e.target.value) {
       S.dialog.start = e.target.value;
       render();
     }
-    if (e.target.id === "dlg-date" && S.dialog) S.dialog.picked = e.target.value;
   });
   document.addEventListener("change", (e) => {
-    if (e.target.id === "dlg-start" && S.dialog) {
-      S.dialog.note = document.getElementById("dlg-note").value;
-      S.dialog.done = document.getElementById("dlg-done").value;
+    if (e.target.id === "dlg-start" && S.dialog && S.dialog.start !== e.target.value) {
       S.dialog.start = e.target.value;
       render();
     }
   });
+  document.addEventListener("focusout", () => setTimeout(settle, 0));
+  document.addEventListener("toggle", (e) => {
+    if (e.target.dataset && e.target.dataset.keep) S.open[e.target.dataset.keep] = e.target.open;
+  }, true);
 
   function openPalette() {
     S.palette = true;
@@ -1110,7 +1342,17 @@
   document.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
+      lastPressed = null;
       return openPalette();
+    }
+    // Tab stays inside an open dialog.
+    const modal = e.key === "Tab" && $overlay.querySelector(".modal");
+    if (modal) {
+      const list = [...modal.querySelectorAll("button, input, textarea, select, a[href]")].filter((x) => !x.disabled);
+      const first = list[0], last = list[list.length - 1];
+      const inside = modal.contains(document.activeElement);
+      if (first && e.shiftKey && (document.activeElement === first || !inside)) { e.preventDefault(); last.focus(); }
+      else if (first && !e.shiftKey && (document.activeElement === last || !inside)) { e.preventDefault(); first.focus(); }
     }
     if (e.key === "Escape") {
       if (S.dialog || S.palette) { S.dialog = null; S.palette = false; return render(); }
@@ -1141,6 +1383,7 @@
     await refresh();
   });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
+  document.addEventListener("touchstart", () => {}, { passive: true });   // so iOS shows :active on a tap
 
   // ------------------------------------------------------------------ start
   (async function start() {
