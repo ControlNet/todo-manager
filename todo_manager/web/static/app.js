@@ -120,7 +120,7 @@
     me: null, home: null, list: null, listKey: null, detail: null, detailId: null, more: false,
     target: "hermes", draft: "", stamp: null, projects: null, project: null, delivery: null, filePreview: null,
     search: { q: "", res: null, sel: 0 }, decide: null, sending: false, dialog: null,
-    pressed: null, stale: false, outbox: null, shown: false, layer: "", opener: null,
+    pressed: null, stale: false, outbox: null, shown: false, layer: "", opener: null, open: {},
   };
 
   // ------------------------------------------------------------------ server
@@ -563,7 +563,7 @@
     const ph = t({ answer: "ph_answer", review: "ph_review", running: "ph_running" }[d.kind] || "ph_hermes");
     return `<div class="composer">
       <div class="compose-row"><label class="sr" for="draft">${esc(ph)}</label>
-        <textarea id="draft" rows="2" placeholder="${esc(ph)}">${esc(S.draft)}</textarea>
+        <textarea id="draft" rows="2" placeholder="${esc(ph)}"></textarea>
         <button class="btn primary" data-send="1">${esc(t("send"))}</button></div>
     </div>`;
   }
@@ -575,7 +575,7 @@
       : `<div class="prop"><span class="k">${esc(label)}</span>${v}</div>`;
   }
 
-  function detailView(d, opts) {
+  function detailBody(d, opts) {
     const compact = opts && opts.compact;
     const b = banner(d);
     const actor = { me: t("a_me"), agent: t("a_agent"), external: t("a_external") }[d.next_actor];
@@ -594,7 +594,7 @@
       ${d.sources.map((s) => `<div class="source"><span class="tag">${esc(s.source)}</span>
         ${s.url ? `<a class="text" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title || s.author || s.id)}</a>`
           : `<span class="text">${esc(s.title || s.author || s.id)}</span>`}<span class="when">${esc(day((s.at || "").slice(0, 10)))}</span></div>`).join("")}</div></div>` : "";
-    const history = d.history.length ? `<details><summary>${esc(t("history"))}</summary><div class="history">
+    const history = d.history.length ? `<details data-keep="history"><summary>${esc(t("history"))}</summary><div class="history">
       ${d.history.slice().reverse().map((h) => `<span>${esc(stamp(h.at))} · ${esc(h.actor)}/${esc(h.origin)} · ${esc(Object.keys(h.changes).join(", "))}</span>`).join("")}</div></details>` : "";
     return `<div class="back"><button data-back="1" aria-label="back">‹</button><span class="muted">${esc(d.project ? d.project.title : "")}</span></div>
       <div class="detail-body" id="detail-scroll">
@@ -616,7 +616,7 @@
           `<a href="${esc(taskHash(l.task))}">${esc(l.title || l.task)}</a>`).join("")}</div>` : ""}
         <div class="thread"><span class="label">${esc(t("discussion"))}</span>${threadView(d)}</div>
         ${compact ? "" : history}
-      </div>${composer(d)}`;
+      </div>`;
   }
 
   // ------------------------------------------------------------------ pages
@@ -641,7 +641,7 @@
       <div class="view-head"><h1>${p.image || p.icon ? pdot(p) + " " : ""}${esc(p.title)}</h1><span class="sub">${esc(t("ps_" + p.status))}</span></div>
       <div class="split"><div class="card"><span class="label">${esc(t("openTasks"))} · ${open.length}</span>
           ${open.map((c) => row(c, "p:" + p.id)).join("") || `<span class="muted">${esc(t("empty"))}</span>`}
-          ${closed.length ? `<details><summary>${esc(t("closedTasks"))} · ${closed.length}</summary>${closed.slice(0, 50).map((c) => row(c, "p:" + p.id)).join("")}</details>` : ""}</div>
+          ${closed.length ? `<details data-keep="closed"><summary>${esc(t("closedTasks"))} · ${closed.length}</summary>${closed.slice(0, 50).map((c) => row(c, "p:" + p.id)).join("")}</details>` : ""}</div>
         <div class="card">${field(t("projGoal"), p.goal)}${field(t("projNext"), p.next_step)}${field(t("projBlockers"), p.blockers)}
           ${field(t("projRecent"), p.recent_activity)}${field(t("projRepos"), (p.repos || []).join("\n"))}</div></div></section>`;
   }
@@ -723,7 +723,7 @@
               <a class="btn small" href="/api/deliveries/${esc(x.version.id)}/files/${f.index}" download="${esc(f.name)}">${esc(t("download"))}</a>`
               : `<span class="muted">${esc(t("notCopied"))}</span>`}</div>`).join("")}</div>
           ${S.filePreview ? `<pre class="preview">${esc(S.filePreview)}</pre>` : ""}</div>` : ""}
-      </div><div class="card" style="padding:0;overflow:hidden">${detailView(d, { compact: true })}</div></div></section>`;
+      </div><div class="card" style="padding:0;overflow:hidden">${detailBody(d, { compact: true }) + composer(d)}</div></div></section>`;
   }
 
   function searchResults(res, palette) {
@@ -849,6 +849,27 @@
   const findSel = (s) => (s ? document.querySelectorAll(s.sel)[s.n] || null : null);
   let lastPressed = null;
 
+  // The page is a few regions, each written only when its HTML changes: what the user is doing in
+  // the others (focus, selection, scroll, an open <details>) is left alone, and a poll that brings
+  // nothing new changes nothing.
+  const written = new WeakMap();
+  function patch(el, html) {
+    if (written.get(el) === html) return false;
+    el.innerHTML = html;
+    written.set(el, html);
+    return true;
+  }
+  let R = null;
+  function regions() {
+    if (R) return R;
+    $app.innerHTML = `<div class="region" id="r-nav"></div><div class="region" id="r-main"></div>
+      <article class="detail closed" id="r-detail"><div class="region" id="r-body"></div><div class="region" id="r-compose"></div></article>
+      <div class="region" id="r-tabs"></div>`;
+    R = {};
+    for (const k of ["nav", "main", "detail", "body", "compose", "tabs"]) R[k] = document.getElementById("r-" + k);
+    return R;
+  }
+
   function render() {
     if (!S.home) return;
     const r = route();
@@ -862,24 +883,33 @@
     const range = active && typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null;
     const layer = S.dialog ? "dialog" : S.palette ? "palette" : "";
     if (layer && !S.layer) S.opener = selOf(active && active !== document.body && !$overlay.contains(active) ? active : lastPressed);
-    let main;
+    const $ = regions();
+    let main = "";
+    let d = null, loading = false;
     if (r.page === "tasks") {
       // Another task on its way keeps the one shown, dimmed, until it comes.
-      const d = S.detail && r.task && (S.detailId === r.task || S.shown) ? S.detail : null;
-      const loading = !!d && S.detailId !== r.task;
-      S.shown = !!d;
-      main = listView(r.view) + `<article class="detail${d ? "" : " closed"}" aria-label="${esc(d ? d.title : "")}"${loading ? ' aria-busy="true"' : ""}>
-        ${d ? detailView(d) : `<div class="empty-detail"></div>`}</article>`;
-    } else {
-      S.shown = false;
-      if (r.page === "projects") main = projectsPage();
-      else if (r.page === "project") main = projectPage(r);
-      else if (r.page === "delivery") main = deliveryPage(r);
-      else if (r.page === "search") main = searchPage();
-      else if (r.page === "decide") main = decidePage();
-    }
-    $app.innerHTML = sidebar(r) + rail(r) + main + tabbar(r);
-    $overlay.innerHTML = S.dialog ? dialogView() : S.palette ? paletteView() : "";
+      d = S.detail && r.task && (S.detailId === r.task || S.shown) ? S.detail : null;
+      loading = !!d && S.detailId !== r.task;
+      main = listView(r.view);
+    } else if (r.page === "projects") main = projectsPage();
+    else if (r.page === "project") main = projectPage(r);
+    else if (r.page === "delivery") main = deliveryPage(r);
+    else if (r.page === "search") main = searchPage();
+    else if (r.page === "decide") main = decidePage();
+    S.shown = !!d;
+    patch($.nav, sidebar(r) + rail(r));
+    patch($.main, main);
+    $.detail.hidden = r.page !== "tasks";
+    $.detail.className = "detail" + (d ? "" : " closed");
+    $.detail.setAttribute("aria-label", d ? d.title : "");
+    if (loading) $.detail.setAttribute("aria-busy", "true"); else $.detail.removeAttribute("aria-busy");
+    patch($.body, d ? detailBody(d) : r.page === "tasks" ? `<div class="empty-detail"></div>` : "");
+    patch($.compose, d ? composer(d) : "");
+    patch($.tabs, tabbar(r));
+    patch($overlay, S.dialog ? dialogView() : S.palette ? paletteView() : "");
+    const box = document.getElementById("draft");
+    if (box && box.value !== S.draft) box.value = S.draft;
+    for (const el of document.querySelectorAll("details[data-keep]")) el.open = !!S.open[el.dataset.keep];
     document.body.style.overflow = window.matchMedia("(max-width: 767px)").matches && r.page === "tasks" && r.task ? "hidden" : "";
     for (const [id, top] of Object.entries(keep)) {
       const el = document.getElementById(id);
@@ -1209,6 +1239,9 @@
     }
   });
   document.addEventListener("focusout", () => setTimeout(settle, 0));
+  document.addEventListener("toggle", (e) => {
+    if (e.target.dataset && e.target.dataset.keep) S.open[e.target.dataset.keep] = e.target.open;
+  }, true);
 
   function openPalette() {
     S.palette = true;
