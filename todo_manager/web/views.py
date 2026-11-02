@@ -22,6 +22,7 @@ CHOICE_KINDS = ("decision_choice", "delegate_request")
 DERIVED_KINDS = ("delegate_unassigned",)   # the program's wording only: shown by its reply
 THREAD_LIMIT = 60
 HISTORY_LIMIT = 30
+CHANGE_NOTE_DAYS = 7
 SEARCH_LIMIT = 20
 TEXT_PREVIEW_BYTES = 256 * 1024
 
@@ -99,9 +100,17 @@ def card(conn: sqlite3.Connection, task: dict[str, Any], projects: dict[str, dic
         "due": due, "overdue": bool(due and due < on.isoformat() and kind != "closed"),
         "follow_up": follow, "follow_up_due": bool(follow and follow <= on.isoformat()),
         "snooze_until": _day(task.get("snooze_until")), "snoozed": _snoozed(task, on),
-        "focus": bool(task.get("focus")), "change_note": task.get("change_note"),
+        "focus": bool(task.get("focus")), **_change_note(task),
         "source": sources.get(task["id"]), "updated_at": task["updated_at"], "version": task["version"],
     }
+
+
+def _change_note(task: dict[str, Any]) -> dict[str, Any]:
+    """"What changed" is news for a week (as Notion's recent-changes view); a note is never cleared."""
+    at = clock.parse(task.get("change_note_at"))
+    recent = at is not None and clock.now() - at < timedelta(days=CHANGE_NOTE_DAYS)
+    return {"change_note": task.get("change_note") if recent else None,
+            "change_note_at": task.get("change_note_at") if recent else None}
 
 
 def _open_cards(conn: sqlite3.Connection, cfg: Config) -> list[dict[str, Any]]:

@@ -580,7 +580,7 @@
         ${compact ? "" : `<div class="props">${props}</div>`}
         ${b ? `<section class="banner ${b[0]}"><span class="k">${esc(b[1])}</span>${b[2] ? bannerText(b[2]) : ""}
           ${b[3] ? `<a href="${esc(b[3])}">${esc(t("viewDelivery"))} →</a>` : ""}</section>` : ""}
-        ${d.change_note && !compact && !["answer", "review", "running", "closed"].includes(d.kind) ? `<section class="banner accent"><span class="k">${esc(t("b_change"))}</span>${bannerText(d.change_note)}</section>` : ""}
+        ${d.change_note && !compact && !["answer", "review", "running", "closed"].includes(d.kind) ? `<section class="banner accent"><span class="k">${esc(t("b_change"))} · ${esc(stamp(d.change_note_at))}</span>${bannerText(d.change_note)}</section>` : ""}
         <div class="actions">${actionsFor(d).map((a) => button(a)).join("")}
           <button class="btn ghost" data-more="1" aria-expanded="${S.more}">${esc(t("more"))}</button></div>
         ${more}

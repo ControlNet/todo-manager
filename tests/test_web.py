@@ -5,7 +5,7 @@ import http.client
 import json
 import sqlite3
 
-from todo_manager import db, delegation, feedback, store
+from todo_manager import clock, db, delegation, feedback, store
 from todo_manager.db import loads
 from todo_manager.kanban import FakeKanban
 from todo_manager.web import actions, server, views
@@ -111,6 +111,20 @@ class ViewTests(WebCase):
         self.assertEqual([p["id"] for p in found["projects"]], [pid])
         self.assertEqual(views.search(self.conn, self.cfg, "  ")["tasks"], [])
         self.assertEqual(views.search(self.conn, self.cfg, "100%_")["tasks"], [])
+
+    def test_what_changed_shows_for_a_week_with_its_date(self):
+        tid = self.task()
+        actions.act(self.conn, self.cfg, tid, "due", {"date": "2026-10-20"}, "test-request-note")
+        self.conn.execute("UPDATE tasks SET change_note='Deadline moved', change_note_at=? WHERE id=?",
+                          (clock.iso(), tid))
+        shown = views.task_detail(self.conn, self.cfg, tid)
+        self.assertEqual((shown["change_note"], shown["change_note_at"]), ("Deadline moved", clock.iso()))
+        clock.advance(days=6, hours=23)
+        self.assertEqual(views.task_detail(self.conn, self.cfg, tid)["change_note"], "Deadline moved")
+        clock.advance(hours=2)
+        self.assertIsNone(views.task_detail(self.conn, self.cfg, tid)["change_note"])
+        self.conn.execute("UPDATE tasks SET change_note_at=NULL WHERE id=?", (tid,))
+        self.assertIsNone(views.task_detail(self.conn, self.cfg, tid)["change_note"], "a note without a time is old")
 
     def test_search_shows_a_mail_thread_once_not_every_reply(self):
         from todo_manager.sources.base import FetchResult, Item, persist_fetch

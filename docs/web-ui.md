@@ -29,8 +29,9 @@ sets its cookie `Secure` when the tunnel says the request came over HTTPS.
   left out until their date, as on the Notion home page.
 - **Decide / Agent / Waiting / All**, and each project's tasks.
 - **Task**: fields, the current state as a banner (the agent's question, its latest delivery,
-  who you are waiting on), sources, your Notion page notes (read only), the discussion and the
-  change history.
+  who you are waiting on), *what changed* with its time for a week after it was written (as the
+  Notion view of recent changes; the note itself stays on the task), sources, your Notion page
+  notes (read only), the discussion and the change history.
 - **Delivery**: each version the agent delivered, its notes (Markdown) and its files (preview and
   download of the copies kept in the workspace).
 - **Projects** with their goal, next step, blockers and tasks; **search** over tasks, projects
