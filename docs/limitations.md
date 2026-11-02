@@ -153,6 +153,12 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
   A task names a PR by its link, `owner/repo#N`, or `#N` together with the repository or owner
   name; a task that names it differently is found when its due date has passed (the run searches
   the stored material), not when the PR is merged.
+- GitHub does not notify the actor of their own action, and the notifications `since` filter skips
+  a thread whose only change is the user's own merge or close. The state of PRs and issues open
+  tasks wait for (their evidence, or a link / `owner/repo#N` in their text) is therefore read
+  directly every `github.watch_minutes` (15, one request per matter, at most 200 matters); a
+  merge, close (with its reason) or reopen is news for the task. A PR or issue named only as `#N`
+  is not watched.
   GitHub notification emails read through Gmail do not say who opened the PR, so such an email
   still reaches the model (which can ignore it as `automated_notice`).
 - An event the user takes part in (meeting, review, seminar, workshop) is closed at the first intake

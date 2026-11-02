@@ -81,6 +81,8 @@ DEFAULTS: dict[str, Any] = {
         "quiet_minutes": 10,  # PROPOSED
         "min_wake_interval_minutes": 60,  # PROPOSED
         "overlap_minutes": 30,
+        "watch_open_tasks": True,  # read the state of PRs/issues open tasks wait for (own merges are not notified)
+        "watch_minutes": 15,
         "bot_logins": [],  # accounts GitHub does not mark as bots (it marks apps: type Bot, "<name>[bot]")
     },
     "commits": {
