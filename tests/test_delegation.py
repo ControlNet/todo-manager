@@ -40,6 +40,15 @@ class DelegationTests(WorkspaceCase):
         task = store.get_task(self.conn, self.task)
         self.assertEqual((task["status"], task["next_actor"]), ("todo", "agent"), "the status stays the user's")
 
+    def test_the_card_asks_for_a_report_the_user_can_read_with_the_writing_skills(self):
+        self.cfg.data["kanban"]["skills"] = ["ccf-humanization"]
+        self.delegate()
+        self.tick()
+        card = next(iter(self.kb.cards.values()))
+        self.assertEqual(card["skills"], ["ccf-humanization"])
+        self.assertIn("not as a technical report", card["body"])
+        self.assertIn("ccf-humanization", card["body"])
+
     def test_lost_create_response_is_reconciled_not_duplicated(self):
         did = self.delegate()
         self.kb.lose_response.add("create")
