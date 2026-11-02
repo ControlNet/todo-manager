@@ -351,14 +351,30 @@
   }
 
   // ------------------------------------------------------------------ navigation
+  // One line icon set (24 px grid, drawn in currentColor).
+  const ICONS = {
+    today: '<rect x="3.5" y="5" width="17" height="15.5" rx="3"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
+    decide: '<path d="M12 3.5 20.5 12 12 20.5 3.5 12Z"/>',
+    agent: '<path d="M12 3.5Q13 11 20.5 12Q13 13 12 20.5Q11 13 3.5 12Q11 11 12 3.5Z"/>',
+    waiting: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+    all: '<path d="M9 6.5h10.5M9 12h10.5M9 17.5h10.5M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01"/>',
+    projects: '<rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/>'
+      + '<rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/>',
+    search: '<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>',
+    theme: '<circle cx="12" cy="12" r="8.5"/><path class="solid" d="M12 3.5a8.5 8.5 0 0 1 0 17Z"/>',
+    back: '<path d="m14.5 6-6 6 6 6"/>',
+  };
+  const icon = (name) => `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
+  const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+
   function navItems() {
     const n = (S.home && S.home.counts) || {};
     return [
-      { key: "today", hash: "#/tasks/today", glyph: "◎", count: (n.decide || 0) + (n.mine || 0) + (n.agent_wait || 0) },
-      { key: "decide", hash: "#/tasks/decide", glyph: "◆", count: n.decide || 0, badge: n.decide },
-      { key: "agent", hash: "#/tasks/agent", glyph: "✦", count: (n.agent_wait || 0) + (n.agent_run || 0), badge: n.agent_wait },
-      { key: "waiting", hash: "#/tasks/waiting", glyph: "◷", count: n.waiting || 0 },
-      { key: "all", hash: "#/tasks/all", glyph: "≡", count: S.home ? S.home.open : 0 },
+      { key: "today", hash: "#/tasks/today", count: (n.decide || 0) + (n.mine || 0) + (n.agent_wait || 0) },
+      { key: "decide", hash: "#/tasks/decide", count: n.decide || 0, badge: n.decide },
+      { key: "agent", hash: "#/tasks/agent", count: (n.agent_wait || 0) + (n.agent_run || 0), badge: n.agent_wait },
+      { key: "waiting", hash: "#/tasks/waiting", count: n.waiting || 0 },
+      { key: "all", hash: "#/tasks/all", count: S.home ? S.home.open : 0 },
     ];
   }
   function currentNav(r) {
@@ -373,7 +389,7 @@
     const projects = ((S.home && S.home.projects) || []).filter((p) => p.status === "active" || p.counts.open);
     return `<nav class="nav" aria-label="${esc(t("today"))}">
       <div class="brand"><span class="logo">TM</span><span>Todo Manager</span></div>
-      <button class="nav-search" data-palette="1"><span>${esc(t("search"))}</span><span>⌘K</span></button>
+      <button class="nav-search" data-palette="1"><span>${esc(t("search"))}</span><kbd>${MAC ? "⌘K" : "Ctrl K"}</kbd></button>
       <div class="nav-group">${navItems().map((i) => `<button class="nav-item${cur === i.key ? " on" : ""}" data-go="${i.hash}">
         <span class="label">${esc(t(i.key))}</span><span class="count">${i.count === "" ? "" : esc(i.count)}</span></button>`).join("")}</div>
       ${projects.length ? `<div class="nav-group"><button class="nav-head${cur === "projects" ? " on" : ""}" data-go="#/projects">${esc(t("projects"))} ›</button>
@@ -388,19 +404,19 @@
   function rail(r) {
     const cur = currentNav(r);
     return `<nav class="rail" aria-label="${esc(t("today"))}"><span class="logo">TM</span>
-      ${navItems().concat([{ key: "projects", hash: "#/projects", glyph: "▦" }]).map((i) => `<button class="rail-item${cur === i.key ? " on" : ""}" data-go="${i.hash}" aria-label="${esc(t(i.key))}">
-        <span class="g">${i.glyph}</span>${esc(t(i.key))}${i.badge ? `<span class="badge">${i.badge}</span>` : ""}</button>`).join("")}
-      <button class="rail-item" data-palette="1" aria-label="${esc(t("search"))}"><span class="g">⌕</span>${esc(t("search"))}</button>
+      ${navItems().concat([{ key: "projects", hash: "#/projects" }]).map((i) => `<button class="rail-item${cur === i.key ? " on" : ""}" data-go="${i.hash}" aria-label="${esc(t(i.key))}">
+        ${icon(i.key)}${esc(t(i.key))}${i.badge ? `<span class="badge">${i.badge}</span>` : ""}</button>`).join("")}
+      <button class="rail-item" data-palette="1" aria-label="${esc(t("search"))}">${icon("search")}${esc(t("search"))}</button>
       <span class="grow"></span>
-      <button class="rail-item" data-theme-cycle="1" aria-label="${esc(t("theme"))}"><span class="g">◐</span></button></nav>`;
+      <button class="rail-item" data-theme-cycle="1" aria-label="${esc(t("theme"))}">${icon("theme")}</button></nav>`;
   }
   function tabbar(r) {
     const cur = currentNav(r);
     const n = (S.home && S.home.counts) || {};
-    const tabs = [["today", "#/tasks/today", "◎"], ["decide", "#/decide", "◆", n.decide], ["agent", "#/tasks/agent", "✦", n.agent_wait],
-      ["projects", "#/projects", "▦"], ["search", "#/search", "⌕"]];
-    return `<nav class="tabbar" aria-label="${esc(t("today"))}">${tabs.map(([k, h, g, b]) => `<button class="tab${cur === k ? " on" : ""}" data-go="${h}">
-      <span class="g">${g}</span>${esc(t(k))}${b ? `<span class="badge">${b}</span>` : ""}</button>`).join("")}</nav>`;
+    const tabs = [["today", "#/tasks/today"], ["decide", "#/decide", n.decide], ["agent", "#/tasks/agent", n.agent_wait],
+      ["projects", "#/projects"], ["search", "#/search"]];
+    return `<nav class="tabbar" aria-label="${esc(t("today"))}">${tabs.map(([k, h, b]) => `<button class="tab${cur === k ? " on" : ""}" data-go="${h}">
+      ${icon(k)}${esc(t(k))}${b ? `<span class="badge">${b}</span>` : ""}</button>`).join("")}</nav>`;
   }
 
   // ------------------------------------------------------------------ task lists
@@ -580,7 +596,7 @@
     const b = banner(d);
     const actor = { me: t("a_me"), agent: t("a_agent"), external: t("a_external") }[d.next_actor];
     const props = [
-      prop(t("p_status"), kindLabel(d)), prop(t("p_actor"), actor),
+      b ? "" : prop(t("p_status"), kindLabel(d)), prop(t("p_actor"), actor),
       prop(t("p_due"), d.due ? day(d.due) : "", { warn: d.overdue, does: d.kind === "closed" ? "" : "dlg:due" }),
       d.kind === "waiting" || d.follow_up ? prop(t("p_follow"), d.follow_up ? day(d.follow_up) : "", { warn: d.follow_up_due, does: "dlg:followup" }) : "",
       d.snoozed ? prop(t("p_snooze"), day(d.snooze_until), { does: "dlg:snooze" }) : "",
@@ -596,10 +612,10 @@
           : `<span class="text">${esc(s.title || s.author || s.id)}</span>`}<span class="when">${esc(day((s.at || "").slice(0, 10)))}</span></div>`).join("")}</div></div>` : "";
     const history = d.history.length ? `<details data-keep="history"><summary>${esc(t("history"))}</summary><div class="history">
       ${d.history.slice().reverse().map((h) => `<span>${esc(stamp(h.at))} · ${esc(h.actor)}/${esc(h.origin)} · ${esc(Object.keys(h.changes).join(", "))}</span>`).join("")}</div></details>` : "";
-    return `<div class="back"><button data-back="1" aria-label="back">‹</button><span class="muted">${esc(d.project ? d.project.title : "")}</span></div>
+    return `<div class="back"><button data-back="1" aria-label="back">${icon("back")}</button><span class="muted">${esc(d.project ? d.project.title : "")}</span></div>
       <div class="detail-body" id="detail-scroll">
         ${compact ? "" : `<div class="crumb"><span class="project">${pdot(d.project)} ${esc(d.project ? d.project.title : t("noProject"))}</span>
-          <span class="pill ${kindTone(d)}">${esc(kindLabel(d))}</span><span class="grow"></span>
+          ${b ? "" : `<span class="pill ${kindTone(d)}">${esc(kindLabel(d))}</span>`}<span class="grow"></span>
           ${d.notion_url ? `<a href="${esc(d.notion_url)}" target="_blank" rel="noopener noreferrer">Notion ↗</a>` : ""}</div>`}
         <h2>${esc(d.title)}</h2>
         ${compact ? "" : `<div class="props">${props}</div>`}
@@ -781,9 +797,15 @@
       ${esc(label)}${sub ? `<small>${esc(sub)}</small>` : ""}</button>`).join("")}</div>`;
   }
   const dateChoices = (kind) => {
-    const list = kind === "snooze" ? [[addDays(1), t("tomorrow")], [nextWeekday(1), t("nextMonday")], [addDays(7), t("inWeek")]]
-      : [[addDays(3), t("inThree")], [nextWeekday(1), t("nextMonday")], [addDays(7), t("inWeek")]];
-    return list.map(([v, label]) => [v, label, day(v)]).concat([["pick", t("pickDate"), ""]]);
+    // [date, name, whether the name already says the weekday]
+    const list = kind === "snooze" ? [[addDays(1), t("tomorrow")], [nextWeekday(1), t("nextMonday"), true], [addDays(7), t("inWeek")]]
+      : [[addDays(3), t("inThree")], [nextWeekday(1), t("nextMonday"), true], [addDays(7), t("inWeek")]];
+    const when = (v, named) => {
+      const d = dateOf(v);
+      const md = `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+      return named ? md : `${t("weekday")[d.getUTCDay()]} ${md}`;
+    };
+    return list.map(([v, label, named]) => [v, label, when(v, named)]).concat([["pick", t("pickDate"), ""]]);
   };
   function dialogView() {
     const g = S.dialog;

@@ -34,6 +34,7 @@ from . import actions, views
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("font/woff2", ".woff2")
 
 STATIC = Path(__file__).with_name("static")
 COOKIE = "tm_session"

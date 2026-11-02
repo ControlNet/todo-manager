@@ -384,6 +384,16 @@ class ServerTests(WebCase):
                                       {**self.signed_in(), "X-TM-Request": "1"})
         self.assertEqual((response.status, json.loads(data)["error"]), (400, "INVALID"))
 
+    def test_the_font_is_served_from_this_origin_with_its_licence(self):
+        response, data = self.request("GET", "/static/fonts/plus-jakarta-sans-latin.woff2")
+        self.assertEqual((response.status, response.getheader("Content-Type")), (200, "font/woff2"))
+        self.assertTrue(data.startswith(b"wOF2"))
+        response, data = self.request("GET", "/static/fonts/OFL.txt")
+        self.assertEqual(response.status, 200)
+        self.assertIn(b"SIL Open Font License", data)
+        response, data = self.request("GET", "/static/app.css")
+        self.assertIn(b"url(/static/fonts/plus-jakarta-sans-latin.woff2)", data)
+
     def test_static_files_and_delivered_files_stay_inside_their_folders(self):
         response, _ = self.request("GET", "/static/app.js", headers=self.signed_in())
         self.assertEqual(response.status, 200)
