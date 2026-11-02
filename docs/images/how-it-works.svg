@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1536" height="600" viewBox="0 0 1536 600" role="img" aria-labelledby="title desc">
 <title id="title">How Todo Manager works</title>
-<desc id="desc">Gmail, Slack and GitHub are read by Todo Manager's wake gate every five minutes. Only new material wakes the Hermes LLM judge, which writes task changes to the local store. Notion sync keeps the store and the Notion home and task pages in step. A card dragged to Agent work is delegated to a Hermes Kanban agent, whose results and questions come back to Notion.</desc>
+<desc id="desc">Gmail, Slack and GitHub are read by Todo Manager's wake gate every five minutes. Only new material wakes the Hermes LLM judge, which writes task changes to the local store. Notion sync keeps the store and the Notion home and task pages in step, and the optional Web UI shows the same tasks and actions in any browser. A card moved to Agent work is delegated to a Hermes Kanban agent, whose results and questions come back to the store and so to Notion and the Web UI.</desc>
 <style>
   text { font-family: 'Times New Roman', Times, 'Liberation Serif', 'Nimbus Roman', serif; fill: #111827; }
   .h1 { font-size: 28px; font-weight: 700; }
@@ -34,6 +34,8 @@
   .drag { fill: none; stroke: #C2410C; stroke-width: 1.5; stroke-dasharray: 4 3; }
   .head { fill: #374151; }
   .head-agent { fill: #C2410C; }
+  .b-done { fill: #DBEDDB; } .b-agent { fill: #E8DEEE; } .b-snooze { fill: #E3E2E0; }
+  .b-wait { fill: #FDECC8; } .b-cancel { fill: #FFE2DD; }
   @media (prefers-color-scheme: dark) {
     text { fill: #E6EDF3; }
     .lane-tm-label, .tm-text { fill: #79B8FF; }
@@ -55,6 +57,8 @@
     .edge-agent { stroke: #F0883E; }
     .head { fill: #9DA7B3; }
     .head-agent { fill: #F0883E; }
+    .b-done { fill: #2B593F; } .b-agent { fill: #492F64; } .b-snooze { fill: #4A4A4A; }
+    .b-wait { fill: #89632A; } .b-cancel { fill: #6E3630; }
   }
 </style>
 <defs>
@@ -65,13 +69,16 @@
 <!-- Regions and lanes -->
 <rect class="region" x="48" y="48" width="248" height="264" rx="12"/>
 <rect class="region" x="328" y="48" width="800" height="504" rx="12"/>
-<rect class="region" x="1160" y="48" width="328" height="504" rx="12"/>
+<rect class="region" x="1160" y="48" width="328" height="292" rx="12"/>
+<rect class="region" x="1160" y="356" width="328" height="196" rx="12"/>
 <rect class="lane-tm" x="344" y="104" width="768" height="208" rx="10"/>
 <rect class="lane-h" x="344" y="328" width="768" height="208" rx="10"/>
 <text class="h1" x="72" y="86">Your accounts</text>
 <text class="edge-label" x="72" y="114">read-only</text>
 <text class="h1" x="352" y="86">Your machine</text>
 <text class="h1" x="1184" y="86">Notion</text>
+<text class="h1" x="1184" y="394">Web UI</text>
+<text class="edge-label" x="1464" y="394" text-anchor="end">optional</text>
 <text class="lane-tm-label" x="360" y="136">Todo Manager</text>
 <text class="lane-h-label" x="360" y="360">Hermes</text>
 
@@ -99,64 +106,75 @@
 <line class="edge" x1="268" y1="220" x2="375" y2="220" marker-end="url(#head)"/>
 <line class="edge" x1="476" y1="264" x2="476" y2="403" marker-end="url(#head)"/>
 <text class="edge-label" x="464" y="390" text-anchor="end">if new</text>
-<line class="edge" x1="656" y1="404" x2="656" y2="265" marker-end="url(#head)"/>
-<text class="edge-label" x="668" y="390">task changes</text>
-<line class="edge" x1="841" y1="220" x2="903" y2="220" marker-start="url(#head)" marker-end="url(#head)"/>
-<line class="edge" x1="1105" y1="220" x2="1183" y2="220" marker-start="url(#head)" marker-end="url(#head)"/>
-<path class="edge-agent" d="M 808 264 L 808 448 L 871 448" marker-end="url(#head-agent)"/>
-<text class="agent-label" x="820" y="390">delegate</text>
-<line class="edge-agent" x1="1040" y1="404" x2="1040" y2="265" marker-end="url(#head-agent)"/>
-<text class="agent-label" x="1028" y="368" text-anchor="end">results,</text>
-<text class="agent-label" x="1028" y="390" text-anchor="end">questions</text>
+<line class="edge" x1="624" y1="404" x2="624" y2="265" marker-end="url(#head)"/>
+<text class="edge-label" x="636" y="390">task changes</text>
+<path class="edge" d="M 789 220 L 830 220 L 830 158 L 871 158" marker-start="url(#head)" marker-end="url(#head)"/>
+<path class="edge" d="M 789 220 L 830 220 L 830 262 L 871 262" marker-end="url(#head)"/>
+<line class="edge" x1="1089" y1="158" x2="1183" y2="158" marker-start="url(#head)" marker-end="url(#head)"/>
+<path class="edge" d="M 1089 262 L 1144 262 L 1144 452 L 1183 452" marker-start="url(#head)" marker-end="url(#head)"/>
+<line class="edge-agent" x1="760" y1="265" x2="760" y2="403" marker-start="url(#head-agent)" marker-end="url(#head-agent)"/>
+<text class="agent-label" x="772" y="368">delegate,</text>
+<text class="agent-label" x="772" y="390">results, questions</text>
 
 <!-- Todo Manager operators -->
 <rect class="op-tm" x="376" y="176" width="200" height="88" rx="8"/>
 <text class="title" x="476" y="214">Wake gate</text>
 <text class="sub" x="476" y="244">every 5 min, no LLM</text>
-<rect class="op-tm" x="640" y="176" width="200" height="88" rx="8"/>
-<text class="title" x="740" y="214">Local store</text>
-<text class="sub" x="740" y="244">SQLite database</text>
-<rect class="op-tm" x="904" y="176" width="200" height="88" rx="8"/>
-<text class="title" x="1004" y="214">Notion sync</text>
-<text class="sub" x="1004" y="244">your edits win</text>
+<rect class="op-tm" x="608" y="176" width="180" height="88" rx="8"/>
+<text class="title" x="698" y="214">Local store</text>
+<text class="sub" x="698" y="244">SQLite database</text>
+<rect class="op-tm" x="872" y="120" width="216" height="76" rx="8"/>
+<text class="title" x="980" y="153">Notion sync</text>
+<text class="sub" x="980" y="181">your edits win</text>
+<rect class="op-tm" x="872" y="224" width="216" height="76" rx="8"/>
+<text class="title" x="980" y="257">Web UI</text>
+<text class="sub" x="980" y="285">desktop and phone</text>
 
 <!-- Hermes operators -->
-<rect class="op-h" x="392" y="404" width="272" height="88" rx="8"/>
-<text class="title" x="528" y="442">LLM judge</text>
-<text class="sub" x="528" y="472">yours? due? done?</text>
-<text class="edge-label" x="528" y="522" text-anchor="middle">others kept, with a reason</text>
-<rect class="op-h" x="872" y="404" width="232" height="88" rx="8"/>
-<text class="title" x="988" y="442">Kanban agent</text>
-<text class="sub" x="988" y="472">drafts, research, docs</text>
+<rect class="op-h" x="380" y="404" width="260" height="88" rx="8"/>
+<text class="title" x="510" y="442">LLM judge</text>
+<text class="sub" x="510" y="472">yours? due? done?</text>
+<text class="edge-label" x="510" y="522" text-anchor="middle">others kept, with a reason</text>
+<rect class="op-h" x="704" y="404" width="248" height="88" rx="8"/>
+<text class="title" x="828" y="442">Kanban agent</text>
+<text class="sub" x="828" y="472">drafts, research, docs</text>
 
 <!-- Notion: home page -->
-<rect class="page" x="1184" y="104" width="280" height="208" rx="6"/>
-<text class="page-title" x="1200" y="136">Home page</text>
-<text class="agent-label" x="1448" y="136" text-anchor="end">you drag cards</text>
-<text class="small" x="1200" y="181">To decide</text>
-<rect class="card" x="1336" y="166" width="32" height="20" rx="3"/>
-<rect class="card" x="1376" y="166" width="32" height="20" rx="3"/>
-<rect class="card" x="1416" y="166" width="32" height="20" rx="3"/>
-<text class="small" x="1200" y="229">Agent work</text>
-<rect class="card-h" x="1336" y="214" width="32" height="20" rx="3"/>
-<rect class="card-h" x="1376" y="214" width="32" height="20" rx="3"/>
-<rect class="slot-h" x="1416" y="214" width="32" height="20" rx="3"/>
-<line class="drag" x1="1432" y1="187" x2="1432" y2="212" marker-end="url(#head-agent)"/>
-<text class="small" x="1200" y="277">Focus</text>
-<rect class="card" x="1336" y="262" width="32" height="20" rx="3"/>
-<rect class="card" x="1376" y="262" width="32" height="20" rx="3"/>
+<rect class="page" x="1184" y="104" width="280" height="120" rx="6"/>
+<text class="page-title" x="1200" y="134">Home page</text>
+<text class="agent-label" x="1448" y="134" text-anchor="end">you move cards</text>
+<text class="small" x="1200" y="168">To decide</text>
+<rect class="card" x="1336" y="153" width="32" height="20" rx="3"/>
+<rect class="card" x="1376" y="153" width="32" height="20" rx="3"/>
+<rect class="card" x="1416" y="153" width="32" height="20" rx="3"/>
+<text class="small" x="1200" y="210">Agent work</text>
+<rect class="card-h" x="1336" y="195" width="32" height="20" rx="3"/>
+<rect class="card-h" x="1376" y="195" width="32" height="20" rx="3"/>
+<rect class="slot-h" x="1416" y="195" width="32" height="20" rx="3"/>
+<line class="drag" x1="1432" y1="174" x2="1432" y2="193" marker-end="url(#head-agent)"/>
 
 <!-- Notion: task page -->
-<rect class="page" x="1184" y="336" width="280" height="200" rx="6"/>
-<text class="page-title" x="1200" y="368">Task page</text>
-<rect class="box-tm" x="1200" y="382" width="248" height="62" rx="4"/>
-<text class="tm-text" x="1212" y="406">kept up to date</text>
-<rect class="bar-tm" x="1212" y="418" width="200" height="6" rx="3"/>
-<rect class="bar-tm" x="1212" y="430" width="150" height="6" rx="3"/>
-<text class="small" x="1200" y="472" font-style="italic">your notes</text>
-<rect class="bar" x="1300" y="464" width="148" height="6" rx="3"/>
-<path class="icon-h" d="M 1201 488 L 1213 488 L 1218 493 L 1218 510 L 1201 510 Z"/>
-<text class="h-text" x="1228" y="506">Result page</text>
+<rect class="page" x="1184" y="236" width="280" height="88" rx="6"/>
+<text class="page-title" x="1200" y="264">Task page</text>
+<text class="tm-text" x="1200" y="290">kept up to date</text>
+<rect class="bar-tm" x="1350" y="282" width="98" height="6" rx="3"/>
+<path class="icon-h" d="M 1201 298 L 1211 298 L 1215 302 L 1215 316 L 1201 316 Z"/>
+<text class="h-text" x="1224" y="314">Result page</text>
+
+<!-- Web UI: the same tasks and actions in a browser -->
+<rect class="page" x="1184" y="412" width="280" height="124" rx="6"/>
+<text class="page-title" x="1200" y="440">Today</text>
+<rect class="card" x="1290" y="426" width="48" height="20" rx="4"/>
+<rect class="card" x="1346" y="426" width="48" height="20" rx="4"/>
+<rect class="card" x="1402" y="426" width="46" height="20" rx="4"/>
+<rect class="bar" x="1200" y="458" width="248" height="6" rx="3"/>
+<rect class="b-done" x="1200" y="474" width="40" height="18" rx="4"/>
+<rect class="b-agent" x="1248" y="474" width="56" height="18" rx="4"/>
+<rect class="b-snooze" x="1312" y="474" width="40" height="18" rx="4"/>
+<rect class="b-wait" x="1360" y="474" width="40" height="18" rx="4"/>
+<rect class="b-cancel" x="1408" y="474" width="40" height="18" rx="4"/>
+<rect class="page" x="1200" y="504" width="204" height="20" rx="4"/>
+<rect class="bar-tm" x="1412" y="504" width="36" height="20" rx="4"/>
 
 <!-- Legend -->
 <line class="edge" x1="56" y1="380" x2="104" y2="380" marker-end="url(#head)"/>
