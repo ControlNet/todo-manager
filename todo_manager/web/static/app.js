@@ -118,7 +118,7 @@
   // ------------------------------------------------------------------ state
   const S = {
     me: null, home: null, list: null, listKey: null, detail: null, detailId: null, more: false,
-    target: "hermes", draft: "", stamp: null, projects: null, project: null, delivery: null, filePreview: null,
+    draft: "", stamp: null, projects: null, project: null, delivery: null, filePreview: null,
     search: { q: "", res: null, sel: 0 }, decide: null, sending: false, dialog: null,
     pressed: null, stale: false, outbox: null, shown: false, layer: "", opener: null, open: {},
   };
