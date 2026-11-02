@@ -626,8 +626,24 @@
     const lines = esc(text || "").split("\n");
     const out = [];
     let list = null, code = false, table = false, para = [];
-    const inline = (s) => s.replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    const link = (href, label) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    // A bare web address is a link too. It ends at a space, a quote or angle bracket, CJK punctuation,
+    // or trailing ASCII punctuation (a closing parenthesis only when it has no opening one).
+    const BARE = /https?:\/\/(?:(?!&lt;|&gt;|&quot;|&#39;)[^\s\uE000（）【】「」『』，。；：！？、])+/g;
+    const inline = (s) => {
+      const kept = [];   // code and links, out of reach of the later replacements
+      const keep = (html) => `\uE000${kept.push(html) - 1}\uE001`;
+      const bare = (url) => {
+        let href = url;
+        while (".,;:!?*".includes(href.slice(-1)) || (href.endsWith(")") && !href.includes("("))) href = href.slice(0, -1);
+        return keep(link(href, href)) + url.slice(href.length);
+      };
+      return s.replace(/`([^`]+)`/g, (_, c) => keep(`<code>${c}</code>`))
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, href) => keep(link(href, label)))
+        .replace(BARE, bare)
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/\uE000(\d+)\uE001/g, (_, i) => kept[+i]);
+    };
     const flush = () => {
       if (para.length) { out.push(`<p>${inline(para.join("<br>"))}</p>`); para = []; }
       if (list) { out.push(`</${list}>`); list = null; }
