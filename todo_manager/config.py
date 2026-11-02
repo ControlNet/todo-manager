@@ -151,6 +151,13 @@ DEFAULTS: dict[str, Any] = {
         "webhook_silence_minutes": 10,  # our write without any event this long: webhook reported broken
         "unit_dir": "",  # "" = ~/.config/systemd/user; for tests (enable needs a systemd search path)
     },
+    # The Web UI (docs/web-ui.md), served by the daemon on loopback; sign in with
+    # `todo-manager web token`. Reaching it from other devices needs a tunnel the user sets up.
+    "web": {
+        "enabled": False,
+        "host": "127.0.0.1",
+        "port": 8656,
+    },
     # The Hermes installation and what `install` sets on new cron jobs ("" = Hermes' default).
     # A model, provider or reasoning effort changed on a job in Hermes is kept by later upgrades.
     "hermes": {

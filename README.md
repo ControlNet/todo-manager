@@ -129,6 +129,8 @@ at the top of your Notion page and in `todo-manager status`.
 - **Optional extras:** Gmail labels that show each mail's project and task state, and instant
   sync (seconds instead of minutes) through a small background service. See
   [operations](docs/operations.md).
+- **Web UI:** a page for desktop, tablet and phone with the same tasks and actions as Notion,
+  served by that background service. See [web UI](docs/web-ui.md).
 
 ## Learn more
 

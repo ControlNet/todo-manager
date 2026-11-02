@@ -768,7 +768,20 @@ def run(cfg: Config) -> int:
     if cfg.get("daemon.webhook", True):
         receiver = webhook.Receiver(cfg.home, queue.Queue(), host=str(cfg.get("daemon.host", "127.0.0.1")),
                                     port=int(cfg.get("daemon.port", 8655)), path=str(cfg.get("daemon.path", "/notion")))
+    site = None
+    if cfg.get("web.enabled", False):
+        from .web.server import WebServer
+        try:
+            site = WebServer(cfg)
+            site.start()
+        except OSError as exc:   # the page is off; the sync goes on
+            print(f"todo-manager daemon: web UI not started: {exc}", file=sys.stderr, flush=True)
     print(f"todo-manager daemon: {cfg.home}, webhook "
-          f"{'on 127.0.0.1:' + str(receiver.port) if receiver else 'off'}", file=sys.stderr, flush=True)
-    return Daemon(cfg).run_forever(receiver)
+          f"{'on 127.0.0.1:' + str(receiver.port) if receiver else 'off'}, web UI "
+          f"{'on ' + str(cfg.get('web.host')) + ':' + str(site.port) if site else 'off'}", file=sys.stderr, flush=True)
+    try:
+        return Daemon(cfg).run_forever(receiver)
+    finally:
+        if site is not None:
+            site.stop()
 

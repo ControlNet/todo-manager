@@ -54,14 +54,13 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from .. import clock, delegation, effects, feedback, health, i18n, ids, outbox, project_icons, project_summary, store
+from .. import board, clock, delegation, effects, feedback, health, i18n, ids, outbox, project_icons, project_summary, store
 from ..config import Config
 from ..db import dumps, get_meta, loads, set_meta, tx
 from . import body, delivery_pages, project_views, schema
 from .client import NotionClient, NotionError, NotionUncertain, plain_text
 
 TRASH_REASON = "sync.trash_reason"    # catalog keys
-BOARD_STATUS = {"cancel": "cancelled", "done": "done", "todo": "todo"}   # decision-board choice -> status
 HOME_MARKER = "home.marker"
 # meta key prefix + "{kind}:{entity id}": a page create that may have happened and is not linked
 # yet: when it was sent (or became uncertain) and the values it sent.
@@ -623,40 +622,10 @@ class NotionSync:
     def _apply_task_edit(self, row: dict[str, Any], page: dict[str, Any], changed: dict[str, Any],
                          seen: dict[str, Any], current: dict[str, Any]) -> None:
         task_id = row["entity_id"]
-        local = dict(changed)
-        choice = local.get('decision') if 'decision' in local else None
-        if choice == 'agent':
-            existing = store.get_task(self.conn, task_id)
-            desired_status = local.get('status', existing['status'])
-            if existing['status'] not in store.CLOSED_STATUSES and desired_status not in store.CLOSED_STATUSES:
-                local.update(status=desired_status if desired_status in ('todo', 'in_progress') else 'todo', next_actor='agent')
-            local['decision'] = None
-        board_closed = None
-        # The Agent progress board: Done / My to-do / Cancel act like the decision board's
-        # choices and also settle the agent work (``delegation.board_choice``); the program's
-        # own columns are not choices. The page gets the program's column back either way.
-        progress = local.pop('agent_progress', None) if 'agent_progress' in local else None
-        progress = progress if progress in BOARD_STATUS else None
-        if progress and 'status' not in local:
-            local['status'] = BOARD_STATUS[progress]
-            if progress == 'todo':
-                local['next_actor'] = 'me'
-            elif local['status'] in store.CLOSED_STATUSES:
-                board_closed = self.t('sync.agent_board_closed',
-                                      choice=schema.label('agent_progress', progress, self.state.language))
-        if choice in BOARD_STATUS:
-            # The board's own choices take effect here, without a model run; a status set in the
-            # same edit wins. The choice is cleared, so the handled card leaves the board.
-            if 'status' not in local:
-                local['status'] = BOARD_STATUS[choice]
-                if choice == 'todo':
-                    local['next_actor'] = 'me'
-                elif local['status'] in store.CLOSED_STATUSES:
-                    board_closed = self.t('sync.board_closed', choice=schema.label('decision', choice, self.state.language))
-            local['decision'] = None
-        relation_changed = 'project_id' in local
+        edit = board.prepare(self.conn, task_id, changed, self.state.language)
+        local = edit.local
         pending_relation = None
-        if relation_changed:
+        if 'project_id' in local:
             remote = local['project_id']
             resolved = self._local_project(remote)
             if remote and resolved is None:
@@ -674,77 +643,16 @@ class NotionSync:
                 payload={"changes": changed, "before": {k: seen.get(k) for k in changed}}, status="applied")
             if pending_relation:
                 store.defer_notion_project(self.conn, task_id, pending_relation, actor='human', cause_ref=fid)
-            board_notes = delegation.board_choice(self.conn, task_id, progress, fid) if progress else []
-            result = store.update_task(self.conn, task_id, local, actor="human", origin="notion", cause_ref=fid)
-            if board_closed and store.get_task(self.conn, task_id)['status'] in store.CLOSED_STATUSES:
-                store.set_closed_reason(self.conn, task_id, board_closed)
+            result, followups = board.apply(self.conn, task_id, edit, changed, fid=fid, author=author,
+                                            origin="notion_property", source_id=page["id"], origin_label="notion",
+                                            lang=self.state.language)
             after = store.get_task(self.conn, task_id)
-            if 'decision' in changed:
-                stale = [r['id'] for r in self.conn.execute(
-                    "SELECT id,payload FROM feedback WHERE scope_type='task' AND scope_id=? AND status='pending'",
-                    (task_id,)) if loads(r['payload'], {}).get('decision_event')]
-                feedback.supersede(self.conn, stale, 'replaced by a newer decision', by=fid)
-                # Preserve creation-body completeness while replacing the entire
-                # interpretation identity when its original choice is withdrawn.
-                creations = self.conn.execute(
-                    "SELECT * FROM feedback WHERE scope_type='task' AND scope_id=? "
-                    "AND kind='new_task' AND status='pending'", (task_id,)).fetchall()
-                for creation in creations:
-                    payload = loads(creation['payload'], {})
-                    payload['values'] = {**payload.get('values', {}), **local,
-                                         **({'decision': choice} if choice else {})}
-                    replacement, _ = feedback.record(
-                        self.conn, origin='notion_page', source_id=creation['source_id'],
-                        source_version='creation-choice:' + fid, text=creation['text'],
-                        scope_type='task', scope_id=task_id, kind='new_task', payload=payload,
-                        author=author, author_is_user=True)
-                    feedback.supersede(self.conn, [creation['id']], 'creation choice changed', by=replacement)
-                if not creations and after['status'] not in store.CLOSED_STATUSES and choice in ('agree', 'decline', 'agent'):
-                    feedback.record(self.conn, origin='notion_property', source_id=page['id'],
-                                    source_version='decision:' + fid, scope_type='task', scope_id=task_id,
-                                    kind='delegate_request' if choice == 'agent' else 'decision_choice',
-                                    author=author, author_is_user=True,
-                                    text=self.t('sync.decision_choice', choice=schema.label('decision', choice, self.state.language)),
-                                    payload={'decision_event': fid, 'decision': choice, 'task_version': after['version']})
-            # A board drag already queues the same durable delegation request.
-            semantic_changes = dict(changed)
-            if choice == 'agent':
-                semantic_changes.pop('next_actor', None)
-            if progress:
-                semantic_changes.update({k: local[k] for k in ('status', 'next_actor') if k in local})
-                semantic_changes.pop('next_actor', None)   # settled by board_choice, not a delegate request
-            followups = board_notes + self._edit_semantics(before, after, semantic_changes, fid, author)
             feedback.resolve(self.conn, fid, "applied", {"applied": result.applied, "rejected": result.rejected,
                                                          "followups": followups})
             self._seen(page["id"], current, page)
             if after["status"] != current.get("status") or after["next_actor"] != current.get("next_actor") \
                     or 'agent_progress' in changed:
                 effects.task_push(self.conn, task_id)   # normalised pair differs from what the user typed
-
-    def _edit_semantics(self, before: dict[str, Any], after: dict[str, Any], changed: dict[str, Any],
-                        fid: str, author: str | None) -> list[str]:
-        """Deterministic consequences of a verified user's property edit; ambiguous ones go to
-        the model as derived feedback that keeps the original author."""
-        notes: list[str] = []
-        active = delegation.for_task(self.conn, after["id"], active_only=True)
-        if "status" in changed and after["status"] in store.CLOSED_STATUSES:
-            status = schema.label("task_status", after["status"], self.state.language)
-            return delegation.on_task_closed(self.conn, after["id"], after["status"],
-                                             self.t("sync.closed_in_notion", status=status), fid)
-        field = schema.prop("task", "next_actor").name(self.state.language)
-        if "next_actor" in changed and after["next_actor"] == "agent" and before["next_actor"] != "agent" and not active:
-            feedback.record(self.conn, origin="notion_property", source_id=after["id"],
-                            source_version=f"delegate:{fid}", text=self.t("sync.set_to_agent", field=field),
-                            scope_type="task", scope_id=after["id"], kind="delegate_request", author=author,
-                            author_is_user=True, payload={"from_feedback": fid})
-            notes.append("delegate_request")
-        elif "next_actor" in changed and before["next_actor"] == "agent" and after["next_actor"] != "agent" and active:
-            feedback.record(self.conn, origin="notion_property", source_id=after["id"],
-                            source_version=f"unassign:{fid}", text=self.t("sync.unassigned", field=field),
-                            scope_type="task", scope_id=after["id"], kind="delegate_unassigned", author=author,
-                            author_is_user=True, payload={"from_feedback": fid, "delegations": [d["id"] for d in active]})
-            notes.append("delegate_unassigned")
-        return notes
 
     def _apply_project_edit(self, row: dict[str, Any], page: dict[str, Any], changed: dict[str, Any],
                             seen: dict[str, Any], current: dict[str, Any]) -> None:

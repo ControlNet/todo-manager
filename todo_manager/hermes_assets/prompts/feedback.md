@@ -86,6 +86,9 @@ Returning to Pending withdraws only unprocessed decision feedback; it does not u
 external effect or automatically cancel active work. Never replay an unknown external action.
 Use `--feedback` for these writes so superseded choices cannot be acted on by an older turn.
 
+The Web UI (origin `web`) offers the same choices and arrives as the same feedback kinds; its
+comments marked `to: agent` are meant for the agent working on the task.
+
 The Agent progress board's Done, My to-do and Cancel also take effect without a run (they accept
 or stop the agent work themselves). A comment on a task with agent work is an answer to the
 agent's open question, or else a change request (a revision of the delivered version).

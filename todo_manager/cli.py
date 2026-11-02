@@ -154,6 +154,20 @@ def cmd_gmail_labels(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    """The Web UI's sign-in token (docs/web-ui.md)."""
+    from .web import server
+    cfg = config.load(args.home)
+    token = server.load_token(cfg.home)
+    if token is None or args.new:
+        token = server.new_token(cfg.home)
+    print(token)
+    if not cfg.get("web.enabled"):
+        print("note: web.enabled is false; turn it on with `todo-manager config set web.enabled true --human`",
+              file=sys.stderr)
+    return 0
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
     """The real-time sync daemon (docs/realtime-sync.md)."""
     from . import daemon, webhook
@@ -702,6 +716,12 @@ def build_parser() -> argparse.ArgumentParser:
     dms.add_parser("restart", help="systemctl --user restart the daemon")
     s.set_defaults(fn=cmd_daemon)
 
+    s = sub.add_parser("web", help="the Web UI: print its sign-in token")
+    ws = s.add_subparsers(dest="action", required=True)
+    x = ws.add_parser("token", help="print the token the sign-in page asks for (created on first use)")
+    x.add_argument("--new", action="store_true", help="replace it: every browser has to sign in again")
+    s.set_defaults(fn=cmd_web)
+
     s = sub.add_parser("config", help="show or change config.toml settings (sources, quiet windows, sizes)")
     cs = s.add_subparsers(dest="action", required=True)
     x = cs.add_parser("show")
@@ -923,7 +943,7 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_restore(args)  # Preview does not even create a lock file.
         # The daemon takes the workspace lock per cycle itself: held for its lifetime it would
         # block `install` forever.
-        lock = (contextlib.nullcontext() if _inspection(args) or not populated or args.command == 'daemon' else
+        lock = (contextlib.nullcontext() if _inspection(args) or not populated or args.command in ('daemon', 'web') else
                 file_lock(lock_path(cfg.home, 'workspace'), blocking=True, timeout=120,
                           shared=args.command not in ('restore', 'install')))
         with lock:

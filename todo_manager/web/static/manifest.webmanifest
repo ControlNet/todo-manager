@@ -1,0 +1,9 @@
+{
+  "name": "Todo Manager",
+  "short_name": "Todo",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#EEF0F7",
+  "theme_color": "#5B47E0",
+  "icons": [{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
+}

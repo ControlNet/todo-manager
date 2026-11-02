@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Todo Manager</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/login.css">
+<script src="/static/theme.js"></script>
+</head>
+<body>
+<main class="login">
+  <form method="post" action="/login" class="login-card">
+    <div class="brand"><span class="logo">TM</span><span>Todo Manager</span></div>
+    <label class="field">
+      <span class="label" id="token-label">Token</span>
+      <input name="token" type="password" autocomplete="current-password" required autofocus aria-labelledby="token-label">
+    </label>
+    <p class="login-failed" id="failed" hidden></p>
+    <button class="btn primary" type="submit" id="submit">Sign in</button>
+  </form>
+</main>
+<script src="/static/login.js"></script>
+</body>
+</html>
