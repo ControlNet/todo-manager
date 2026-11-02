@@ -58,9 +58,13 @@ If the Script Output is a Script Error, or the context only reports problems, ma
   under `rejected`). Exception: material newer than the user's edit shows plainly that the field
   is out of date (the step it names was done, the date was moved, the awaited reply came). Then
   change that field with `--override-human --evidence <item>:<role>` and a `--note` saying what
-  the material shows; never on inference alone. Even then do not close a task whose status the
-  user set: link the evidence as `completion` and say so in the `--note`. Do not reopen a task
-  the user closed: create a follow-up task (`--follow-up-of <task>`).
+  the material shows; never on inference alone. A task the user put in My to-do (`todo`) is
+  closed on plain evidence that the whole commitment is fulfilled (the user's own reply or
+  submission, a confirmation or receipt, a merged PR; one step done is progress):
+  `--set status=done --override-human --evidence <item>:completion --note "..."`. A task the
+  user set to `decision` or `waiting` is not closed: link the evidence as `completion` and say so
+  in the `--note`. Do not reopen a task the user closed: create a follow-up task
+  (`--follow-up-of <task>`).
 - Unsure, and missing it could cost the user (a direct request from a person, a deadline,
   money, a role given to them): create the task with status `decision` and the one question in
   `next_step`. Unsure and low-stakes: dismiss it with the reason, or defer it.

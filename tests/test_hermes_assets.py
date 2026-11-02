@@ -138,5 +138,11 @@ class ExistingCommitmentTests(unittest.TestCase):
         text = flat("cron/intake.md")
         self.assertIn("--override-human --evidence", text)
         self.assertIn("never on inference alone", text)
-        self.assertIn("do not close a task whose status the user set", text)
         self.assertIn("Do not reopen a task the user closed", text)
+
+    def test_plain_completion_evidence_closes_a_task_the_user_put_in_my_to_do(self):
+        text = flat("cron/intake.md")
+        self.assertIn("A task the user put in My to-do (`todo`) is closed on plain evidence", text)
+        self.assertIn("--set status=done --override-human --evidence <item>:completion", text)
+        self.assertIn("A task the user set to `decision` or `waiting` is not closed", text)
+        self.assertNotIn("do not close a task whose status the user set", text)
