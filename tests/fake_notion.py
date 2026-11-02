@@ -48,6 +48,11 @@ _AUTOLINK = re.compile(r"(?P<link>(?<!\\)\[(?:\\.|[^\]\\])*\]\([^)\s]*\))"
 # ``old_str`` ("No matches found"), while a mailto link to a plain address round-trips.
 _MAILTO = re.compile(r"\]\(mailto:([^)\s]*)\)")
 _PLAIN_ADDRESS = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
+# Seen on the production workspace (2026-11-02): a comment whose markdown held ``:aaid:`` (in an
+# ``urn:aaid:sc:...`` URL) was rejected, HTTP 400 "Unsupported mention type in markdown:
+# custom_emoji"; ``:name:`` is the custom emoji syntax. ASSUMPTION: a backslash before the closing
+# colon keeps it text, and a link's destination is not read for it.
+_CUSTOM_EMOJI = re.compile(r"(?<!\\):[A-Za-z0-9_+-]+:")
 
 
 def _unescaped(text: str) -> str:
@@ -465,6 +470,10 @@ class FakeNotion:
                 raise HttpError(404, "not found", body={"code": "object_not_found", "message": "not found"})
             return {k: v for k, v in copy.deepcopy(found[0]).items() if k != "resolved"}
         if parts == ["comments"] and method == "POST":
+            if _CUSTOM_EMOJI.search(re.sub(r"\]\([^)\s]*\)", "]", body["markdown"])):
+                message = ("Unsupported mention type in markdown: custom_emoji. Supported mention types are: "
+                           "user, page, database, data source, date.")
+                raise HttpError(400, message, body={"code": "validation_error", "message": message})
             page_id = (body.get("parent") or {}).get("page_id")
             if body.get("discussion_id"):
                 page_id = next(c["parent"]["page_id"] for c in self.comments if c["discussion_id"] == body["discussion_id"])

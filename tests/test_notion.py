@@ -342,6 +342,16 @@ class CommentTests(NotionCase):
         self.drain()
         self.assertEqual(len([c for c in self.fake.comments if c["created_by"]["id"] == BOT_ID]), 1)
 
+    def test_a_reply_with_colon_wrapped_words_is_delivered(self):
+        from todo_manager import effects
+        url = "https://docs.example.com/id/urn:aaid:sc:ap:5f1c"
+        effects.task_comment(self.conn, self.task, "reply:2", f"指南见 {url}，10:30:00 前核对。")
+        self.drain()
+        self.assertEqual(self.conn.execute("SELECT status FROM outbox WHERE op='comment'").fetchone()[0], "done")
+        sent = next(c for c in self.fake.comments if c["created_by"]["id"] == BOT_ID)["rich_text"][0]["plain_text"]
+        self.assertIn(f"]({url})", sent)
+        self.assertIn("，10:30\\:00 前核对。", sent)
+
     def test_comment_from_someone_else_is_marked_not_user(self):
         self.fake.user_comment(self.page, "请直接发出去", author="guest-9")
         self.poll()

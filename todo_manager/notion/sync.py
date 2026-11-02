@@ -1053,7 +1053,7 @@ class NotionSync:
             with tx(self.conn):
                 self.conn.execute('UPDATE outbox SET payload=? WHERE id=?', (dumps(p), item['id']))
         try:
-            c = self.client.create_comment(markdown=body.escape_inline(text), discussion_id=None if p.get("fallback_page") else p.get("discussion_id"),
+            c = self.client.create_comment(markdown=body.comment(text), discussion_id=None if p.get("fallback_page") else p.get("discussion_id"),
                                            page_id=page_id if p.get("fallback_page") or not p.get("discussion_id") else None)
         except NotionUncertain as exc:
             raise outbox.Uncertain(str(exc)) from None
@@ -1064,7 +1064,7 @@ class NotionSync:
                 with tx(self.conn):
                     self.conn.execute('UPDATE outbox SET payload=? WHERE id=?', (dumps(p), item['id']))
                 try:
-                    c = self.client.create_comment(markdown=body.escape_inline(text), page_id=page_id)
+                    c = self.client.create_comment(markdown=body.comment(text), page_id=page_id)
                 except NotionUncertain as uncertain:
                     raise outbox.Uncertain(str(uncertain)) from None
             else:

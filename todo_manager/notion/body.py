@@ -32,6 +32,8 @@ _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za
 _MD_LINK = re.compile(r"(?<!\\)\[((?:\\.|[^\]\\])*)\]\(([^)\s]*)\)")
 # Notion's block attributes after a block's text, e.g. {color="blue"} or {toggle="true"}.
 _ATTRS = re.compile(r'(?<!\\)\{(?:\s*[A-Za-z_-]+="[^"]*")+\s*\}')
+# What would close a ``:name:`` custom emoji: a colon after a run of text that follows a colon.
+_EMOJI_END = re.compile(r"(?<=:)([^\s:]+):")
 _FINGERPRINT = "v2:"   # fingerprints that count text in braces and where links point
 
 
@@ -68,17 +70,17 @@ def _url_end(url: str) -> str:
     return url
 
 
-def _with_addresses(text: str) -> str:
+def _with_addresses(text: str, esc=escape_inline) -> str:
     """Escape text, with each bare email address as an explicit mailto link."""
     out, pos = [], 0
     for m in _EMAIL.finditer(text):
-        out.append(escape_inline(text[pos:m.start()]))
-        out.append(f"[{escape_inline(m.group(0))}](mailto:{m.group(0)})")
+        out.append(esc(text[pos:m.start()]))
+        out.append(f"[{esc(m.group(0))}](mailto:{m.group(0)})")
         pos = m.end()
-    return "".join(out) + escape_inline(text[pos:])
+    return "".join(out) + esc(text[pos:])
 
 
-def prose_inline(text: str) -> str:
+def prose_inline(text: str, esc=escape_inline) -> str:
     """Escape written text, with each bare http(s) URL as an explicit link: Notion would link
     it itself up to the next white space, taking any CJK text after it into the link. Email
     addresses outside URLs become mailto links: Notion would link them with the text before
@@ -88,10 +90,22 @@ def prose_inline(text: str) -> str:
         url = _url_end(m.group(0))
         if url.endswith("://") or len(url) >= 1900:
             continue
-        out.append(_with_addresses(text[pos:m.start()]))
-        out.append(f"[{escape_inline(url)}]({url.replace('(', '%28').replace(')', '%29')})")
+        out.append(_with_addresses(text[pos:m.start()], esc))
+        out.append(f"[{esc(url)}]({url.replace('(', '%28').replace(')', '%29')})")
         pos = m.start() + len(url)
-    return "".join(out) + _with_addresses(text[pos:])
+    return "".join(out) + _with_addresses(text[pos:], esc)
+
+
+def _comment_escape(text: str) -> str:
+    """``escape_inline``, and a colon that would close a ``:name:`` escaped: Notion reads that as a
+    custom emoji, which a comment cannot hold, and rejects the whole comment (HTTP 400)."""
+    return _EMOJI_END.sub(r"\1\\:", escape_inline(text))
+
+
+def comment(text: str) -> str:
+    """A bot comment's markdown: ``prose_inline`` with ``_comment_escape``, so a URL keeps its
+    colons in the link it points to."""
+    return prose_inline(text, _comment_escape)
 
 
 def prose(text: str) -> str:
