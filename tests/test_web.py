@@ -89,8 +89,8 @@ class ViewTests(WebCase):
         self.act(tid, "agent", note="Decline politely")
         entry = next(e for e in views.thread(self.conn, tid) if e["kind"] == "delegate_request")
         self.assertEqual((entry["choice"], entry["text"], entry["who"]), ("agent", "Decline politely", "me"))
-        other = self.task("Agree?", status="decision")
-        self.act(other, "agree")
+        other = self.task("Agree?", status="decision")   # a Notion board set up before 2026-10-12 still offers Agree
+        actions.edit(self.conn, self.cfg, other, {"decision": "agree"}, rid="old-board-0001")
         entry = next(e for e in views.thread(self.conn, other) if e["kind"] == "decision_choice")
         self.assertEqual((entry["choice"], entry["text"]), ("agree", ""))
 
@@ -163,11 +163,10 @@ class ViewTests(WebCase):
 class ActionTests(WebCase):
     def test_decision_choices_match_the_board(self):
         agree = self.task("Agree?", status="decision")
-        self.act(agree, "agree")
-        self.assertEqual(store.get_task(self.conn, agree)["decision"], "agree")
-        choice = self.feedback_rows(agree, "decision_choice")
-        self.assertEqual((choice[0]["origin"], choice[0]["status"], choice[0]["payload"]["decision"]),
-                         ("web", "pending", "agree"))
+        for action in ("agree", "decline"):   # no longer on the board: what to do is said to Hermes
+            with self.assertRaises(actions.ActionError):
+                self.act(agree, action)
+        self.assertEqual(store.get_task(self.conn, agree)["status"], "decision")
         done = self.task("Done?", status="decision")
         self.act(done, "done")
         t = store.get_task(self.conn, done)

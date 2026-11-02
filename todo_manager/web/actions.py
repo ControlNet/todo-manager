@@ -2,7 +2,8 @@
 
 * A button on a task is the user's edit of its fields, applied like the same edit on the Notion
   page or board (``board``): Done / My to-do / Cancel take effect at once (and settle agent
-  work), Assign to Agent / Agree / Decline become feedback for the feedback job.
+  work), Assign to Agent becomes feedback for the feedback job. What else the user decides is
+  said to Hermes in a comment, as the board has no Agree / Decline since 2026-10-12.
 * Pause / resume of agent work are the user's requests (``ops.delegate_message``).
 * What the user types is a comment on the task: feedback for the feedback job, like a Notion
   comment; ``to: agent`` marks it as meant for the agent working on the task.
@@ -69,10 +70,6 @@ def changes_for(conn: sqlite3.Connection, task: dict[str, Any], action: str, par
     kind, _ = views.kind_of(conn, task)
     on_board = kind == "decision"
     agent_work = kind in AGENT_KINDS   # on the Agent progress board
-    if action in ("agree", "decline"):
-        if not on_board:
-            raise ActionError("INVALID", f"{action} is a choice for a task to decide")
-        return {"decision": action}, None
     if action == "agent":
         request = {"note": _text(params.get("note"), "note"),
                    "done_criteria": _text(params.get("done_criteria"), "done_criteria"),

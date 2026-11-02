@@ -452,16 +452,15 @@
     const pause = active ? (work.status === "paused" || work.pause_requested ? ["resume", "act:resume"] : ["pause", "act:pause"]) : null;
     const latest = work && work.versions.filter((v) => v.kind === "result").pop();
     const list = {
-      decision: [["agree", "act:agree", "primary"], ["decline", "act:decline"], ["toAgent", "dlg:agent"], ["setTodo", "act:todo"],
-        ["markDone", "act:done"], ["cancel", "act:cancel", "danger"]],
+      decision: [["toAgent", "dlg:agent", "primary"], ["setTodo", "act:todo"], ["markDone", "act:done"], ["cancel", "act:cancel"]],
       todo: [["done", "act:done", "primary"], ["toAgent", "dlg:agent"], ["snooze", "dlg:snooze"], ["waitFor", "dlg:wait"],
-        ["cancel", "act:cancel", "danger"]],
-      answer: [["answer", "compose:agent", "primary"], ["selfDo", "act:todo"], pause, ["cancel", "act:cancel", "danger"]],
+        ["cancel", "act:cancel"]],
+      answer: [["answer", "compose:agent", "primary"], ["selfDo", "act:todo"], pause, ["cancel", "act:cancel"]],
       review: [["accept", "act:done", "primary"], ["revise", "compose:agent"], latest ? ["viewDelivery", "go:#/delivery/" + latest.id] : null,
-        ["selfEdit", "act:todo"], ["cancel", "act:cancel", "danger"]],
-      running: [["supplement", "compose:agent"], pause, ["selfDo", "act:todo"], ["cancel", "act:cancel", "danger"]],
+        ["selfEdit", "act:todo"], ["cancel", "act:cancel"]],
+      running: [["supplement", "compose:agent"], pause, ["selfDo", "act:todo"], ["cancel", "act:cancel"]],
       waiting: [["gotIt", "act:todo", "primary"], ["stillWaiting", "dlg:followup"], ["chaser", "say:chaser"], ["done", "act:done"],
-        ["cancel", "act:cancel", "danger"]],
+        ["cancel", "act:cancel"]],
       closed: [["reopen", "act:reopen", "primary"]],
     }[d.kind] || [];
     return list.filter(Boolean);
@@ -482,9 +481,16 @@
   }
   const bannerText = (text) => (text.length > 160 && !S.bannerOpen
     ? `<span class="v clamp" data-unclamp="1">${esc(text)}</span>` : `<span class="v">${esc(text)}</span>`);
+  // An action button in the colour of its Notion board column: Agent purple, to-do blue, done green,
+  // cancel red, waiting yellow, later grey.
+  const TONES = { "dlg:agent": "purple", "compose:agent": "purple", "act:pause": "purple", "act:resume": "purple",
+    "act:todo": "blue", "act:reopen": "blue", "act:done": "green", "act:cancel": "red",
+    "dlg:wait": "yellow", "dlg:followup": "yellow", "dlg:snooze": "gray" };
+  const btnClass = (does, primary) => "btn" + (TONES[does] ? " tone-" + TONES[does] : "") + (primary ? " primary" : "");
   function button(item, cls) {
     const [label, does, tone] = item;
-    return `<button class="${cls || "btn"}${tone ? " " + tone : ""}" data-do="${esc(does)}">${esc(t(label))}</button>`;
+    const look = cls ? cls + (tone ? " " + tone : "") : btnClass(does, tone === "primary");
+    return `<button class="${look}" data-do="${esc(does)}">${esc(t(label))}</button>`;
   }
 
   function banner(d) {
@@ -736,8 +742,7 @@
     }
     const c = flow.cards[flow.i];
     const last = flow.done[flow.done.length - 1];
-    const buttons = [["agree", "act:agree", "primary"], ["decline", "act:decline"], ["toAgent", "dlg:agent"], ["setTodo", "act:todo"],
-      ["markDone", "act:done"], ["cancel", "act:cancel", "danger"]];
+    const buttons = [["toAgent", "dlg:agent", "primary"], ["setTodo", "act:todo"], ["markDone", "act:done"], ["cancel", "act:cancel"]];
     return `<section class="page span"><div class="decide">
       <div class="view-head"><h1>${esc(t("g_decide"))}</h1><span class="sub">${esc(t("ofN", { i: flow.i + 1, n: flow.cards.length }))}</span></div>
       <div class="progress">${flow.cards.map((_, k) => `<span class="${k <= flow.i ? "on" : ""}"></span>`).join("")}</div>
@@ -746,7 +751,7 @@
         <span class="t">${esc(c.title)}</span>${c.next_step ? `<span>${esc(c.next_step)}</span>` : ""}
         ${c.source ? `<span class="muted">${esc(c.source)}</span>` : ""}
         <a href="${esc(taskHash(c.id, "decide"))}">${esc(t("details"))} →</a></div>
-      <div class="decide-grid">${buttons.map((b) => `<button class="btn${b[2] ? " " + b[2] : ""}" data-decide="${b[1]}">${esc(t(b[0]))}</button>`).join("")}</div>
+      <div class="decide-grid">${buttons.map((b) => `<button class="${btnClass(b[1], b[2])}" data-decide="${b[1]}">${esc(t(b[0]))}</button>`).join("")}</div>
       <div class="compose-row"><label class="sr" for="decide-line">${esc(t("addLine"))}</label>
         <textarea id="decide-line" rows="1" placeholder="${esc(t("addLine"))}">${esc(flow.line || "")}</textarea>
         <button class="btn ghost" data-decide="skip">${esc(t("skip"))}</button></div></div></section>`;
@@ -935,7 +940,7 @@
     const line = (flow.line || "").trim();
     if (line && action !== "agent" && !(await send(line, "hermes", c.id))) return;
     if (!(await act(action, params || {}, c.id))) return;
-    const labels = { agree: "agree", decline: "decline", agent: "agentTitle", todo: "setTodo", done: "markDone", cancel: "cancel" };
+    const labels = { agent: "agentTitle", todo: "setTodo", done: "markDone", cancel: "cancel" };
     flow.done.push({ title: c.title, choice: t(labels[action]) });
     flow.i += 1;
     flow.line = "";
@@ -945,7 +950,7 @@
 
   function startDecide() {
     if (!S.decide || S.decide.i >= S.decide.cards.length) {
-      // Agree / Decline already chosen and waiting for Hermes are not offered again.
+      // Agree / Decline (from a Notion board set up before 2026-10-12) waiting for Hermes are not offered again.
       S.decide = { cards: S.home.groups.decide.filter((c) => !["agree", "decline"].includes(c.decision)), i: 0, done: [], line: "" };
     }
   }

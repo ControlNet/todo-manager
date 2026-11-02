@@ -7,6 +7,9 @@
   --accent: #5B47E0; --accent-soft: #ECE9FF; --accent-ink: #4332B8; --on-accent: #FFFFFF;
   --warn-soft: #FFE8C7; --warn-ink: #6B3A00; --amber-ink: #9A4A07;
   --ok-soft: #DDF5E7; --ok-ink: #14532D; --ok: #16A34A; --danger-ink: #B4232B;
+  --blue-soft: #D3E5EF; --blue-ink: #183347; --green-soft: #DBEDDB; --green-ink: #1C3829; --red-soft: #FFE2DD;
+  --red-ink: #5D1715; --purple-soft: #E8DEEE; --purple-ink: #412454; --yellow-soft: #FDECC8; --yellow-ink: #402C1B;
+  --gray-soft: #E3E2E0; --gray-ink: #32302C;
   --hero-bg: #12142B; --hero-fg: #FFFFFF; --scrim: rgba(18, 20, 43, 0.35);
   --shadow: 0 8px 24px rgba(18, 20, 43, 0.10); --bubble-me: #ECE9FF; --bubble-other: #F2F3F9;
   --r: 24px; --br: 14px; --bh: 46px;
@@ -20,6 +23,9 @@
     --accent: #5B47E0; --accent-soft: #231E4A; --accent-ink: #B8ADFF; --on-accent: #FFFFFF;
     --warn-soft: #3A2A12; --warn-ink: #FFD08A; --amber-ink: #FFC266;
     --ok-soft: #10291E; --ok-ink: #6EE7B7; --ok: #34D399; --danger-ink: #FF8A8A;
+    --blue-soft: #28456C; --green-soft: #2B593F; --red-soft: #6E3630; --purple-soft: #492F64;
+    --yellow-soft: #89632A; --gray-soft: #5A5A5A; --blue-ink: #ECEEF8; --green-ink: #ECEEF8; --red-ink: #ECEEF8;
+    --purple-ink: #ECEEF8; --yellow-ink: #ECEEF8; --gray-ink: #ECEEF8;
     --hero-bg: #ECEEF8; --hero-fg: #0B0E1A; --scrim: rgba(0, 0, 0, 0.6);
     --shadow: 0 8px 24px rgba(0, 0, 0, 0.5); --bubble-me: #231E4A; --bubble-other: #1E2438;
     color-scheme: dark;
@@ -31,6 +37,9 @@
   --accent: #5B47E0; --accent-soft: #231E4A; --accent-ink: #B8ADFF; --on-accent: #FFFFFF;
   --warn-soft: #3A2A12; --warn-ink: #FFD08A; --amber-ink: #FFC266;
   --ok-soft: #10291E; --ok-ink: #6EE7B7; --ok: #34D399; --danger-ink: #FF8A8A;
+  --blue-soft: #28456C; --green-soft: #2B593F; --red-soft: #6E3630; --purple-soft: #492F64;
+  --yellow-soft: #89632A; --gray-soft: #5A5A5A; --blue-ink: #ECEEF8; --green-ink: #ECEEF8; --red-ink: #ECEEF8;
+  --purple-ink: #ECEEF8; --yellow-ink: #ECEEF8; --gray-ink: #ECEEF8;
   --hero-bg: #ECEEF8; --hero-fg: #0B0E1A; --scrim: rgba(0, 0, 0, 0.6);
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.5); --bubble-me: #231E4A; --bubble-other: #1E2438;
   color-scheme: dark;
@@ -168,6 +177,17 @@ button.prop:hover { box-shadow: inset 0 0 0 1px var(--border-strong); }
 .btn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
 .btn:disabled { opacity: 0.55; cursor: default; }
 .btn.small { min-height: 36px; padding: 0 12px; border-radius: 11px; font-size: 14px; }
+/* Action colours as Notion's: soft for a choice, solid for the main one. */
+.btn.tone-blue { --soft: var(--blue-soft); --tink: var(--blue-ink); --solid: #337EA9; }
+.btn.tone-green { --soft: var(--green-soft); --tink: var(--green-ink); --solid: #448361; }
+.btn.tone-red { --soft: var(--red-soft); --tink: var(--red-ink); --solid: #D44C47; }
+.btn.tone-purple { --soft: var(--purple-soft); --tink: var(--purple-ink); --solid: #9065B0; }
+.btn.tone-yellow { --soft: var(--yellow-soft); --tink: var(--yellow-ink); --solid: #CB912F; }
+.btn.tone-gray { --soft: var(--gray-soft); --tink: var(--gray-ink); --solid: #787774; }
+.btn[class*="tone-"] { background: var(--soft); border-color: transparent; color: var(--tink); }
+.btn[class*="tone-"]:hover { box-shadow: inset 0 0 0 1.5px var(--solid); }
+.btn[class*="tone-"].primary { background: var(--solid); color: #FFFFFF; }
+.btn[class*="tone-"].primary:hover { box-shadow: none; filter: brightness(1.08); }
 .menu { border: 1px solid var(--border); border-radius: 20px; background: var(--surface); box-shadow: var(--shadow);
   padding: 10px; display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 4px 10px; }
 .menu-group { display: flex; flex-direction: column; gap: 2px; }
