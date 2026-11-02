@@ -73,10 +73,12 @@ the rest as `done_criteria` / `start_after` in its payload. A choice never autho
 external action; the agent still asks, and the approval is given in words.
 
 **The input box** writes a comment on the task: feedback with origin `web`, kind `comment`,
-which wakes the feedback job like a Notion comment. *To Agent* (shown while the task has agent
-work) marks it `to: agent`: Hermes passes it to the agent as the answer to its question, a
-supplement or a revision. Each message shows whether it is still waiting, done, or needs more
-from you, and Hermes' reply below it.
+which wakes the feedback job like a Notion comment. As with a Notion comment, Hermes passes what
+is meant for the agent to it (the answer to its question, a supplement or a revision); the box
+only says what the agent is waiting for. A copy goes to the task's Notion page ("Me (Web): ..."),
+posted by the integration, with Hermes' reply in its discussion. Each message shows whether it is
+waiting, being handled, done, or needs more from you, and Hermes' reply below it. (The API still
+takes `to: agent`, which earlier versions of the page sent.)
 
 Every write carries a request id chosen by the page, so a retry after a lost response does not
 apply it twice.

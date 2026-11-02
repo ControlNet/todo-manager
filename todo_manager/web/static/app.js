@@ -29,7 +29,7 @@
       copyLink: "复制链接", copied: "链接已复制",
       nextStep: "下一步", doneCriteria: "做到什么算完成", summary: "摘要", sources: "来源", notes: "我的笔记", discussion: "讨论",
       noDiscussion: "还没有讨论", history: "改动记录", links: "相关任务",
-      toHermes: "给 Hermes", toAgentTarget: "给 Agent", send: "发送",
+      send: "发送",
       ph_hermes: "告诉 Hermes 要怎么处理…", ph_answer: "回答 Agent 的问题…", ph_review: "要改什么…", ph_running: "补充给 Agent…",
       st_pending: "等待处理", st_processing: "Hermes 处理中", st_applied: "已处理", st_clarify: "需要你补充", st_ignored: "没有执行", st_failed: "处理失败",
       who_me: "我", who_hermes: "H", who_agent: "A", who_other: "他",
@@ -76,7 +76,7 @@
       openNotion: "Open in Notion", copyLink: "Copy link", copied: "Link copied",
       nextStep: "Next step", doneCriteria: "Done when", summary: "Summary", sources: "Sources", notes: "My notes",
       discussion: "Discussion", noDiscussion: "No discussion yet", history: "Changes", links: "Related tasks",
-      toHermes: "To Hermes", toAgentTarget: "To Agent", send: "Send",
+      send: "Send",
       ph_hermes: "Tell Hermes what to do…", ph_answer: "Answer the agent…", ph_review: "What should change…",
       ph_running: "Add info for the agent…",
       st_pending: "Waiting", st_processing: "Hermes on it", st_applied: "Done", st_clarify: "Needs more from you", st_ignored: "Not done", st_failed: "Failed",
@@ -224,10 +224,9 @@
   }
   async function loadDetail(id) {
     const data = await api("/api/tasks/" + encodeURIComponent(id));
-    if (S.detailId !== id) { S.more = false; S.bannerOpen = false; S.draft = ""; S.target = defaultTarget(data); }
+    if (S.detailId !== id) { S.more = false; S.bannerOpen = false; S.draft = ""; }
     S.detail = data; S.detailId = id;
   }
-  const defaultTarget = (d) => (["answer", "review", "running"].includes(d.kind) && d.agent_work ? "agent" : "hermes");
 
   async function load() {
     const r = route();
@@ -535,16 +534,10 @@
     }).join("");
   }
 
+  // One box: everything goes to Hermes, which relays to the agent what is meant for it.
   function composer(d) {
-    const agentOk = !!d.agent_work && !["ended", "cancelled", "quarantined"].includes(d.agent_work.status)
-      || ["answer", "review"].includes(d.kind);
-    if (!agentOk && S.target === "agent") S.target = "hermes";
-    const ph = S.target === "agent" ? t({ answer: "ph_answer", review: "ph_review" }[d.kind] || "ph_running") : t("ph_hermes");
+    const ph = t({ answer: "ph_answer", review: "ph_review", running: "ph_running" }[d.kind] || "ph_hermes");
     return `<div class="composer">
-      <div class="targets" role="group">
-        <button class="target${S.target === "hermes" ? " on" : ""}" data-target="hermes">${esc(t("toHermes"))}</button>
-        ${agentOk ? `<button class="target${S.target === "agent" ? " on" : ""}" data-target="agent">${esc(t("toAgentTarget"))}</button>` : ""}
-      </div>
       <div class="compose-row"><label class="sr" for="draft">${esc(ph)}</label>
         <textarea id="draft" rows="2" placeholder="${esc(ph)}">${esc(S.draft)}</textarea>
         <button class="btn primary" data-send="1"${S.sending ? " disabled" : ""}>${esc(t("send"))}</button></div>
@@ -969,7 +962,6 @@
       return render();
     }
     if (does.startsWith("compose:")) {
-      S.target = does.slice(8);
       S.more = false;
       render();
       const box = document.getElementById("draft");
@@ -1020,7 +1012,7 @@
 
   // ------------------------------------------------------------------ events
   document.addEventListener("click", async (e) => {
-    const el = e.target.closest("[data-go],[data-do],[data-more],[data-target],[data-send],[data-back],[data-expand],[data-palette]," +
+    const el = e.target.closest("[data-go],[data-do],[data-more],[data-send],[data-back],[data-expand],[data-palette]," +
       "[data-close],[data-opt],[data-dlg-ok],[data-dlg-clear],[data-project],[data-decide],[data-preview],[data-theme-cycle],[data-unclamp]");
     if (!el) return;
     if (el.dataset.close !== undefined) {
@@ -1038,7 +1030,6 @@
     if (el.dataset.do !== undefined) return doIt(el.dataset.do);
     if (el.dataset.more !== undefined) { S.more = !S.more; return render(); }
     if (el.dataset.unclamp !== undefined) { S.bannerOpen = true; return render(); }
-    if (el.dataset.target !== undefined) { S.target = el.dataset.target; return render(); }
     if (el.dataset.back !== undefined) {
       const r = route();
       return go(r.page === "delivery" ? taskHash(S.detailId) : `#/tasks/${encodeURIComponent(r.view || "today")}`);
@@ -1049,7 +1040,7 @@
     if (el.dataset.send !== undefined) {
       const box = document.getElementById("draft");
       S.draft = box ? box.value : S.draft;
-      if (await send(S.draft, S.target)) {
+      if (await send(S.draft, "hermes")) {
         S.draft = "";
         await refresh();
       } else render();

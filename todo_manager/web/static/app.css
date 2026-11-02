@@ -219,10 +219,6 @@ details > summary { cursor: pointer; color: var(--muted); font-weight: 600; font
 
 .composer { border-top: 1px solid var(--border); padding: 10px 16px 14px; display: flex; flex-direction: column; gap: 8px;
   background: var(--surface); }
-.targets { display: flex; gap: 6px; }
-.target { min-height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--border); background: transparent;
-  font-size: 13px; font-weight: 700; color: var(--muted); }
-.target.on { background: var(--accent-soft); border-color: transparent; color: var(--accent-ink); }
 .compose-row { display: flex; gap: 8px; align-items: flex-end; }
 .compose-row textarea { flex: 1 1 auto; min-width: 0; border: 1px solid var(--border-strong); border-radius: 16px; padding: 10px 14px;
   resize: none; background: var(--bg); line-height: 1.5; max-height: 40vh; outline: 0; }
