@@ -50,7 +50,7 @@
       noData: "还没有数据", stale: "部分来源同步失败",
       theme: "外观", light: "亮色", dark: "暗色", system: "跟随系统", logout: "退出登录",
       dayToDue: "天后截止", dueToday: "今天截止", overdueBy: "已逾期 {n} 天",
-      sentToast: "已发送", failed: "没有成功：{e}", offline: "连不上服务器",
+      failed: "没有成功：{e}", offline: "连不上服务器",
       projGoal: "目标", projNext: "下一步", projBlockers: "卡在哪", projRecent: "最近动态", projRepos: "仓库",
       openTasks: "未完成", closedTasks: "已关闭", nOpen: "未完成", nDecide: "要决定", nAgent: "Agent",
       noResults: "没有找到", r_tasks: "任务", r_projects: "项目", r_sources: "来源",
@@ -98,7 +98,7 @@
       noData: "No data yet", stale: "Some sources failed",
       theme: "Theme", light: "Light", dark: "Dark", system: "System", logout: "Sign out",
       dayToDue: "days to due", dueToday: "Due today", overdueBy: "Overdue by {n} d",
-      sentToast: "Sent", failed: "Did not work: {e}", offline: "Cannot reach the server",
+      failed: "Did not work: {e}", offline: "Cannot reach the server",
       projGoal: "Goal", projNext: "Next step", projBlockers: "Blockers", projRecent: "Recent", projRepos: "Repos",
       openTasks: "Open", closedTasks: "Closed", nOpen: "open", nDecide: "to decide", nAgent: "agent",
       noResults: "Nothing found", r_tasks: "Tasks", r_projects: "Projects", r_sources: "Sources",
@@ -978,7 +978,7 @@
     }
     if (does === "say:chaser") {
       const words = lang === "zh-CN" ? `起草一封催办${d.waiting_on ? "给 " + d.waiting_on : ""}` : `Draft a chaser${d.waiting_on ? " to " + d.waiting_on : ""}`;
-      if (await send(words, "hermes")) { toast(t("sentToast")); await refresh(); }
+      if (await send(words, "hermes")) await refresh();
       return;
     }
     if (does.startsWith("go:")) return go(does.slice(3));
@@ -1051,7 +1051,6 @@
       S.draft = box ? box.value : S.draft;
       if (await send(S.draft, S.target)) {
         S.draft = "";
-        toast(t("sentToast"));
         await refresh();
       } else render();
       return;
