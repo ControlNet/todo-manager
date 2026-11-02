@@ -280,7 +280,9 @@
     for (const ch of String(p.id || "")) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
     return PROJECT_COLORS[h % PROJECT_COLORS.length];
   };
-  const pdot = (p) => (p ? `<span class="pdot" style="background:${projectColor(p)}"></span>` : "");
+  // Notion's image of a built-in icon, the emoji, or else a square in the project's colour.
+  const pdot = (p) => (!p ? "" : p.image ? `<img class="picon" src="${esc(p.image)}" alt="">`
+    : p.icon ? `<span class="picon">${esc(p.icon)}</span>` : `<span class="pdot" style="background:${projectColor(p)}"></span>`);
 
   function metaOf(c, view) {
     const bits = [];
@@ -356,7 +358,7 @@
         <span class="label">${esc(t(i.key))}</span><span class="count">${i.count === "" ? "" : esc(i.count)}</span></button>`).join("")}</div>
       ${projects.length ? `<div class="nav-group"><button class="nav-head${cur === "projects" ? " on" : ""}" data-go="#/projects">${esc(t("projects"))} ›</button>
         ${projects.map((p) => `<button class="nav-item${cur === "p:" + p.id ? " on" : ""}" data-go="#/tasks/p:${esc(p.id)}">
-          <span class="pdot" style="background:${projectColor(p)}"></span><span class="label">${esc(p.title)}</span>
+          ${pdot(p)}<span class="label">${esc(p.title)}</span>
           <span class="count">${p.counts.open || ""}</span></button>`).join("")}</div>` : ""}
       <div class="nav-foot">${freshness()}
         <button class="linkish" data-theme-cycle="1">${esc(t("theme"))}: ${esc(t(themeName()))}</button>
@@ -599,7 +601,7 @@
     const list = S.projects || [];
     return `<section class="page span" id="page-scroll"><div class="view-head"><h1>${esc(t("projects"))}</h1></div>
       <div class="tiles">${list.map((p) => `<button class="ptile" data-go="#/projects/${esc(p.id)}">
-        <span class="name"><span class="icon" style="color:${projectColor(p)}">${esc(p.icon || "■")}</span>${esc(p.title)}</span>
+        <span class="name"><span class="icon" style="color:${projectColor(p)}">${p.image ? pdot(p) : esc(p.icon || "■")}</span>${esc(p.title)}</span>
         <span class="next">${esc(p.next_step || p.goal || "")}</span>
         <span class="nums"><span><b>${p.counts.open}</b>${esc(t("nOpen"))}</span>
           ${p.counts.decision ? `<span><b>${p.counts.decision}</b>${esc(t("nDecide"))}</span>` : ""}
@@ -613,7 +615,7 @@
     const field = (label, text) => (text ? `<div class="block"><span class="label">${esc(label)}</span><span class="v">${esc(text)}</span></div>` : "");
     return `<section class="page span" id="page-scroll">
       <div class="crumb"><a href="#/projects">${esc(t("projects"))}</a><span>›</span></div>
-      <div class="view-head"><h1>${esc(p.icon ? p.icon + " " : "")}${esc(p.title)}</h1><span class="sub">${esc(t("ps_" + p.status))}</span></div>
+      <div class="view-head"><h1>${p.image || p.icon ? pdot(p) + " " : ""}${esc(p.title)}</h1><span class="sub">${esc(t("ps_" + p.status))}</span></div>
       <div class="split"><div class="card"><span class="label">${esc(t("openTasks"))} · ${open.length}</span>
           ${open.map((c) => row(c, "p:" + p.id)).join("") || `<span class="muted">${esc(t("empty"))}</span>`}
           ${closed.length ? `<details><summary>${esc(t("closedTasks"))} · ${closed.length}</summary>${closed.slice(0, 50).map((c) => row(c, "p:" + p.id)).join("")}</details>` : ""}</div>

@@ -44,7 +44,8 @@ The page sets its cookie `Secure` when the tunnel says the request came over HTT
   notes (read only), the discussion and the change history.
 - **Delivery**: each version the agent delivered, its notes (Markdown) and its files (preview and
   download of the copies kept in the workspace).
-- **Projects** with their goal, next step, blockers and tasks; **search** over tasks, projects
+- **Projects** with their Notion icon (the page loads a built-in icon's image from
+  `www.notion.so/icons/`), goal, next step, blockers and tasks; **search** over tasks, projects
   and source messages (⌘K / Ctrl+K).
 - On a phone: a tab bar, and *Decide* goes through the cards one at a time.
 

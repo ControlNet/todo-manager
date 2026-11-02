@@ -72,6 +72,9 @@ a { color: var(--accent-ink); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: 0 0 auto; }
 .dot.stale { background: var(--amber-ink); }
 .pdot { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; display: inline-block; }
+.picon { width: 14px; height: 14px; flex: 0 0 auto; display: inline-block; font-size: 12px; line-height: 14px; text-align: center; }
+h1 .picon { width: .9em; height: .9em; font-size: .8em; line-height: .9em; vertical-align: -.05em; }
+.ptile .icon .picon { width: 20px; height: 20px; }
 .linkish { border: 0; background: none; padding: 0; color: var(--muted); font-size: 12px; text-align: left; }
 .linkish:hover { color: var(--ink); }
 

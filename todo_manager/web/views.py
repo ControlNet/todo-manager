@@ -8,6 +8,7 @@ delivery), ``running`` (agent work going on or about to start), ``waiting`` (on 
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
@@ -59,14 +60,15 @@ def kind_of(conn: sqlite3.Connection, task: dict[str, Any]) -> tuple[str, str | 
 
 
 def _look(icon: str | None) -> dict[str, Any]:
-    """A built-in Notion icon (``name:color``) shows as its colour; an emoji as itself; others not."""
+    """A built-in Notion icon (``name:color``) shows as Notion's image of it; an emoji as itself; others not."""
     value = project_icons.normalize(icon)
     name, sep, color = (value or "").partition(":")
     if sep and name not in ("custom_emoji", "external"):
-        return {"icon": None, "color": color}
+        image = project_icons.IMAGE_URL.format(name=name, color=color) if re.fullmatch(r"[a-z0-9-]+", name + color) else None
+        return {"icon": None, "image": image, "color": color}
     if value is None or sep or value == "file":
-        return {"icon": None, "color": None}
-    return {"icon": value, "color": None}
+        return {"icon": None, "image": None, "color": None}
+    return {"icon": value, "image": None, "color": None}
 
 
 def _projects(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:

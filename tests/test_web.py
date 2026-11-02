@@ -139,18 +139,19 @@ class ViewTests(WebCase):
         self.assertEqual([(s["title"], s["at"][:10]) for s in found],
                          [("Your proposal", "2026-10-05"), ("Re: Proposals due soon", "2026-10-03")])
 
-    def test_a_built_in_notion_icon_gives_its_colour_not_its_name(self):
+    def test_a_built_in_notion_icon_shows_as_its_image_in_its_colour(self):
         builtin = store.create_project(self.conn, "Lab servers", origin="intake")
         emoji = store.create_project(self.conn, "Paper", origin="intake")
         store.update_project(self.conn, builtin, {"icon": "server:blue"}, actor="agent", origin="intake")
         store.update_project(self.conn, emoji, {"icon": "🎙️"}, actor="agent", origin="intake")
         self.task("Swap the slot", project_id=builtin)
+        image = "https://www.notion.so/icons/server_blue.svg"
+        look = lambda p: (p["icon"], p["image"], p["color"])
         listed = {p["id"]: p for p in views.project_list(self.conn, self.cfg)}
-        self.assertEqual((listed[builtin]["icon"], listed[builtin]["color"]), (None, "blue"))
-        self.assertEqual((listed[emoji]["icon"], listed[emoji]["color"]), ("🎙️", None))
-        self.assertEqual(views.project_detail(self.conn, self.cfg, builtin)["color"], "blue")
-        card = views.task_list(self.conn, self.cfg)[0]
-        self.assertEqual((card["project"]["icon"], card["project"]["color"]), (None, "blue"))
+        self.assertEqual(look(listed[builtin]), (None, image, "blue"))
+        self.assertEqual(look(listed[emoji]), ("🎙️", None, None))
+        self.assertEqual(look(views.project_detail(self.conn, self.cfg, builtin)), (None, image, "blue"))
+        self.assertEqual(look(views.task_list(self.conn, self.cfg)[0]["project"]), (None, image, "blue"))
 
     def test_stamp_changes_with_a_write(self):
         tid = self.task()
@@ -320,6 +321,11 @@ class ServerTests(WebCase):
 
     def signed_in(self):
         return {"Cookie": f"{server.COOKIE}={server.session_value(self.token)}"}
+
+    def test_the_page_may_load_notion_icons(self):
+        response, _ = self.request("GET", "/", headers=self.signed_in())
+        self.assertIn("img-src 'self' data: https://www.notion.so/icons/;",
+                      response.getheader("Content-Security-Policy"))
 
     def test_sign_in_sets_a_cookie_only_for_the_token(self):
         response, _ = self.request("GET", "/")

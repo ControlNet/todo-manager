@@ -46,8 +46,8 @@ LOCK_TIMEOUT_SECONDS = 30
 INLINE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
                 ".webp": "image/webp", ".pdf": "application/pdf"}
 SECURITY_HEADERS = {
-    "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
-                               " frame-ancestors 'none'; base-uri 'none'",
+    "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline';"
+                               " img-src 'self' data: https://www.notion.so/icons/; frame-ancestors 'none'; base-uri 'none'",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "same-origin",
 }

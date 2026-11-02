@@ -17,6 +17,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+# Where Notion serves the image of a built-in icon (public; the Web UI shows it from there).
+IMAGE_URL = "https://www.notion.so/icons/{name}_{color}.svg"
+
 # Order of preference for new projects: distinct, readable colours first, the greys last.
 COLORS = ("blue", "green", "red", "purple", "orange", "yellow", "brown", "pink", "gray", "lightgray")
 
