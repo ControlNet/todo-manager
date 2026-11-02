@@ -296,6 +296,20 @@ details > summary { cursor: pointer; color: var(--muted); font-weight: 600; font
   padding: 12px 18px; border-radius: 14px; box-shadow: var(--shadow); z-index: 60; font-weight: 600; max-width: calc(100vw - 32px); }
 .toast.error { background: var(--danger-ink); color: #fff; }
 
+/* a write on its way: the pressed button turns into a spinner, the others dim, only if it takes a while */
+button[aria-busy="true"] { position: relative; cursor: progress; animation: busy-label 0s 150ms forwards; }
+button[aria-busy="true"]::after { content: ""; position: absolute; left: 50%; top: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px;
+  border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; opacity: 0;
+  animation: busy-show 0s 150ms forwards, spin 0.7s linear infinite; }
+@keyframes busy-label { to { -webkit-text-fill-color: transparent; } }
+@keyframes busy-show { to { opacity: 1; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+.writing :is(.actions, .menu, .decide-grid, .modal-foot, .options, .compose-row) button:not([aria-busy="true"]) {
+  opacity: 0.5; pointer-events: none; transition: opacity 0.12s ease; }
+.detail[aria-busy="true"] { pointer-events: none; }
+.detail[aria-busy="true"] > * { animation: dim 0.18s ease 120ms both; }
+@keyframes dim { to { opacity: 0.5; } }
+
 /* decide one by one */
 .decide { max-width: 560px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
 .progress { display: flex; gap: 6px; }

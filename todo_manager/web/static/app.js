@@ -120,6 +120,7 @@
     me: null, home: null, list: null, listKey: null, detail: null, detailId: null, more: false,
     target: "hermes", draft: "", stamp: null, projects: null, project: null, delivery: null, filePreview: null,
     search: { q: "", res: null, sel: 0 }, decide: null, sending: false, dialog: null,
+    pressed: null, stale: false, outbox: null, shown: false, layer: "", opener: null,
   };
 
   // ------------------------------------------------------------------ server
@@ -143,6 +144,10 @@
     return data;
   }
   const rid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)).replace(/[^A-Za-z0-9]/g, "").slice(0, 32);
+  // One request id per thing the user means to do: trying it again after a failure sends the same
+  // id, so the server does it once even when only the answer was lost.
+  const rids = new Map();
+  const ridFor = (key) => { if (!rids.has(key)) rids.set(key, rid()); return rids.get(key); };
 
   function toast(text, error) {
     const el = document.createElement("div");
@@ -224,6 +229,8 @@
   }
   async function loadDetail(id) {
     const data = await api("/api/tasks/" + encodeURIComponent(id));
+    const r = route();
+    if (r.page === "tasks" && r.task !== id) return;   // the user has moved on to another task
     if (S.detailId !== id) { S.more = false; S.bannerOpen = false; S.draft = ""; }
     S.detail = data; S.detailId = id;
   }
@@ -237,9 +244,10 @@
     } else if (r.page === "projects") {
       jobs.push(api("/api/projects").then((p) => { S.projects = p; }));
     } else if (r.page === "project") {
-      jobs.push(api("/api/projects/" + encodeURIComponent(r.id)).then((p) => { S.project = p; }));
+      jobs.push(api("/api/projects/" + encodeURIComponent(r.id)).then((p) => { if (route().id === r.id) S.project = p; }));
     } else if (r.page === "delivery") {
       jobs.push(api("/api/deliveries/" + encodeURIComponent(r.id)).then(async (d) => {
+        if (route().id !== r.id) return;
         if (!S.delivery || S.delivery.version.id !== d.version.id) S.filePreview = null;
         S.delivery = d;
         await loadDetail(d.task.id);
@@ -249,6 +257,7 @@
   }
 
   async function refresh() {
+    S.stale = false;
     try {
       await load();
       render();
@@ -257,13 +266,25 @@
     }
   }
 
+  // A change from elsewhere waits while the user is in the middle of something: a dialog, the
+  // search, a write, or typing. It shows when that ends (settle).
+  const typing = () => {
+    const el = document.activeElement;
+    return !!el && (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && !["checkbox", "radio"].includes(el.type)));
+  };
+  const busy = () => !!(S.dialog || S.palette || S.pressed || S.sending || typing());
   async function poll() {
-    if (document.hidden || S.sending) return;
+    if (document.hidden) return;
     try {
       const { stamp: now } = await api("/api/stamp");
-      if (S.stamp !== null && now !== S.stamp) await refresh();
+      if (S.stamp !== null && now !== S.stamp) {
+        if (busy()) S.stale = true; else await refresh();
+      }
       S.stamp = now;
     } catch (e) { /* the next poll tries again */ }
+  }
+  function settle() {
+    if (S.stale && !busy()) refresh();
   }
 
   // ------------------------------------------------------------------ pieces
@@ -298,7 +319,7 @@
     return null;
   }
   function row(c, view) {
-    const on = S.detailId === c.id ? " on" : "";
+    const on = route().task === c.id ? " on" : "";
     const badge = badgeOf(c);
     return `<button class="row${on}" data-go="${esc(taskHash(c.id, view))}">
       <span class="main"><span class="title">${esc(c.title)}</span>
@@ -514,7 +535,9 @@
   }
 
   function threadView(d) {
-    if (!d.thread.length) return `<span class="muted">${esc(t("noDiscussion"))}</span>`;
+    const sending = S.outbox && S.outbox.task === d.id ? `<div class="msg me pending"><span class="avatar me">${esc(t("who_me"))}</span>
+      <div class="body"><div class="bubble">${esc(S.outbox.text)}</div><div class="info"><span class="pill">${esc(t("st_pending"))}</span></div></div></div>` : "";
+    if (!d.thread.length) return sending || `<span class="muted">${esc(t("noDiscussion"))}</span>`;
     return d.thread.map((m) => {
       const cls = m.who === "me" ? "me" : m.who === "agent" ? "agent" : "";
       let info = stamp(m.at);
@@ -532,7 +555,7 @@
       const bubble = m.text ? `<div class="bubble">${esc(m.text)}</div>` : "";
       return `<div class="msg ${cls}"><span class="avatar ${cls}">${esc(t("who_" + m.who))}</span>
         <div class="body">${choice}${bubble}<div class="info">${info}</div></div></div>`;
-    }).join("");
+    }).join("") + sending;
   }
 
   // One box: everything goes to Hermes, which relays to the agent what is meant for it.
@@ -541,7 +564,7 @@
     return `<div class="composer">
       <div class="compose-row"><label class="sr" for="draft">${esc(ph)}</label>
         <textarea id="draft" rows="2" placeholder="${esc(ph)}">${esc(S.draft)}</textarea>
-        <button class="btn primary" data-send="1"${S.sending ? " disabled" : ""}>${esc(t("send"))}</button></div>
+        <button class="btn primary" data-send="1">${esc(t("send"))}</button></div>
     </div>`;
   }
 
@@ -607,9 +630,9 @@
           ${p.counts.decision ? `<span><b>${p.counts.decision}</b>${esc(t("nDecide"))}</span>` : ""}
           ${p.counts.agent ? `<span><b>${p.counts.agent}</b>${esc(t("nAgent"))}</span>` : ""}</span></button>`).join("")}</div></section>`;
   }
-  function projectPage() {
+  function projectPage(r) {
     const p = S.project;
-    if (!p) return `<section class="page span"></section>`;
+    if (!p || p.id !== r.id) return `<section class="page span"></section>`;
     const open = p.tasks.filter((c) => c.kind !== "closed");
     const closed = p.tasks.filter((c) => c.kind === "closed");
     const field = (label, text) => (text ? `<div class="block"><span class="label">${esc(label)}</span><span class="v">${esc(text)}</span></div>` : "");
@@ -679,10 +702,10 @@
     return out.join("");
   }
 
-  function deliveryPage() {
+  function deliveryPage(r) {
     const x = S.delivery;
     const d = S.detail;
-    if (!x || !d) return `<section class="page span"></section>`;
+    if (!x || !d || x.version.id !== r.id) return `<section class="page span"></section>`;
     const results = x.delegation.versions.filter((v) => v.kind === "result" || v.id === x.version.id);
     const files = x.version.files;
     return `<section class="page span" id="page-scroll">
@@ -804,7 +827,7 @@
       <h3>${esc(t(title))}</h3><span class="task">${esc(d.title)}</span>${body}
       <div class="modal-foot">${g.kind === "due" ? `<button class="btn" data-dlg-clear="1">${esc(t("clear"))}</button>` : ""}
         <button class="btn" data-close="1">${esc(t("cancel"))}</button>
-        ${ok ? `<button class="btn primary" data-dlg-ok="${ok}"${S.sending ? " disabled" : ""}>${esc(okLabel)}</button>` : ""}</div></div></div>`;
+        ${ok ? `<button class="btn primary" data-dlg-ok="${ok}">${esc(okLabel)}</button>` : ""}</div></div></div>`;
   }
   function paletteView() {
     return `<div class="scrim" data-close="1"><div class="modal palette" role="dialog" aria-modal="true" aria-label="${esc(t("search"))}">
@@ -813,6 +836,19 @@
   }
 
   // ------------------------------------------------------------------ render
+  // A selector that finds the same control after a render: its id, or its first data-* attribute
+  // and its place among the controls that share it.
+  function selOf(el) {
+    if (!el || el === document.body || !el.tagName) return null;
+    if (el.id) return { sel: "#" + CSS.escape(el.id), n: 0 };
+    const a = [...el.attributes].find((x) => x.name.startsWith("data-"));
+    if (!a) return null;
+    const sel = `${el.tagName.toLowerCase()}[${a.name}="${CSS.escape(a.value)}"]`;
+    return { sel, n: [...document.querySelectorAll(sel)].indexOf(el) };
+  }
+  const findSel = (s) => (s ? document.querySelectorAll(s.sel)[s.n] || null : null);
+  let lastPressed = null;
+
   function render() {
     if (!S.home) return;
     const r = route();
@@ -821,18 +857,27 @@
       const el = document.getElementById(id);
       if (el) keep[id] = el.scrollTop;
     }
-    const focus = document.activeElement && document.activeElement.id;
-    const sel = focus && document.activeElement.selectionStart;
+    const active = document.activeElement;
+    const focus = selOf(active);
+    const range = active && typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null;
+    const layer = S.dialog ? "dialog" : S.palette ? "palette" : "";
+    if (layer && !S.layer) S.opener = selOf(active && active !== document.body && !$overlay.contains(active) ? active : lastPressed);
     let main;
     if (r.page === "tasks") {
-      const d = S.detail && S.detailId === r.task ? S.detail : null;
-      main = listView(r.view) + `<article class="detail${d ? "" : " closed"}" aria-label="${esc(d ? d.title : "")}">
+      // Another task on its way keeps the one shown, dimmed, until it comes.
+      const d = S.detail && r.task && (S.detailId === r.task || S.shown) ? S.detail : null;
+      const loading = !!d && S.detailId !== r.task;
+      S.shown = !!d;
+      main = listView(r.view) + `<article class="detail${d ? "" : " closed"}" aria-label="${esc(d ? d.title : "")}"${loading ? ' aria-busy="true"' : ""}>
         ${d ? detailView(d) : `<div class="empty-detail"></div>`}</article>`;
-    } else if (r.page === "projects") main = projectsPage();
-    else if (r.page === "project") main = projectPage();
-    else if (r.page === "delivery") main = deliveryPage();
-    else if (r.page === "search") main = searchPage();
-    else if (r.page === "decide") main = decidePage();
+    } else {
+      S.shown = false;
+      if (r.page === "projects") main = projectsPage();
+      else if (r.page === "project") main = projectPage(r);
+      else if (r.page === "delivery") main = deliveryPage(r);
+      else if (r.page === "search") main = searchPage();
+      else if (r.page === "decide") main = decidePage();
+    }
     $app.innerHTML = sidebar(r) + rail(r) + main + tabbar(r);
     $overlay.innerHTML = S.dialog ? dialogView() : S.palette ? paletteView() : "";
     document.body.style.overflow = window.matchMedia("(max-width: 767px)").matches && r.page === "tasks" && r.task ? "hidden" : "";
@@ -840,34 +885,65 @@
       const el = document.getElementById(id);
       if (el) el.scrollTop = top;
     }
-    if (focus) {
-      const el = document.getElementById(focus);
-      if (el) {
-        el.focus();
-        if (sel !== null && sel !== undefined && el.setSelectionRange) try { el.setSelectionRange(sel, sel); } catch (e) { /* not text */ }
-      }
+    const el = findSel(focus);
+    if (el && el !== document.activeElement) {
+      el.focus({ preventScroll: true });
+      if (range && el.setSelectionRange) try { el.setSelectionRange(range[0], range[1]); } catch (e) { /* not text */ }
     }
+    if (layer === "dialog" && S.layer !== "dialog") {
+      // A dialog opens on its first field.
+      const modal = $overlay.querySelector(".modal");
+      const first = modal && (modal.querySelector("textarea, input, select") || modal.querySelector(".option.on, .option"));
+      if (first) first.focus();
+    } else if (!layer && S.layer) {
+      const back = findSel(S.opener);
+      if (back) back.focus({ preventScroll: true });
+      S.opener = null;
+    }
+    S.layer = layer;
+    markPressed();
     // Beside the list (tablet and desktop) a task is always open: the first one, not an empty pane.
     if (r.page === "tasks" && !r.task && window.matchMedia("(min-width: 768px)").matches) {
-      const first = [...$app.querySelectorAll("[data-go]")].find((el) => /^#\/tasks\/[^/]+\/./.test(el.dataset.go));
+      const first = [...$app.querySelectorAll("[data-go]")].find((x) => /^#\/tasks\/[^/]+\/./.test(x.dataset.go));
       if (first) location.replace(first.dataset.go);
     }
+    settle();
   }
 
   // ------------------------------------------------------------------ doing things
+  // One write at a time. The pressed button shows it is working; the others dim only when it
+  // takes a while.
+  let dimTimer = null;
+  function hold(el) {
+    S.pressed = el ? selOf(el) : null;
+    clearTimeout(dimTimer);
+    document.documentElement.classList.remove("writing");
+    if (el) dimTimer = setTimeout(() => document.documentElement.classList.add("writing"), 150);
+    for (const b of document.querySelectorAll("button[aria-busy]")) b.removeAttribute("aria-busy");
+    markPressed();
+  }
+  function markPressed() {
+    const el = findSel(S.pressed);
+    if (el) el.setAttribute("aria-busy", "true");
+  }
+
   async function act(action, params, taskId) {
+    if (S.sending) return false;
     const id = taskId || S.detailId;
+    const key = JSON.stringify(["act", id, action, params || {}]);
+    let done = false;
     S.sending = true;
-    render();
     try {
-      await api(`/api/tasks/${encodeURIComponent(id)}/act`, { action, params: params || {}, rid: rid() });
+      await api(`/api/tasks/${encodeURIComponent(id)}/act`, { action, params: params || {}, rid: ridFor(key) });
+      rids.delete(key);
+      done = true;
       S.more = false;
       S.dialog = null;
       await load();
       return true;
     } catch (e) {
       if (e.message !== "login") toast(t("failed", { e: e.message }), true);
-      return false;
+      return done;
     } finally {
       S.sending = false;
       render();
@@ -875,11 +951,13 @@
   }
   async function send(text, to, taskId) {
     const body = (text || "").trim();
-    if (!body) return false;
+    if (!body || S.sending) return false;
+    const id = taskId || S.detailId;
+    const key = JSON.stringify(["comment", id, to, body]);
     S.sending = true;
-    render();
     try {
-      await api(`/api/tasks/${encodeURIComponent(taskId || S.detailId)}/comment`, { text: body, to, rid: rid() });
+      await api(`/api/tasks/${encodeURIComponent(id)}/comment`, { text: body, to, rid: ridFor(key) });
+      rids.delete(key);
       return true;
     } catch (e) {
       if (e.message !== "login") toast(t("failed", { e: e.message }), true);
@@ -887,6 +965,36 @@
     } finally {
       S.sending = false;
     }
+  }
+  function setDraft(text) {
+    S.draft = text;
+    const box = document.getElementById("draft");
+    if (box) box.value = text;
+  }
+  const toBottom = () => {
+    const el = document.getElementById("detail-scroll");
+    if (el) el.scrollTop = el.scrollHeight;
+  };
+  // The comment shows at once, marked as waiting; the box is empty again for the next one. If
+  // sending fails the text goes back in the box.
+  async function sendDraft() {
+    const box = document.getElementById("draft");
+    const text = (box ? box.value : S.draft).trim();
+    const task = S.detailId;
+    if (!text || !task) return;
+    S.outbox = { task, text };
+    setDraft("");
+    render();
+    const fresh = document.getElementById("draft");
+    if (fresh) fresh.focus({ preventScroll: true });
+    toBottom();
+    const ok = await send(text, "hermes", task);
+    if (ok) {
+      try { await load(); } catch (e) { /* the next poll shows it */ }
+    } else if (!S.draft && S.detailId === task) setDraft(text);
+    S.outbox = null;
+    render();
+    if (ok) toBottom();
   }
 
   function startTime(g) {
@@ -925,7 +1033,9 @@
 
   async function decideChoice(does, params) {
     const flow = S.decide;
+    if (!flow || S.sending) return;
     const c = flow.cards[flow.i];
+    if (!c) return;
     if (does === "skip") {
       flow.i += 1;
       flow.line = "";
@@ -1021,10 +1131,22 @@
   }
 
   // ------------------------------------------------------------------ events
+  // What writes: one at a time, and the pressed one shows it is working.
+  const WRITES = "[data-send],[data-dlg-ok],[data-dlg-clear],[data-project],[data-decide],[data-do^='act:'],[data-do^='say:']";
+  async function write(el) {
+    if (el.dataset.send !== undefined) return sendDraft();
+    if (el.dataset.dlgOk !== undefined) return dialogOk(el.dataset.dlgOk);
+    if (el.dataset.dlgClear !== undefined) return act("due", { date: "" }, S.dialog.task.id);
+    if (el.dataset.project !== undefined) return act("project", { project: el.dataset.project }, S.dialog.task.id);
+    if (el.dataset.decide !== undefined) return decideChoice(el.dataset.decide);
+    return doIt(el.dataset.do);
+  }
+
   document.addEventListener("click", async (e) => {
     const el = e.target.closest("[data-go],[data-do],[data-more],[data-send],[data-back],[data-expand],[data-palette]," +
       "[data-close],[data-opt],[data-dlg-ok],[data-dlg-clear],[data-project],[data-decide],[data-preview],[data-theme-cycle],[data-unclamp]");
     if (!el) return;
+    lastPressed = el;
     if (el.dataset.close !== undefined) {
       if (el.classList.contains("scrim") && e.target !== el) return;   // a click inside the modal
       S.dialog = null;
@@ -1032,6 +1154,12 @@
       return render();
     }
     e.preventDefault();
+    if (el.matches(WRITES)) {
+      if (S.pressed) return;
+      hold(el);
+      try { await write(el); } finally { hold(null); settle(); }
+      return;
+    }
     if (el.dataset.go !== undefined) {
       S.palette = false;
       S.dialog = null;
@@ -1047,26 +1175,10 @@
     if (el.dataset.expand !== undefined) { S.expanded = { ...(S.expanded || {}), [el.dataset.expand]: true }; return render(); }
     if (el.dataset.palette !== undefined) { return openPalette(); }
     if (el.dataset.themeCycle !== undefined) return cycleTheme();
-    if (el.dataset.send !== undefined) {
-      const box = document.getElementById("draft");
-      S.draft = box ? box.value : S.draft;
-      if (await send(S.draft, "hermes")) {
-        S.draft = "";
-        await refresh();
-      } else render();
-      return;
-    }
     if (el.dataset.opt !== undefined) {
-      const g = S.dialog;
-      const who = document.getElementById("dlg-who");
-      if (who) g.who = who.value;
-      g.value = el.dataset.opt;
+      S.dialog.value = el.dataset.opt;
       return render();
     }
-    if (el.dataset.dlgOk !== undefined) return dialogOk(el.dataset.dlgOk);
-    if (el.dataset.dlgClear !== undefined) return act("due", { date: "" }, S.dialog.task.id);
-    if (el.dataset.project !== undefined) return act("project", { project: el.dataset.project }, S.dialog.task.id);
-    if (el.dataset.decide !== undefined) return decideChoice(el.dataset.decide);
     if (el.dataset.preview !== undefined) {
       try {
         const res = await fetch(`/api/deliveries/${encodeURIComponent(S.delivery.version.id)}/files/${el.dataset.preview}`, { credentials: "same-origin" });
@@ -1082,22 +1194,21 @@
     if (e.target.id === "decide-line" && S.decide) S.decide.line = e.target.value;
     if (e.target.id === "search-input") searchFor(e.target.value, false);
     if (e.target.id === "palette-input") searchFor(e.target.value, true);
-    if (e.target.id === "dlg-start" && S.dialog) {
-      S.dialog.note = document.getElementById("dlg-note").value;
-      S.dialog.done = document.getElementById("dlg-done").value;
+    // What is typed in a dialog is kept, so nothing redrawn under it loses it.
+    const field = { "dlg-note": "note", "dlg-done": "done", "dlg-who": "who", "dlg-at": "at", "dlg-date": "picked" }[e.target.id];
+    if (field && S.dialog) S.dialog[field] = e.target.value;
+    if (e.target.id === "dlg-start" && S.dialog && S.dialog.start !== e.target.value) {
       S.dialog.start = e.target.value;
       render();
     }
-    if (e.target.id === "dlg-date" && S.dialog) S.dialog.picked = e.target.value;
   });
   document.addEventListener("change", (e) => {
-    if (e.target.id === "dlg-start" && S.dialog) {
-      S.dialog.note = document.getElementById("dlg-note").value;
-      S.dialog.done = document.getElementById("dlg-done").value;
+    if (e.target.id === "dlg-start" && S.dialog && S.dialog.start !== e.target.value) {
       S.dialog.start = e.target.value;
       render();
     }
   });
+  document.addEventListener("focusout", () => setTimeout(settle, 0));
 
   function openPalette() {
     S.palette = true;
@@ -1110,7 +1221,17 @@
   document.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
+      lastPressed = null;
       return openPalette();
+    }
+    // Tab stays inside an open dialog.
+    const modal = e.key === "Tab" && $overlay.querySelector(".modal");
+    if (modal) {
+      const list = [...modal.querySelectorAll("button, input, textarea, select, a[href]")].filter((x) => !x.disabled);
+      const first = list[0], last = list[list.length - 1];
+      const inside = modal.contains(document.activeElement);
+      if (first && e.shiftKey && (document.activeElement === first || !inside)) { e.preventDefault(); last.focus(); }
+      else if (first && !e.shiftKey && (document.activeElement === last || !inside)) { e.preventDefault(); first.focus(); }
     }
     if (e.key === "Escape") {
       if (S.dialog || S.palette) { S.dialog = null; S.palette = false; return render(); }
