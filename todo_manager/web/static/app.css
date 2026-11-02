@@ -13,6 +13,7 @@
   --hero-bg: #12142B; --hero-fg: #FFFFFF; --scrim: rgba(18, 20, 43, 0.35);
   --shadow: 0 8px 24px rgba(18, 20, 43, 0.10); --bubble-me: #ECE9FF; --bubble-other: #F2F3F9;
   --r: 24px; --br: 14px; --bh: 46px;
+  --ease: cubic-bezier(0.2, 0, 0, 1); --t1: 120ms; --t2: 180ms;
   --font: "Plus Jakarta Sans", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
   color-scheme: light;
 }
@@ -43,6 +44,9 @@
   --hero-bg: #ECEEF8; --hero-fg: #0B0E1A; --scrim: rgba(0, 0, 0, 0.6);
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.5); --bubble-me: #231E4A; --bubble-other: #1E2438;
   color-scheme: dark;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --t1: 0ms; --t2: 0ms; }
 }
 
 * { box-sizing: border-box; }
@@ -90,6 +94,19 @@ h1 .picon { width: .9em; height: .9em; font-size: .8em; line-height: .9em; verti
 .linkish:hover { color: var(--ink); }
 
 .rail { display: none; }
+
+/* ---------------------------------------------------------------- motion: quiet, short, only for what the user did */
+.btn, .row, .nav-item, .nav-head, .nav-search, .menu-item, .option, .tab, .rail-item, .prop, .hit, .ptile, .tile-more, .linkish,
+.stat, .hero, .seg button {
+  transition: background-color var(--t1) var(--ease), color var(--t1) var(--ease), border-color var(--t1) var(--ease),
+    box-shadow var(--t1) var(--ease), filter var(--t1) var(--ease), opacity var(--t1) var(--ease), transform var(--t1) var(--ease);
+}
+.btn:active, .row:active, .tab:active, .option:active, .hero:active { transform: scale(0.98); }
+.btn:disabled:active { transform: none; }
+.enter { animation: rise var(--t2) var(--ease); }
+@keyframes rise { from { opacity: 0; transform: translateY(4px); } }
+.leave { animation: leave var(--t1) var(--ease) forwards; }
+@keyframes leave { to { opacity: 0; transform: translateX(-12px); } }
 
 .list { overflow-y: auto; min-height: 0; padding: 18px 14px 40px; display: flex; flex-direction: column; gap: 14px; }
 .detail { overflow: hidden; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--border);
@@ -294,12 +311,17 @@ details > summary { cursor: pointer; color: var(--muted); font-weight: 600; font
 .palette .hit.on, .palette .hit:hover { background: var(--sunken); }
 .palette .hit .t { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .palette .hit .muted { flex: 0 0 auto; white-space: nowrap; }
+.scrim.opening { animation: fade var(--t2) var(--ease); }
+.scrim.opening > .modal { animation: pop var(--t2) var(--ease); }
+@keyframes fade { from { opacity: 0; } }
+@keyframes pop { from { opacity: 0; transform: translateY(8px) scale(0.99); } }
+@keyframes sheet { from { transform: translateY(40px); } }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--hero-bg); color: var(--hero-fg);
   padding: 12px 18px; border-radius: 14px; box-shadow: var(--shadow); z-index: 60; font-weight: 600; max-width: calc(100vw - 32px); }
 .toast.error { background: var(--danger-ink); color: #fff; }
 
 /* a write on its way: the pressed button turns into a spinner, the others dim, only if it takes a while */
-button[aria-busy="true"] { position: relative; cursor: progress; animation: busy-label 0s 150ms forwards; }
+button[aria-busy="true"] { position: relative; cursor: progress; animation: busy-label 0s 150ms forwards; transform: none; }
 button[aria-busy="true"]::after { content: ""; position: absolute; left: 50%; top: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px;
   border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; opacity: 0;
   animation: busy-show 0s 150ms forwards, spin 0.7s linear infinite; }
@@ -307,16 +329,21 @@ button[aria-busy="true"]::after { content: ""; position: absolute; left: 50%; to
 @keyframes busy-show { to { opacity: 1; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 .writing :is(.actions, .menu, .decide-grid, .modal-foot, .options, .compose-row) button:not([aria-busy="true"]) {
-  opacity: 0.5; pointer-events: none; transition: opacity 0.12s ease; }
+  opacity: 0.5; pointer-events: none; }
 .detail[aria-busy="true"] { pointer-events: none; }
-.detail[aria-busy="true"] > * { animation: dim 0.18s ease 120ms both; }
+.detail[aria-busy="true"] > * { animation: dim var(--t2) var(--ease) 120ms both; }
 @keyframes dim { to { opacity: 0.5; } }
+@media (prefers-reduced-motion: reduce) {
+  button[aria-busy="true"]::after { animation: busy-show 0s 150ms forwards; }
+}
 
 /* decide one by one */
 .decide { max-width: 560px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
 .progress { display: flex; gap: 6px; }
 .progress span { flex: 1 1 0; height: 5px; border-radius: 3px; background: var(--border); }
-.progress span.on { background: var(--accent); }
+.progress span.on { background: var(--border) linear-gradient(var(--accent), var(--accent)) no-repeat left / 100% 100%; }
+.progress span.fill { animation: fill var(--t2) var(--ease); }
+@keyframes fill { from { background-size: 0% 100%; } }
 .decide-card { border-radius: var(--r); background: var(--surface); border: 1px solid var(--border); padding: 22px;
   display: flex; flex-direction: column; gap: 10px; }
 .decide-card .k { font-size: 13px; font-weight: 700; color: var(--amber-ink); }
@@ -326,6 +353,8 @@ button[aria-busy="true"]::after { content: ""; position: absolute; left: 50%; to
 .done-hero { border-radius: var(--r); background: var(--hero-bg); color: var(--hero-fg); padding: 22px; display: flex;
   flex-direction: column; gap: 6px; }
 .done-hero b { font-size: 44px; line-height: 1; }
+
+@keyframes slide { from { opacity: 0; transform: translateX(24px); } }
 
 /* ---------------------------------------------------------------- tablet: icon rail */
 @media (max-width: 1279px) {
@@ -374,6 +403,8 @@ button[aria-busy="true"]::after { content: ""; position: absolute; left: 50%; to
   .modal { max-width: none; border-radius: 26px 26px 0 0; max-height: 88vh; padding: 10px 16px calc(24px + env(safe-area-inset-bottom)); }
   .modal::before { content: ""; width: 40px; height: 5px; border-radius: 3px; background: var(--border-strong); margin: 2px auto 0; }
   .modal-foot .btn { flex: 1 1 0; min-height: 50px; }
+  .scrim.opening > .modal { animation-name: sheet; }
+  .detail.slide { animation: slide var(--t2) var(--ease); }
   .palette { border-radius: 0; height: 100vh; max-height: none; }
   .view-head h1 { font-size: 24px; }
   .menu { grid-template-columns: 1fr; }

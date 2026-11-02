@@ -870,6 +870,56 @@
     return R;
   }
 
+  // ------------------------------------------------------------------ motion
+  // Short and quiet, and only for what the user did: never for what a poll brought.
+  const motion = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  // A class that runs its animation once; it is taken off when it ends so it can run again.
+  function play(el, cls) {
+    if (!el) return;
+    el.classList.remove(cls);
+    void el.offsetWidth;
+    el.classList.add(cls);
+    const end = (e) => {
+      if (e.target !== el) return;
+      el.classList.remove(cls);
+      el.removeEventListener("animationend", end);
+    };
+    el.addEventListener("animationend", end);
+  }
+  const leave = (el) => new Promise((done) => {
+    if (!el) return done();
+    el.addEventListener("animationend", (e) => { if (e.target === el) done(); });
+    el.classList.add("leave");
+    setTimeout(done, (parseFloat(motion("--t1")) || 0) + 60);
+  });
+  // Where the tiles and rows of the list are, so that after the user's own change they slide to
+  // their new places (FLIP) rather than jump.
+  const flipKey = (el) => (el.classList.contains("tile") ? "t:" + el.getAttribute("aria-label") : "r:" + el.dataset.go);
+  function measure() {
+    const list = document.getElementById("list-scroll");
+    if (!list || !list.offsetParent || !parseFloat(motion("--t2"))) return null;
+    const at = new Map();
+    for (const el of list.querySelectorAll(".tile, .row")) at.set(flipKey(el), el.getBoundingClientRect().top);
+    return at;
+  }
+  function flip(before) {
+    const list = document.getElementById("list-scroll");
+    if (!list || !before) return;
+    const now = new Map();
+    for (const el of list.querySelectorAll(".tile, .row")) now.set(el, el.getBoundingClientRect().top);
+    for (const [el, top] of now) {
+      const was = before.get(flipKey(el));
+      if (was === undefined) continue;
+      let dy = was - top;
+      const tile = el.classList.contains("row") && el.closest(".tile");
+      if (tile && now.has(tile) && before.has(flipKey(tile))) dy -= before.get(flipKey(tile)) - now.get(tile);   // it moves with its tile
+      if (Math.abs(dy) < 1) continue;
+      el.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }],
+        { duration: parseFloat(motion("--t2")), easing: motion("--ease") || "ease" });
+    }
+  }
+  let shownId = null;
+
   function render() {
     if (!S.home) return;
     const r = route();
@@ -897,16 +947,24 @@
     else if (r.page === "search") main = searchPage();
     else if (r.page === "decide") main = decidePage();
     S.shown = !!d;
+    const opened = !!d && $.detail.classList.contains("closed");
     patch($.nav, sidebar(r) + rail(r));
     patch($.main, main);
     $.detail.hidden = r.page !== "tasks";
-    $.detail.className = "detail" + (d ? "" : " closed");
+    $.detail.classList.toggle("closed", !d);
     $.detail.setAttribute("aria-label", d ? d.title : "");
     if (loading) $.detail.setAttribute("aria-busy", "true"); else $.detail.removeAttribute("aria-busy");
     patch($.body, d ? detailBody(d) : r.page === "tasks" ? `<div class="empty-detail"></div>` : "");
     patch($.compose, d ? composer(d) : "");
     patch($.tabs, tabbar(r));
     patch($overlay, S.dialog ? dialogView() : S.palette ? paletteView() : "");
+    // A task opened: on a phone the detail slides in, beside the list it rises into place.
+    if (d && !loading && d.id !== shownId) {
+      if (opened && window.matchMedia("(max-width: 767px)").matches) play($.detail, "slide");
+      else play(document.getElementById("detail-scroll"), "enter");
+    }
+    if (!loading) shownId = d ? d.id : null;
+    if (layer && !S.layer) play($overlay.querySelector(".scrim"), "opening");
     const box = document.getElementById("draft");
     if (box && box.value !== S.draft) box.value = S.draft;
     for (const el of document.querySelectorAll("details[data-keep]")) el.open = !!S.open[el.dataset.keep];
@@ -976,7 +1034,9 @@
       return done;
     } finally {
       S.sending = false;
+      const before = done ? measure() : null;
       render();
+      flip(before);
     }
   }
   async function send(text, to, taskId) {
@@ -1066,11 +1126,7 @@
     if (!flow || S.sending) return;
     const c = flow.cards[flow.i];
     if (!c) return;
-    if (does === "skip") {
-      flow.i += 1;
-      flow.line = "";
-      return render();
-    }
+    if (does === "skip") return advance(flow);
     if (does === "dlg:agent") {
       S.dialog = { kind: "agent", task: c, note: flow.line || "", decideFlow: true };
       return render();
@@ -1085,10 +1141,17 @@
     if (!(await act(action, params || {}, c.id))) return;
     const labels = { agent: "agentTitle", todo: "setTodo", wait: "waitFor", snooze: "snooze", done: "markDone", cancel: "cancel" };
     flow.done.push({ title: c.title, choice: t(labels[action]).replace(/…$/, "") });
+    S.dialog = null;
+    return advance(flow);
+  }
+  // The card handed over leaves, the next one comes in, and the progress bar fills.
+  async function advance(flow) {
+    await leave(document.querySelector(".decide-card"));
     flow.i += 1;
     flow.line = "";
-    S.dialog = null;
     render();
+    play(document.querySelector(".decide-card, .done-hero"), "enter");
+    play(document.querySelectorAll(".progress span")[flow.i], "fill");
   }
 
   function startDecide() {
@@ -1295,6 +1358,7 @@
     await refresh();
   });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
+  document.addEventListener("touchstart", () => {}, { passive: true });   // so iOS shows :active on a tap
 
   // ------------------------------------------------------------------ start
   (async function start() {
