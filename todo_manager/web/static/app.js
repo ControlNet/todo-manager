@@ -267,10 +267,13 @@
   }
 
   // A change from elsewhere waits while the user is in the middle of something: a dialog, the
-  // search, a write, or typing. It shows when that ends (settle).
+  // search, a write, or typing. It shows when that ends (settle). The comment box is not waited
+  // for: its region never holds the draft, so a refresh leaves it alone, and a reply must show
+  // while the box keeps focus after sending.
   const typing = () => {
     const el = document.activeElement;
-    return !!el && (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && !["checkbox", "radio"].includes(el.type)));
+    if (!el || el.id === "draft") return false;
+    return el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && !["checkbox", "radio"].includes(el.type));
   };
   const busy = () => !!(S.dialog || S.palette || S.pressed || S.sending || typing());
   async function poll() {
