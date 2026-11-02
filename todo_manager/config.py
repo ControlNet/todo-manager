@@ -151,8 +151,8 @@ DEFAULTS: dict[str, Any] = {
         "webhook_silence_minutes": 10,  # our write without any event this long: webhook reported broken
         "unit_dir": "",  # "" = ~/.config/systemd/user; for tests (enable needs a systemd search path)
     },
-    # The Web UI (docs/web-ui.md), served by the daemon on loopback; sign in with
-    # `todo-manager web token`. Reaching it from other devices needs a tunnel the user sets up.
+    # The Web UI (docs/web-ui.md), served by the daemon; sign in with `todo-manager web token`.
+    # Loopback by default: another host address serves plain HTTP on that network.
     "web": {
         "enabled": False,
         "host": "127.0.0.1",

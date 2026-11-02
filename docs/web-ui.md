@@ -13,14 +13,24 @@ todo-manager config set web.enabled true --human   # the daemon restarts with th
 todo-manager web token                              # the sign-in token (created on first use)
 ```
 
-The page listens on `127.0.0.1:8656` (`web.host`, `web.port`). Open `http://127.0.0.1:8656`
-on the same machine and paste the token. `todo-manager web token --new` replaces the token and
-signs every browser out.
+The page listens on `127.0.0.1:8656` by default. Open `http://127.0.0.1:8656` on the same
+machine and paste the token. `todo-manager web token --new` replaces the token and signs every
+browser out.
 
-To use it from a phone or another computer, publish the port through a tunnel you control,
-for example a Cloudflare Tunnel hostname. Put Cloudflare Access (or another login in front of the
-tunnel) on that hostname as well: the token is then the second lock, not the only one. The page
-sets its cookie `Secure` when the tunnel says the request came over HTTPS.
+`web.host` and `web.port` choose where it listens; the daemon restarts when they change:
+
+```bash
+todo-manager config set web.host 0.0.0.0 --human      # every interface of the machine
+todo-manager config set web.host 192.168.1.20 --human # one address, e.g. a LAN or VPN interface
+todo-manager config set web.port 8656 --human
+```
+
+The page itself speaks plain HTTP, so on any address other than loopback the token and the
+session cookie cross the network unencrypted. That is fine on a network only you can reach
+(a VPN such as Tailscale or WireGuard); for anything wider, keep the default and publish the
+port through a tunnel you control, for example a Cloudflare Tunnel hostname with Cloudflare
+Access (or another login) in front of it: the token is then the second lock, not the only one.
+The page sets its cookie `Secure` when the tunnel says the request came over HTTPS.
 
 ## What it shows
 
