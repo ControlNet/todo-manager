@@ -451,7 +451,8 @@
     const pause = active ? (work.status === "paused" || work.pause_requested ? ["resume", "act:resume"] : ["pause", "act:pause"]) : null;
     const latest = work && work.versions.filter((v) => v.kind === "result").pop();
     const list = {
-      decision: [["toAgent", "dlg:agent", "primary"], ["setTodo", "act:todo"], ["markDone", "act:done"], ["cancel", "act:cancel"]],
+      decision: [["toAgent", "dlg:agent", "primary"], ["setTodo", "act:todo"], ["waitFor", "dlg:wait"], ["snooze", "dlg:snooze"],
+        ["markDone", "act:done"], ["cancel", "act:cancel"]],
       todo: [["done", "act:done", "primary"], ["toAgent", "dlg:agent"], ["snooze", "dlg:snooze"], ["waitFor", "dlg:wait"],
         ["cancel", "act:cancel"]],
       answer: [["answer", "compose:agent", "primary"], ["selfDo", "act:todo"], pause, ["cancel", "act:cancel"]],
@@ -735,7 +736,8 @@
     }
     const c = flow.cards[flow.i];
     const last = flow.done[flow.done.length - 1];
-    const buttons = [["toAgent", "dlg:agent", "primary"], ["setTodo", "act:todo"], ["markDone", "act:done"], ["cancel", "act:cancel"]];
+    const buttons = [["toAgent", "dlg:agent", "primary"], ["setTodo", "act:todo"], ["waitFor", "dlg:wait"], ["snooze", "dlg:snooze"],
+      ["markDone", "act:done"], ["cancel", "act:cancel"]];
     return `<section class="page span"><div class="decide">
       <div class="view-head"><h1>${esc(t("g_decide"))}</h1><span class="sub">${esc(t("ofN", { i: flow.i + 1, n: flow.cards.length }))}</span></div>
       <div class="progress">${flow.cards.map((_, k) => `<span class="${k <= flow.i ? "on" : ""}"></span>`).join("")}</div>
@@ -908,11 +910,15 @@
       if (g.decideFlow) return decideChoice("act:agent", params);
       return act("agent", params, d.id);
     }
-    if (kind === "snooze") return dateOrPick() && act("snooze", { until: dateOrPick() }, d.id);
+    if (kind === "snooze") {
+      if (!dateOrPick()) return;
+      return g.decideFlow ? decideChoice("act:snooze", { until: dateOrPick() }) : act("snooze", { until: dateOrPick() }, d.id);
+    }
     if (kind === "followup") return dateOrPick() && act("follow_up", { date: dateOrPick() }, d.id);
     if (kind === "due") return act("due", { date: picked() }, d.id);
     if (kind === "wait") {
       const who = document.getElementById("dlg-who").value;
+      if (g.decideFlow) return decideChoice("act:wait", { on: who, follow_up: dateOrPick() });
       return act("wait", { on: who, follow_up: dateOrPick() }, d.id);
     }
   }
@@ -929,12 +935,16 @@
       S.dialog = { kind: "agent", task: c, note: flow.line || "", decideFlow: true };
       return render();
     }
+    if (does === "dlg:wait" || does === "dlg:snooze") {
+      S.dialog = { kind: does.slice(4), task: c, value: null, decideFlow: true };
+      return render();
+    }
     const action = does.split(":")[1];
     const line = (flow.line || "").trim();
     if (line && action !== "agent" && !(await send(line, "hermes", c.id))) return;
     if (!(await act(action, params || {}, c.id))) return;
-    const labels = { agent: "agentTitle", todo: "setTodo", done: "markDone", cancel: "cancel" };
-    flow.done.push({ title: c.title, choice: t(labels[action]) });
+    const labels = { agent: "agentTitle", todo: "setTodo", wait: "waitFor", snooze: "snooze", done: "markDone", cancel: "cancel" };
+    flow.done.push({ title: c.title, choice: t(labels[action]).replace(/…$/, "") });
     flow.i += 1;
     flow.line = "";
     S.dialog = null;

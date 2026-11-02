@@ -103,7 +103,8 @@ def changes_for(conn: sqlite3.Connection, task: dict[str, Any], action: str, par
     if action == "wait":
         return {"status": "waiting", "next_actor": "external",
                 "waiting_on": _text(params.get("on"), "on", required=True),
-                "follow_up_date": _date(params, "follow_up", optional=True)}, None
+                "follow_up_date": _date(params, "follow_up", optional=True),
+                **({"decision": None} if on_board else {})}, None   # off the decision board
     if action == "project":
         project = params.get("project") or None
         if project is not None and store.get_project(conn, project) is None:

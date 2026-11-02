@@ -181,6 +181,13 @@ class ActionTests(WebCase):
             with self.assertRaises(actions.ActionError):
                 self.act(agree, action)
         self.assertEqual(store.get_task(self.conn, agree)["status"], "decision")
+
+    def test_a_task_to_decide_can_wait_on_someone(self):
+        tid = self.task("Accept the invitation?", status="decision", decision="pending")
+        self.act(tid, "wait", on="Alice", follow_up="2026-10-09")
+        t = store.get_task(self.conn, tid)
+        self.assertEqual((t["status"], t["waiting_on"], t["decision"]), ("waiting", "Alice", None))
+        self.assertEqual(views.kind_of(self.conn, t)[0], "waiting")
         done = self.task("Done?", status="decision")
         self.act(done, "done")
         t = store.get_task(self.conn, done)
