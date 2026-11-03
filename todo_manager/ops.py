@@ -30,7 +30,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from . import batching, clock, delegation, effects, feedback, gate_intake, i18n, prefs, project_icons, runs, store
+from . import batching, clock, delegation, effects, feedback, gate_intake, i18n, outbox, prefs, project_icons, runs, store
 from .config import Config
 from .db import dumps, get_meta, loads, tx
 from .notion import body as notion_body
@@ -1086,20 +1086,22 @@ def config_set(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, key: str, value:
 # Given-up effects that are never queued again: their outcome may already be in Notion. Only the
 # task and project pushes are retried; they write the current local state onto the page.
 NOT_RETRYABLE = {
-    "comment": "a comment may already have been posted; sending it again could post it twice (check the page"
-               " and post it by hand if needed)",
+    "comment": "an older comment without an effect identity cannot be found on the page; sending it again"
+               " could post it twice (check the page and post it by hand if needed)",
     "push_delivery": "it creates a delivery page and uploads its files; a retry could duplicate them",
     "project_view": "it creates a project's task view; a retry could create a second view",
 }
 
 
 def outbox_retry(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, outbox_ids: list[str]) -> dict[str, Any]:
-    """Queue given-up task/project pushes again after their cause was fixed (all or none).
+    """Queue given-up task/project pushes and comments again after their cause was fixed (all or none).
 
     The given-up row is superseded, keeping its attempts and error, and ``effects`` queues a
     fresh push of the current projection: reset in place, its digest would still match an
     unchanged task, so later scans would keep reusing it. A push that a newer one replaced is
-    reported (and settled by it), not queued."""
+    reported (and settled by it), not queued. A comment is queued again with the same text and
+    key, to be looked for on the page first and posted only if it is not there (an attempt may
+    have landed with its response lost)."""
     if ctx.kind == "run":
         raise OpError("NOT_AUTHORIZED", "a scheduled run does not retry given-up effects; the user does, after"
                                         " fixing the cause")
@@ -1122,6 +1124,13 @@ def outbox_retry(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, outbox_ids: li
                 raise OpError("NOT_DEAD", f"{oid} is {row['status']}: only a given-up (dead) effect is retried"
                               + ("; it already succeeded" if row["status"] == "done" else
                                  f"; it retries by itself (next attempt {row['next_attempt_at']})"))
+            payload = loads(row["payload"], {})
+            if row["target"] == "notion" and row["op"] == "comment" and payload.get("comment_protocol"):
+                conn.execute("UPDATE outbox SET status='superseded', updated_at=? WHERE id=?", (clock.iso(), oid))
+                report["retried"].append({**line, "queued": outbox.enqueue(
+                    conn, target="notion", op="comment", entity_type=row["entity_type"], entity_id=row["entity_id"],
+                    dedupe_key=f"{row['dedupe_key']}:retry:{oid}", payload={**payload, "look_first": True})})
+                continue
             if row["target"] != "notion" or row["op"] not in ("push_task", "push_project"):
                 raise OpError("NOT_RETRYABLE", f"{oid} ({line['op']}): "
                               + NOT_RETRYABLE.get(row["op"], "only task and project pushes are retried"))

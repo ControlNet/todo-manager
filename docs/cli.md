@@ -164,14 +164,16 @@ within that lease (a later run may have taken F over); otherwise `STALE_RUN`. Wi
 (by hand) it is refused with `CLAIMED_BY_RUN` while a live run holds F. Recovery releases all intake/feedback runs, including interrupted gate preparation,
 and makes their unprocessed materials available again. This is separate from delegation holds.
 
-`outbox retry ID... --human` queues given-up (`dead`) Notion task and project pushes again after
-the cause was fixed; `status --details` lists given-up effects (`health.outbox_dead`). The given-up
+`outbox retry ID... --human` queues given-up (`dead`) Notion task and project pushes and comments
+again after the cause was fixed; `status --details` lists given-up effects (`health.outbox_dead`). The given-up
 row is superseded with its attempts and error kept, and a fresh push of the current projection is
 queued with new attempts (an unchanged task would otherwise keep reusing the given-up row). A push
-that a newer one replaced is reported under `superseded` and not queued. Refused, with nothing
-changed for any listed ID: a `pending`/`failed`/`uncertain` effect (`NOT_DEAD`: it retries by itself;
-its retry deadline is not bypassed), comments, delivery pages and project views (`NOT_RETRYABLE`: they
-may already exist in Notion), and a scheduled run (`NOT_AUTHORIZED`). Provenance and `--key`
+that a newer one replaced is reported under `superseded` and not queued. A comment is queued again
+with the same text and effect identity: the page is searched for it first and it is posted only if
+it is not there. Refused, with nothing changed for any listed ID: a `pending`/`failed`/`uncertain`
+effect (`NOT_DEAD`: it retries by itself; its retry deadline is not bypassed), delivery pages,
+project views and older comments without an effect identity (`NOT_RETRYABLE`: they may already
+exist in Notion), and a scheduled run (`NOT_AUTHORIZED`). Provenance and `--key`
 follow the other writes.
 
 Invalid TOML or wrong types of known configuration fields return `CONFIG` with the file path

@@ -1,4 +1,4 @@
-"""``outbox retry``: a given-up Notion state push is queued again after its cause was fixed.
+"""``outbox retry``: a given-up Notion state push or comment is queued again after its cause was fixed.
 
 Synthetic workspace, tasks and errors only; no Notion client."""
 import contextlib
@@ -76,15 +76,33 @@ class OutboxRetryTests(WorkspaceCase):
         self.assertEqual(code, 2)
         self.assertIn('NOT_FOUND', text)
 
+    def test_a_dead_comment_is_queued_again_to_look_before_posting(self):
+        task = store.create_task(self.conn, 'Commented', actor='human', origin='cli')
+        effects.task_comment(self.conn, task, 'reply:synthetic', 'Synthetic reply', discussion_id='disc_x')
+        outbox.process(self.conn, {('notion', 'comment'): reject})
+        dead = self.rows('comment')[0]
+        self.assertEqual(dead['status'], 'dead')
+        code, text = invoke(self.tmp, 'outbox', 'retry', dead['id'], '--human')
+        self.assertEqual(code, 0, text)
+        retried = json.loads(text)['retried'][0]
+        self.assertEqual(retried['op'], 'notion/comment')
+        self.assertEqual((self.row(dead['id'])['status'], self.row(dead['id'])['last_error']),
+                         ('superseded', 'Synthetic validation error'))
+        fresh = self.row(retried['queued'])
+        self.assertEqual((fresh['status'], fresh['attempts'], fresh['entity_id']), ('pending', 0, task))
+        self.assertEqual(json.loads(fresh['payload']), {**json.loads(dead['payload']), 'look_first': True},
+                         'the same text and key: the page is searched for it before it is posted')
+
     def test_effects_that_may_already_have_happened_are_refused(self):
         task = store.create_task(self.conn, 'Commented', actor='human', origin='cli')
-        effects.task_comment(self.conn, task, 'synthetic-comment', 'Synthetic note')
+        outbox.enqueue(self.conn, target='notion', op='comment', entity_type='task', entity_id=task,
+                       dedupe_key='comment:legacy', payload={'task_id': task, 'text': 'Synthetic note', 'key': 'legacy'})
         effects.delivery_push(self.conn, 'delivery_synthetic', task)
         outbox.enqueue(self.conn, target='notion', op='project_view', entity_type='project', entity_id='project_x',
                        dedupe_key='project_view:project_x', payload={'project_id': 'project_x'})
         handlers = {('notion', op): reject for op in ('comment', 'push_delivery', 'project_view')}
         outbox.process(self.conn, handlers)
-        for op, reason in (('comment', 'may already have been posted'), ('push_delivery', 'creates'),
+        for op, reason in (('comment', 'cannot be found on the page'), ('push_delivery', 'creates'),
                            ('project_view', 'creates')):
             oid = self.rows(op)[0]['id']
             code, text = invoke(self.tmp, 'outbox', 'retry', oid, '--human')
@@ -95,10 +113,10 @@ class OutboxRetryTests(WorkspaceCase):
 
     def test_a_refused_id_leaves_the_others_unchanged(self):
         task, dead = self.dead_push()
-        effects.task_comment(self.conn, task, 'synthetic-comment', 'Synthetic note')
-        outbox.process(self.conn, {('notion', 'comment'): reject})
-        comment = self.rows('comment')[0]['id']
-        code, text = invoke(self.tmp, 'outbox', 'retry', dead, comment, '--human')
+        effects.delivery_push(self.conn, 'delivery_synthetic', task)
+        outbox.process(self.conn, {('notion', 'push_delivery'): reject})
+        delivery = self.rows('push_delivery')[0]['id']
+        code, text = invoke(self.tmp, 'outbox', 'retry', dead, delivery, '--human')
         self.assertEqual(code, 2)
         self.assertEqual(self.row(dead)['status'], 'dead')
         self.assertEqual(len(self.rows()), 1)

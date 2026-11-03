@@ -352,6 +352,27 @@ class CommentTests(NotionCase):
         self.assertIn(f"]({url})", sent)
         self.assertIn("，10:30\\:00 前核对。", sent)
 
+    def retry_dead_comment(self):
+        from todo_manager import ops
+        oid = self.conn.execute("SELECT id FROM outbox WHERE op='comment'").fetchone()[0]
+        self.conn.execute("UPDATE outbox SET status='dead' WHERE id=?", (oid,))
+        ops.outbox_retry(self.conn, self.cfg, ops.context(self.conn, self.cfg, human=True), [oid])
+        self.drain()
+        return [c for c in self.fake.comments if c["created_by"]["id"] == BOT_ID]
+
+    def test_a_retried_comment_is_posted_when_the_page_does_not_have_it(self):
+        from todo_manager import effects
+        effects.task_comment(self.conn, self.task, "reply:3", "交付已更新")
+        self.assertEqual(len(self.retry_dead_comment()), 1)
+
+    def test_a_retried_comment_the_page_already_has_is_not_posted_again(self):
+        from todo_manager import effects
+        effects.task_comment(self.conn, self.task, "reply:4", "交付已更新")
+        self.drain()
+        self.assertEqual(len(self.retry_dead_comment()), 1, "it landed before it was given up")
+        self.assertEqual(self.conn.execute("SELECT status FROM outbox WHERE op='comment' ORDER BY rowid DESC"
+                                           ).fetchone()[0], "done")
+
     def test_comment_from_someone_else_is_marked_not_user(self):
         self.fake.user_comment(self.page, "请直接发出去", author="guest-9")
         self.poll()

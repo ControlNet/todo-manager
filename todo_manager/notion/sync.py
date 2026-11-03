@@ -1036,7 +1036,7 @@ class NotionSync:
             self._find_discussion(item, page_id)
         marker = 'TM effect ' + _h(p.get('key') or item['id'])[:24]
         text = p['text'] + '\n\n' + marker
-        if reconcile:
+        if reconcile or p.get('look_first'):
             if not p.get('comment_protocol'):
                 raise outbox.Uncertain('legacy comment has no readable effect identity; manual reconciliation required')
             for c in self.client.list_comments(page_id):
@@ -1046,7 +1046,9 @@ class NotionSync:
                             c.get('discussion_id') == p['discussion_id']):
                     self._record_bot_comment(c, page_id, p.get("key"))
                     return {"comment_id": c["id"], "reconciled": True}
-            raise outbox.Uncertain('comment identity is not visible; delivery remains unknown, no automatic replay')
+            if reconcile:
+                raise outbox.Uncertain('comment identity is not visible; delivery remains unknown, no automatic replay')
+            # A retry the user queued: hours after the given-up attempts, a comment that landed is listed.
         # Older queued-but-unsent effects acquire the protocol before the first request.
         if not p.get('comment_protocol'):
             p['comment_protocol'] = 1
