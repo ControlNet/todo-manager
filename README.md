@@ -1,150 +1,94 @@
 # Todo Manager
 
-**Your AI agent reads your email, Slack and GitHub, and keeps your todo list in Notion for you.
-When a task is something the agent can do, you hand it over with one drag.**
+**Your AI agent reads your email, Slack and GitHub and keeps your todo list in Notion.
+When the agent can do a task itself, you hand it over with one drag.**
 
-Todo Manager works with [Hermes](https://github.com/NousResearch/hermes-agent), the self-hosted
-AI agent. It adds two scheduled jobs and a skill to your Hermes and uses the AI model and agent
-board you already have there. Install it once, then you mostly just open Notion.
+Todo Manager is an add-on for [Hermes](https://github.com/NousResearch/hermes-agent), the
+self-hosted AI agent, and uses the AI model and agent board you already have there.
 
-![How Todo Manager works, in five steps: your Gmail, Slack and GitHub inbox (read-only) arrives at a 5-minute wake gate; only new material wakes the Hermes LLM judge, which decides and writes task changes to the local SQLite store; Notion sync and the Web UI keep what you see in step with the store, two-way, with your edits winning; a card you drag to Agent work goes to a Hermes Kanban agent, whose results come back to the store, and your comments on a task go back to the LLM judge.](docs/images/how-it-works.svg)
+![How Todo Manager works: your Gmail, Slack and GitHub inbox is checked every 5 minutes; new messages go to the Hermes LLM judge, which keeps your tasks in a local store; Notion and the Web UI show them and send your edits and comments back; a card you drag to Agent work goes to a Hermes agent, whose result comes back to the task.](docs/images/how-it-works.svg)
 
 ## What it does
 
-- **Turns messages into tasks.** "Could you review this before Friday?" in an email becomes a
-  task in Notion: due Friday, with a link back to the email. Newsletters and threads you were
-  only copied on are skipped.
-- **Collects your decisions on one board.** Things only you can decide go to *To decide*. Drag
-  the card to *Done*, *Cancel*, *My to-do* or *Assign to Agent*.
-- **Hands work to an agent.** Drag a card to *Assign to Agent* and a Hermes agent works on it:
-  drafting a reply, collecting information, writing a document. If it needs something, it asks
-  in a comment on the task. The result comes back as a page under the task, and on the *Agent
-  work* board you drag the card to *Done*, *My to-do* or *Cancel*.
-- **Takes instructions in plain words.** Comment "the deadline moved to Monday" on a task and
-  the due date changes. Tell it "from now on, ignore mail from this list" and it keeps the rule.
-- **Closes finished tasks.** When you reply to the email or your pull request is merged, the
-  task is marked done.
+- **Turns messages into tasks.** "Could you review this before Friday?" becomes a task due
+  Friday, linked to the email. Newsletters and threads you were only copied on are skipped.
+- **Puts your decisions on one board.** Drag a card to *Done*, *Cancel*, *My to-do* or
+  *Assign to Agent*.
+- **Hands work to an agent.** It drafts, researches or writes, asks in a comment when it needs
+  something, and puts the result on a page under the task.
+- **Understands plain words.** Comment "the deadline moved to Monday" on a task, or tell it
+  "from now on, ignore mail from this list".
+- **Closes tasks for you** when you reply to the email or your pull request is merged.
 
-## What it looks like
-
-A Notion page with a few lists and boards:
-
-```
-Todo Manager
-  Data freshness      every source syncing, or what is not
-  🤔 To decide        cards waiting for your call
-  🤖 Agent work       what the agent is doing, and what it needs from you
-  ⭐ Focus            what to do now: due soon, or starred by you
-  📁 Active projects
-  ⏳ Waiting on others
-  📋 All open tasks
-  🕘 Recently done and notable changes
-```
-
-Each task page has a small box that Todo Manager keeps up to date (why it is your task, what
-"done" means, links to the sources). Everything else on the page is yours: write notes there and
-the agent reads them.
-
-If you turn on the optional [Web UI](docs/web-ui.md), the same tasks and actions are also on a
-page for desktop, tablet and phone. What you change there goes to the same local database as
-your Notion edits.
-
-## Your data
-
-- **Your data lives on your machine**, in a local SQLite database. Tasks go to your Notion, and
-  new messages go to the AI model your Hermes uses.
-- **Your Notion edits win.** A field you change keeps your value when the AI later reads new
-  messages.
-- **Todo Manager does not send from your accounts.** It reads them, and its one write there is
-  the optional Gmail labels. An agent working on a task is told to send an email only after you
-  approve that version in a comment. The agent follows this as an instruction; nothing in Todo
-  Manager blocks its tools (see [limitations](docs/limitations.md)).
-- **The AI model runs only for new messages.** A small script checks every five minutes and
-  wakes the model when something new needs judging.
-
-## What you need
-
-- A Linux machine (a home server or a small cloud VM) with
-  [Hermes](https://github.com/NousResearch/hermes-agent) installed and working. Tested with
-  Hermes 0.21 and 0.22.
-- Python 3.11 or newer. Nothing else to install.
-- A free Notion account.
-- At least one source:
-  - **Gmail**: the Gmail account your Hermes already uses (through himalaya)
-  - **Slack**: a Slack user token saved in `~/.hermes/.env` as `SLACK_USER_TOKEN`
-  - **GitHub**: the `gh` command, logged in (`gh auth login`).
-- Optional, for *Assign to Agent*: Hermes' Kanban board.
+Prefer a browser? The optional [Web UI](docs/web-ui.md) shows the same tasks on desktop, tablet
+and phone.
 
 ## Get started
 
-**1. Connect Notion**
+You need a Linux machine with [Hermes](https://github.com/NousResearch/hermes-agent) (tested
+with 0.21 and 0.22), Python 3.11 or newer, a free Notion account, and at least one of:
 
-1. Go to [notion.so/my-integrations](https://www.notion.so/my-integrations) and create an
-   internal integration. Turn on *Read content*, *Update content*, *Insert content*, *Read
-   comments* and *Insert comments*.
-2. Copy its secret and add it to Hermes' settings file `~/.hermes/.env`:
+- **Gmail**: the account your Hermes already uses (through himalaya)
+- **Slack**: a user token in `~/.hermes/.env` as `SLACK_USER_TOKEN`
+- **GitHub**: the `gh` command, logged in with `gh auth login`
+
+Handing work to an agent also needs Hermes' Kanban board.
+
+1. **Connect Notion.** At [notion.so/my-integrations](https://www.notion.so/my-integrations),
+   create an internal integration that can read, update and insert content and read and insert
+   comments. Save its secret:
 
    ```bash
    echo 'NOTION_API_KEY=paste-your-secret-here' >> ~/.hermes/.env
    ```
 
-3. In Notion, create an empty page (for example "Todo Manager"). Open its `···` menu →
-   *Connections* and add your integration.
+   Then create an empty Notion page and add the integration under `···` → *Connections*.
 
-**2. Install**
+2. **Install.**
 
-```bash
-git clone https://github.com/ControlNet/todo-manager.git
-cd todo-manager
-./bin/todo-manager install
-```
+   ```bash
+   git clone https://github.com/ControlNet/todo-manager.git
+   cd todo-manager
+   ./bin/todo-manager install
+   ```
 
-The installer finds most settings in your Hermes setup: language, time zone and which of Gmail,
-Slack and GitHub are connected. It asks which Notion page to use and which mailboxes and chats to
-read, shows every change before making it, and can be run again at any time.
+   The installer reads your Hermes setup, asks which Notion page, mailboxes and chats to use, and
+   shows every change before making it. Keep the folder: Todo Manager runs from it.
 
-Keep the downloaded folder where it is: Todo Manager runs from it.
-
-**3. Open your Notion page**
-
-Once the installer has started Todo Manager (it asks before it does), tasks from your recent
-conversations appear within a few minutes.
+3. **Open your Notion page.** Tasks from your recent conversations appear within a few minutes.
 
 ## Everyday use
 
-Day to day you work in Notion (or the Web UI): drag cards, write comments, add notes. For the
-command line, the installer puts `todo-manager` in `~/.local/bin`:
+You work in Notion: drag cards, comment, add notes. If something stops working, it shows at the
+top of the page. The `todo-manager` command covers the rest:
 
 ```bash
 todo-manager status     # is everything working?
-todo-manager pause      # stop for a while (holiday, debugging)
+todo-manager pause      # stop for a while
 todo-manager resume     # start again
 todo-manager export     # save a readable copy of all your tasks
 todo-manager uninstall  # stop for good; your data and Notion pages are kept
 ```
 
-Settings can also be changed by asking Hermes in chat, for example "read Slack only after an hour
-of silence".
+To change a setting, ask Hermes, for example "read Slack only after an hour of silence".
 
-When something stops working (a mailbox that no longer syncs, an agent that got stuck), it shows up
-at the top of your Notion page and in `todo-manager status`.
+## Good to know
 
-## Limits and extras
-
-- **The AI makes mistakes** about what is yours. Every message it skips is kept with a one-line
-  reason. Tell it what it got wrong and it learns your preferences.
-- **Built for one person on one machine.**
-- **Languages:** English and Simplified Chinese.
-- **Optional extras:** Gmail labels that show each mail's project and task state, and instant
-  sync (seconds instead of minutes) through a small background service, which also serves the
-  Web UI. See [operations](docs/operations.md).
+- **Your data stays on your machine.** Tasks go to your Notion, and new messages go to the AI
+  model your Hermes uses. The model runs only when there is something new.
+- **Your edits win.** A field you change in Notion keeps your value.
+- **Agents ask before sending email.** An agent sends one only after you approve it in a
+  comment. This is an instruction the agent follows, not a technical block.
+- **The AI makes mistakes.** Every message it skips is kept with a reason; tell it what it got
+  wrong and it adjusts.
+- Built for one person on one machine, in English or Simplified Chinese.
 
 ## Learn more
 
-- [Operations guide](docs/operations.md): install details, upgrade, backup, troubleshooting
-- [Notion pages and fields](docs/notion-schema.md)
-- [Command line reference](docs/cli.md)
-- [How it works](docs/architecture.md) and [known limitations](docs/limitations.md)
+- [Operations guide](docs/operations.md): upgrade, backup, instant sync, Gmail labels,
+  troubleshooting
+- [Notion pages and fields](docs/notion-schema.md) · [Command line](docs/cli.md) ·
+  [How it works](docs/architecture.md) · [Known limitations](docs/limitations.md)
 
 ## License
 
