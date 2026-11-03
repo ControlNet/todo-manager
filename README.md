@@ -7,7 +7,7 @@ Todo Manager works with [Hermes](https://github.com/NousResearch/hermes-agent), 
 AI agent. It adds two scheduled jobs and a skill to your Hermes and uses the AI model and agent
 board you already have there. Install it once, then you mostly just open Notion.
 
-![How Todo Manager works: Gmail, Slack and GitHub feed a 5-minute wake gate; the Hermes LLM judge turns new messages into tasks in a local store that syncs with Notion and, optionally, a Web UI; cards you move to Agent work go to a Hermes Kanban agent, whose results and questions come back to the store and so to Notion and the Web UI.](docs/images/how-it-works.svg)
+![How Todo Manager works, in five steps: your Gmail, Slack and GitHub inbox (read-only) arrives at a 5-minute wake gate; only new material wakes the Hermes LLM judge, which decides and writes task changes to the local SQLite store; Notion sync and the Web UI keep what you see in step with the store, two-way, with your edits winning; a card you drag to Agent work goes to a Hermes Kanban agent, whose results come back to the store, and your comments on a task go back to the LLM judge.](docs/images/how-it-works.svg)
 
 ## What it does
 
