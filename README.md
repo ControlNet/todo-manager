@@ -16,11 +16,12 @@ board you already have there. Install it once, then you mostly just open Notion.
   only copied on are skipped.
 - **Collects your decisions on one board.** Things only you can decide go to *To decide*. Drag
   the card to *Done*, *Cancel*, *My to-do* or *Assign to Agent*.
-- **Hands work to an agent.** Drag a card to *Assign to Agent* and a Hermes agent works on
-  it: drafting a reply, collecting information, writing a document. If it needs something, it
-  asks in a comment on the task. The result comes back as a page under the task.
-- **Takes instructions in plain words.** Comment "the deadline moved to Monday" on a task, or tell it "from
-  now on, ignore mail from this list", and it remembers.
+- **Hands work to an agent.** Drag a card to *Assign to Agent* and a Hermes agent works on it:
+  drafting a reply, collecting information, writing a document. If it needs something, it asks
+  in a comment on the task. The result comes back as a page under the task, and on the *Agent
+  work* board you drag the card to *Done*, *My to-do* or *Cancel*.
+- **Takes instructions in plain words.** Comment "the deadline moved to Monday" on a task and
+  the due date changes. Tell it "from now on, ignore mail from this list" and it keeps the rule.
 - **Closes finished tasks.** When you reply to the email or your pull request is merged, the
   task is marked done.
 
@@ -30,26 +31,34 @@ A Notion page with a few lists and boards:
 
 ```
 Todo Manager
+  Data freshness      every source syncing, or what is not
   🤔 To decide        cards waiting for your call
   🤖 Agent work       what the agent is doing, and what it needs from you
   ⭐ Focus            what to do now: due soon, or starred by you
   📁 Active projects
   ⏳ Waiting on others
   📋 All open tasks
+  🕘 Recently done and notable changes
 ```
 
 Each task page has a small box that Todo Manager keeps up to date (why it is your task, what
 "done" means, links to the sources). Everything else on the page is yours: write notes there and
 the agent reads them.
 
+If you turn on the optional [Web UI](docs/web-ui.md), the same tasks and actions are also on a
+page for desktop, tablet and phone. What you change there goes to the same local database as
+your Notion edits.
+
 ## Your data
 
+- **Your data lives on your machine**, in a local SQLite database. Tasks go to your Notion, and
+  new messages go to the AI model your Hermes uses.
 - **Your Notion edits win.** A field you change keeps your value when the AI later reads new
   messages.
-- **It reads your email, Slack and GitHub, and you decide what gets sent.** An agent sends an email only after you approve it
-  for that task.
-- **Your data lives on your machine**, in a local database. Tasks go to your Notion, and new
-  messages go to the AI model your Hermes uses.
+- **Todo Manager does not send from your accounts.** It reads them, and its one write there is
+  the optional Gmail labels. An agent working on a task is told to send an email only after you approve that
+  version in a comment. The agent follows this as an instruction; nothing in Todo Manager blocks
+  its tools (see [limitations](docs/limitations.md)).
 - **The AI model runs only for new messages.** A small script checks every five minutes and
   wakes the model when something new needs judging.
 
@@ -103,8 +112,8 @@ conversations appear within a few minutes.
 
 ## Everyday use
 
-Day to day you work in Notion: drag cards, write comments, add notes. For the command line, the
-installer puts `todo-manager` in `~/.local/bin`:
+Day to day you work in Notion (or the Web UI): drag cards, write comments, add notes. For the
+command line, the installer puts `todo-manager` in `~/.local/bin`:
 
 ```bash
 todo-manager status     # is everything working?
@@ -127,10 +136,8 @@ at the top of your Notion page and in `todo-manager status`.
 - **Built for one person on one machine.**
 - **Languages:** English and Simplified Chinese.
 - **Optional extras:** Gmail labels that show each mail's project and task state, and instant
-  sync (seconds instead of minutes) through a small background service. See
-  [operations](docs/operations.md).
-- **Web UI:** a page for desktop, tablet and phone with the same tasks and actions as Notion,
-  served by that background service. See [web UI](docs/web-ui.md).
+  sync (seconds instead of minutes) through a small background service, which also serves the
+  Web UI. See [operations](docs/operations.md).
 
 ## Learn more
 
