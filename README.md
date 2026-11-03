@@ -56,9 +56,9 @@ your Notion edits.
 - **Your Notion edits win.** A field you change keeps your value when the AI later reads new
   messages.
 - **Todo Manager does not send from your accounts.** It reads them, and its one write there is
-  the optional Gmail labels. An agent working on a task is told to send an email only after you approve that
-  version in a comment. The agent follows this as an instruction; nothing in Todo Manager blocks
-  its tools (see [limitations](docs/limitations.md)).
+  the optional Gmail labels. An agent working on a task is told to send an email only after you
+  approve that version in a comment. The agent follows this as an instruction; nothing in Todo
+  Manager blocks its tools (see [limitations](docs/limitations.md)).
 - **The AI model runs only for new messages.** A small script checks every five minutes and
   wakes the model when something new needs judging.
 
