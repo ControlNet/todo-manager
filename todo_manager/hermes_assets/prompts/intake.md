@@ -33,6 +33,10 @@ If the Script Output is a Script Error, or the context only reports problems, ma
   later material already settles it: approved, cancelled, moved, received, done. Then make no
   task for the settled step: dismiss the item as `handled_elsewhere` naming the later item, or
   create the task for what remains.
+- A linked task lists its agent work's latest delivery with the time it was received. A message
+  from before a delivery does not set the task back: the delivered draft or result still awaits
+  the user's review. Record the obstacle the message names (missing access, a question) beside
+  it in `next_step` or `waiting_on`; do not write that the work is yet to be prepared.
 - A task that continues an earlier one (a follow-up, the next stage, a new approval or booking for
   the same thing) keeps the conditions still in force from the earlier task and its material:
   deadlines, spending and settlement rules, budgets, required recipients. Read the earlier task

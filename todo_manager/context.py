@@ -225,6 +225,20 @@ def _conversation_tasks(conn: sqlite3.Connection, conversation_key: str) -> list
         (conversation_key,))]
 
 
+def _latest_deliveries(conn: sqlite3.Connection, task: dict[str, Any]) -> list[str]:
+    """The newest delivery of the task's recent agent work: mail read late, written before it,
+    once set a delivered review back to waiting for the material."""
+    out = []
+    for d in delegation.for_task(conn, task["id"]):
+        if d["status"] in ("ended", "cancelled") and d["updated_at"] < clock.iso(clock.now() - timedelta(days=14)):
+            continue
+        more = f"todo-manager delegate show {d['id']}"
+        for v in delegation.deliveries(conn, d["id"])[-1:]:
+            out.append(f"  agent work {d['id']} [{d['status']}] {v['kind']} {v['id']} received {v['received_at'][:16]}:"
+                       f" {field(clip(v['summary'] or '', 200, more), more)}")
+    return out
+
+
 def intake(conn: sqlite3.Connection, cfg: Config, run_id: str, *, followups: list[str],
            digest: dict[str, Any] | None, problems: list[dict[str, Any]], reasons: list[str],
            due_passed: list[str] | None = None) -> str:
@@ -320,6 +334,8 @@ def _conversation(conn: sqlite3.Connection, cfg: Config, batch: dict[str, Any], 
         closed = " (closed: a new responsibility becomes a follow-up task, never a reopen)" \
             if task["status"] in store.CLOSED_STATUSES else ""
         out.append(f"linked task: {task_line(task, titles)}{closed}")
+        if not closed:
+            out += _latest_deliveries(conn, task)
     status = _github_status(conn, cfg, batch, batch_items)
     if status:
         out.append(status)

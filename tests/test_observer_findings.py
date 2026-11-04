@@ -1,9 +1,9 @@
 """Findings of the trial observer's reviews (2026-10-11..14) that the intake prompt cannot fix.
 Synthetic workspace, mail and tasks only."""
 
-from todo_manager import clock, delegation, gate_intake, health, hermes_install, store
+from todo_manager import clock, delegation, gate_intake, health, hermes_install, ops, store
 from todo_manager.sources.base import search_items
-from tests.flow import intake_context, run_id_of
+from tests.flow import intake_context, run_ctx, run_id_of
 from tests.helpers import WorkspaceCase, mail
 from tests.test_sources import FakeHttp, gmail_message
 from todo_manager.sources.gmail import GmailSource
@@ -101,3 +101,35 @@ class StaleStateInDelegationTests(WorkspaceCase):
         protocol = delegation.WORKER_PROTOCOL.format(allowed="read", pause="X", language="English")
         self.assertIn("describe the state when the card was made", protocol)
         self.assertIn('`todo-manager source search "<words>" [--mine]`', protocol)
+
+
+class DeliveredStageTests(WorkspaceCase):
+    """The user's mail about missing marking material was read after the agent had delivered the
+    draft review; the context showed the task without the delivery, and the run set it back to
+    waiting for the material."""
+
+    def test_a_linked_task_shows_its_latest_delivery(self):
+        self.add_items(mail("m1", "t1", "Please review this thesis by 18 Nov"))
+        clock.advance(minutes=61)
+        out, _ = gate_intake.run_gate(self.conn, self.cfg, [], [])
+        run_id = run_id_of(out)
+        tid = ops.task_create(self.conn, self.cfg, run_ctx(self.conn, self.cfg, run_id), title="Review the thesis",
+                              fields={"responsibility": "assigned to the user"},
+                              evidence=[(self.item_id("m1"), "origin")])["task"]
+        ops.run_done(self.conn, self.cfg, run_id)
+        self.conn.execute("INSERT INTO delegations(id, task_id, title, goal, status, board, idem_key, base_task_version,"
+                          " created_at, updated_at) VALUES ('d1', ?, 'Draft', 'A review', 'review', 'test', 'k1', 1, ?, ?)",
+                          (tid, clock.iso(), clock.iso()))
+        self.conn.execute("INSERT INTO deliveries(id, delegation_id, card_id, run_id, kind, seq, summary, received_at)"
+                          " VALUES ('v1', 'd1', 'c1', 'r1', 'result', 1, 'Scores and comments per rubric item', ?)",
+                          (clock.iso(),))
+        self.add_items(mail("m2", "t1", "I cannot open the marking rubric", me=True, minutes=-30))
+        clock.advance(minutes=61)
+        text = intake_context(self.conn, self.cfg, run_id_of(gate_intake.run_gate(self.conn, self.cfg, [], [])[0]))
+        self.assertIn(f"linked task: {tid}", text)
+        self.assertIn("agent work d1 [review] result v1", text)
+        self.assertIn("Scores and comments per rubric item", text)
+
+    def test_the_prompt_keeps_a_delivered_stage(self):
+        text = " ".join(hermes_install.asset("prompts/intake.md").split())
+        self.assertIn("A message from before a delivery does not set the task back", text)
