@@ -12,7 +12,8 @@ Per-source policy:
 
 Mature batches of every source are merged into one model run. Waking for one source
 never pulls in immature batches of another (``mature`` is decided per batch first).
-A ``forced`` batch (explicit "process this now") matures immediately.
+A ``forced`` batch (explicit "process this now", or the merge or close of a matter an open task
+waits for) matures immediately and wakes the model without waiting for the wake interval.
 
 Budget: ``wake.max_context_chars`` bounds the whole rendered context and
 ``wake.max_evidence_chars`` the new evidence in it (the evidence gets what the fixed part -
@@ -119,7 +120,7 @@ def plan_intake_wake(conn: sqlite3.Connection, cfg: Config, extra_reasons: list[
     # A later segment of a conversation waits while an earlier one is in flight (message order),
     # and every unclaimed segment waits while the conversation is active again (quiet window).
     rows = conn.execute(
-        "SELECT id, source FROM batches b WHERE state='mature' AND (not_before IS NULL OR not_before <= ?)"
+        "SELECT id, source, forced FROM batches b WHERE state='mature' AND (not_before IS NULL OR not_before <= ?)"
         " AND NOT EXISTS (SELECT 1 FROM batches o"
         " WHERE o.source=b.source AND o.conversation_key=b.conversation_key AND (o.state='claimed'"
         " OR (o.state='accumulating' AND o.forced=0 AND b.forced=0)))"
@@ -131,7 +132,8 @@ def plan_intake_wake(conn: sqlite3.Connection, cfg: Config, extra_reasons: list[
     for source, batch_ids in by_source.items():
         interval = min_wake_interval(cfg, source)
         last = clock.minutes_since(last_wake_for_source(conn, source))
-        if interval and last is not None and last < interval:
+        forced = any(row["forced"] for row in rows if row["id"] in batch_ids)
+        if interval and last is not None and last < interval and not forced:
             if sum(estimate_chars(conn, cfg, b) for b in batch_ids) <= budget:
                 gated[source] = batch_ids  # may still ride along with another reason
                 continue

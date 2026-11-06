@@ -13,7 +13,7 @@ when you ask it in chat, e.g. "wait an hour of Slack silence before analysing" s
 | `email.initial_lookback_days` | 14 | Backfill window on the first Gmail run |
 | `email.quiet_minutes` | 15 | An email thread must be quiet this long before analysis |
 | `email.min_wake_interval_minutes` | 60 | Email alone wakes the model at most hourly (mature email joins any other wake) |
-| `github.quiet_minutes` / `min_wake_interval_minutes` | 10 / 60 | Same shape as email |
+| `github.quiet_minutes` / `min_wake_interval_minutes` | 10 / 60 | Same shape as email; a merge or close of a matter an open task waits for skips both |
 | `commits.digest_time` | 21:00 local | Daily commit digest (project progress only) |
 | `commits.max_attempts_per_day` | 2 | Model attempts for one day's digest |
 | `notion.cold_comment_poll_minutes` | 60 | Comment polling interval for open tasks without recent activity (pages with agent work, a user comment in the last week or a user edit in the last `notion.user_edit_hot_hours`: every run; new tasks, change notes and older user edits: every `notion.warm_comment_poll_minutes`; our own writes are not activity) |

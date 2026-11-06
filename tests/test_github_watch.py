@@ -163,3 +163,35 @@ class OpenTaskMatterTests(WorkspaceCase):
         [source] = [a for a in registry.conversation_sources(self.cfg, self.conn) if a.scope == "watched"]
         self.linked_task(KEY)
         self.assertEqual(source.matters(), [KEY])
+
+    def settle_earlier_wake(self, minutes_ago=10):
+        """The linked task's own material was handled by a run a few minutes ago: GitHub alone
+        would not wake the model again within the hour."""
+        self.conn.execute("UPDATE batches SET state='done', claimed_at=?, done_at=?",
+                          (clock.iso(clock.now() - timedelta(minutes=minutes_ago)), clock.iso()))
+        self.conn.execute("UPDATE source_items SET state='processed'")
+
+    def test_the_merge_of_a_watched_pr_wakes_the_next_gate(self):
+        """A merge settles the task: no conversation to wait for, and the user was closing the
+        task by hand before the hourly GitHub wake came."""
+        self.linked_task(KEY)
+        self.settle_earlier_wake()
+        api = FakeGitHubApi()
+        api.issue(9, title="t", body="b", user="me-gh", created=ago(days=1), pr=True)
+        source = GitHubWatchSource(api, set(), ["me-gh"], [], matters=lambda: open_task_matters(self.conn))
+        gate_intake.fetch_all(self.conn, [source])
+        clock.advance(minutes=15)
+        merge(api, 9, at=ago(minutes=1))
+        out, woke = gate_intake.run_gate(self.conn, self.cfg, [source], [])
+        self.assertTrue(woke, out)
+        self.assertIn("mature:github:1", out)
+
+    def test_a_comment_still_waits_for_its_quiet_window_and_the_hourly_wake(self):
+        self.linked_task(KEY)
+        self.settle_earlier_wake()
+        persist_fetch(self.conn, "github", FetchResult(scope="notifications", cursor="c2", items=[Item(
+            source="github", account=REPO, external_id="comment:5", kind="comment", conversation_key=KEY,
+            thread_key=KEY, occurred_at=clock.iso(), title="t", body="looks good")]))
+        clock.advance(minutes=15)
+        out, woke = gate_intake.run_gate(self.conn, self.cfg, [], [])
+        self.assertFalse(woke, out)

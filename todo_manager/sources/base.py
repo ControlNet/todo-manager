@@ -128,8 +128,11 @@ def persist_fetch(conn: sqlite3.Connection, source: str, result: FetchResult) ->
     now = clock.iso()
     with tx(conn):
         for item in result.items:
+            settles = False
             if item.route == "if_open_task":
-                item = replace(item, route="batch" if _open_task_matter(conn, item) else "context")
+                open_task = _open_task_matter(conn, item)
+                settles = open_task and _settles_open_task(item)
+                item = replace(item, route="batch" if open_task else "context")
             if item.route == "batch" and _copy_of_github_event(conn, item):
                 item = replace(item, route="superseded")
             inserted_id = _insert_item(conn, item, now)
@@ -140,8 +143,10 @@ def persist_fetch(conn: sqlite3.Connection, source: str, result: FetchResult) ->
                 continue
             stats["new"] += 1
             if item.route == "batch":
-                attach_to_batch(conn, inserted_id, item.source, item.conversation_key,
-                                item.occurred_at or now)
+                batch_id = attach_to_batch(conn, inserted_id, item.source, item.conversation_key,
+                                           item.occurred_at or now)
+                if settles:
+                    conn.execute("UPDATE batches SET forced=1 WHERE id=?", (batch_id,))
                 stats["batched"] += 1
         meta = dict(result.meta)
         meta["complete"] = result.complete
@@ -153,6 +158,12 @@ def persist_fetch(conn: sqlite3.Connection, source: str, result: FetchResult) ->
             " last_error=NULL, consecutive_failures=0, meta=excluded.meta",
             (source, result.scope, result.cursor, now, now, dumps(meta)))
     return stats
+
+
+def _settles_open_task(item: Item) -> bool:
+    """A merge or close of a matter an open task waits for: no conversation to wait for, so it
+    is processed at the next gate (the user closed such tasks by hand before the hourly wake)."""
+    return item.kind in ("event", "notification") and item.meta.get("state") in ("merged", "closed")
 
 
 def _promote_context(conn: sqlite3.Connection, item: Item) -> str | None:
