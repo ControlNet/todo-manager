@@ -123,6 +123,33 @@ class LabelNameTests(LabelCase):
         self.sync()
         self.assertEqual(self.gmail.names("m1"), ["Todo/Orchard/进行中", "Todo/Teaching/已完成"])
 
+    def thread(self, *messages):
+        """Mail ``messages`` in one Gmail thread (Gmail shows a thread with the labels of all its mail)."""
+        for m in messages:
+            self.gmail.messages[m] = set()
+        self.add_items(*(mail(m, "tshared", "Body") for m in messages))
+
+    def test_mail_of_one_thread_shows_one_state_per_project(self):
+        self.thread("m5", "m6")
+        self.task("m5", project=self.project, status="done")
+        later = self.task("m6", project=self.project)
+        self.sync()
+        self.assertEqual(self.gmail.names("m5"), ["Todo/Orchard/进行中"])
+        self.assertEqual(self.gmail.names("m6"), ["Todo/Orchard/进行中"])
+        self.close(later)
+        self.sync()
+        self.assertEqual(self.gmail.names("m5"), ["Todo/Orchard/已完成"])
+        self.assertEqual(self.gmail.names("m6"), ["Todo/Orchard/已完成"])
+
+    def test_a_thread_does_not_spread_a_project_to_its_other_mail(self):
+        other = store.create_project(self.conn, "Teaching", origin="test")
+        self.thread("m5", "m6")
+        self.task("m5", project=self.project, status="done")
+        self.task("m6", project=other)
+        self.sync()
+        self.assertEqual(self.gmail.names("m5"), ["Todo/Orchard/已完成"])
+        self.assertEqual(self.gmail.names("m6"), ["Todo/Teaching/进行中"])
+
     def test_a_slash_in_a_title_does_not_nest_a_label(self):
         project = store.create_project(self.conn, "Atlas / Partner Lab", origin="test")
         self.task("m1", project=project)

@@ -1,10 +1,10 @@
 """Gmail labels that show which tasks a mail belongs to (opt-in: ``email.labels``).
 
 A mail linked to a task as evidence carries ``<root>/<project>/<state>``. The state is open
-while one of its tasks in that project is open, else done when one of them is done, else
-cancelled. Tasks without a project are under ``<root>/<other>``; mail of several projects
-carries the label of each. ``<root>`` and ``<root>/<project>`` exist only to nest the labels in
-Gmail's list; no mail carries them. Dismissed mail and mail never read get no label. Names
+while one of the thread's tasks in that project is open, else done when one of them is done,
+else cancelled (Gmail shows a thread with the labels of all its mail). Tasks without a project
+are under ``<root>/<other>``; mail of several projects carries the label of each. ``<root>``
+and ``<root>/<project>`` exist only to nest the labels in Gmail's list; no mail carries them. Dismissed mail and mail never read get no label. Names
 follow the project titles and the workspace language: a renamed project renames its labels,
 and mail keeps them.
 
@@ -105,16 +105,21 @@ def _state(statuses: set[str]) -> str:
 def wanted(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     """Item id -> {account, message, keys} for every Gmail mail linked to a task. Keys name
     labels independently of their names: ``p:<project>:<state>`` and ``other:<state>`` on mail;
-    their parents ``root``, ``p:<project>`` and ``other`` only nest them."""
+    their parents ``root``, ``p:<project>`` and ``other`` only nest them. Gmail shows a thread
+    with the labels of all its mail, so the state of a project is that of its tasks across the
+    thread; a mail still carries only the projects of its own tasks."""
     found: dict[str, dict[str, Any]] = {}
-    for r in conn.execute("SELECT s.id, s.account, s.external_id, t.project_id, t.status FROM evidence_links e"
-                          " JOIN source_items s ON s.id=e.source_item_id JOIN tasks t ON t.id=e.entity_id"
-                          " WHERE e.entity_type='task' AND s.source='gmail'"):
+    threads: dict[tuple[str, str, str], set[str]] = {}
+    for r in conn.execute("SELECT s.id, s.account, s.external_id, t.project_id, t.status,"
+                          " COALESCE(NULLIF(json_extract(s.meta, '$.gmail_thread'), ''), s.thread_key) AS thread"
+                          " FROM evidence_links e JOIN source_items s ON s.id=e.source_item_id"
+                          " JOIN tasks t ON t.id=e.entity_id WHERE e.entity_type='task' AND s.source='gmail'"):
         entry = found.setdefault(r["id"], {"account": r["account"], "message": r["external_id"], "groups": {}})
         group = f"p:{r['project_id']}" if r["project_id"] else "other"
-        entry["groups"].setdefault(group, set()).add(r["status"])
+        entry["groups"][group] = (r["account"], r["thread"], group)
+        threads.setdefault(entry["groups"][group], set()).add(r["status"])
     for entry in found.values():
-        entry["keys"] = {f"{group}:{_state(statuses)}" for group, statuses in entry.pop("groups").items()}
+        entry["keys"] = {f"{group}:{_state(threads[at])}" for group, at in entry.pop("groups").items()}
     return found
 
 
