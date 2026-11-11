@@ -25,6 +25,7 @@ THREAD_LIMIT = 60
 HISTORY_LIMIT = 30
 CHANGE_NOTE_DAYS = 7
 SEARCH_LIMIT = 20
+WORDS_LIMIT = 2000         # characters of a source shown under its title
 TEXT_PREVIEW_BYTES = 256 * 1024
 
 
@@ -74,6 +75,14 @@ def _look(icon: str | None) -> dict[str, Any]:
 def _projects(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     return {p["id"]: {"id": p["id"], "title": p["title"], "status": p["status"]} | _look(p["icon"])
             for p in conn.execute("SELECT id, title, icon, status FROM projects")}
+
+
+def _words(conn: sqlite3.Connection, item: dict[str, Any]) -> str | None:
+    """What a source item says: its title often names only the conversation ("DM with ...") or
+    the thread, which all of its messages share."""
+    row = conn.execute("SELECT body FROM source_bodies WHERE item_id=?", (item["id"],)).fetchone()
+    text = ((row["body"] if row else None) or item["excerpt"] or "").strip()
+    return text[:WORDS_LIMIT] or None
 
 
 def _sources(conn: sqlite3.Connection, task_ids: list[str]) -> dict[str, str]:
@@ -281,7 +290,7 @@ def task_detail(conn: sqlite3.Connection, cfg: Config, task_id: str) -> dict[str
     notes = conn.execute("SELECT notes_text FROM notion_pages WHERE entity_type='task' AND entity_id=?",
                          (task_id,)).fetchone()
     evidence = [{"id": e["id"], "source": e["source"], "role": e["role"], "title": e["title"] or e["excerpt"],
-                 "author": e["author"], "url": e["url"], "at": e["occurred_at"]}
+                 "text": _words(conn, e), "author": e["author"], "url": e["url"], "at": e["occurred_at"]}
                 for e in store.evidence_for(conn, "task", task_id)]
     pending = conn.execute("SELECT COUNT(*) FROM feedback WHERE scope_type='task' AND scope_id=? AND status='pending'",
                            (task_id,)).fetchone()[0]
@@ -370,7 +379,7 @@ def search(conn: sqlite3.Connection, cfg: Config, query: str) -> dict[str, Any]:
         if r["thread_key"]:
             threads.add(r["thread_key"])
         items.append({"id": r["id"], "source": r["source"], "title": r["title"] or r["excerpt"], "author": r["author"],
-                      "at": r["occurred_at"], "url": r["url"], "task": r["task_id"]})
+                      "text": r["excerpt"], "at": r["occurred_at"], "url": r["url"], "task": r["task_id"]})
     return {"tasks": [card(conn, t, projects, sources, on) for t in tasks], "projects": found_projects,
             "sources": items}
 

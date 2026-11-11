@@ -610,9 +610,9 @@
       <span class="menu-title">${esc(t(title))}</span>${items.map((i) => button(i, "menu-item")).join("")}</div>`).join("")}</div>` : "";
     const block = (label, text) => (text ? `<div class="block"><span class="label">${esc(label)}</span><span class="v">${esc(text)}</span></div>` : "");
     const sources = d.sources.length ? `<div class="block"><span class="label">${esc(t("sources"))}</span><div class="sources">
-      ${d.sources.map((s) => `<div class="source"><span class="tag">${esc(s.source)}</span>
+      ${d.sources.map((s) => `<div class="source"><span class="tag">${esc(s.source)}</span><span class="main">
         ${s.url ? `<a class="text" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title || s.author || s.id)}</a>`
-          : `<span class="text">${esc(s.title || s.author || s.id)}</span>`}<span class="when">${esc(day((s.at || "").slice(0, 10)))}</span></div>`).join("")}</div></div>` : "";
+          : `<span class="text">${esc(s.title || s.author || s.id)}</span>`}${said(s)}</span><span class="when">${esc(day((s.at || "").slice(0, 10)))}</span></div>`).join("")}</div></div>` : "";
     const history = d.history.length ? `<details data-keep="history"><summary>${esc(t("history"))}</summary><div class="history">
       ${d.history.slice().reverse().map((h) => `<span>${esc(stamp(h.at))} · ${esc(h.actor)}/${esc(h.origin)} · ${esc(Object.keys(h.changes).join(", "))}</span>`).join("")}</div></details>` : "";
     return `<div class="back"><button data-back="1" aria-label="back">${icon("back")}</button><span class="muted">${esc(d.project ? d.project.title : "")}</span></div>
@@ -745,6 +745,13 @@
       </div><div class="card" style="padding:0;overflow:hidden">${detailBody(d, { compact: true }) + composer(d)}</div></div></section>`;
   }
 
+  function said(s) {
+    if (!s.text || s.text === s.title) return "";
+    const key = "src:" + s.id;
+    return S.expanded && S.expanded[key] ? `<span class="said">${esc(s.text)}</span>`
+      : `<span class="said clamp" data-expand="${esc(key)}">${esc(s.text)}</span>`;
+  }
+
   function searchResults(res, palette) {
     if (!res) return "";
     const hits = [];
@@ -758,7 +765,8 @@
     };
     add("r_tasks", res.tasks, (c) => hit(taskHash(c.id, "all"), c.title, kindLabel(c)));
     add("r_projects", res.projects, (p) => hit("#/projects/" + p.id, p.title, ""));
-    add("r_sources", res.sources.filter((s) => s.task), (s) => hit(taskHash(s.task, "all"), s.title || s.author, s.source));
+    add("r_sources", res.sources.filter((s) => s.task), (s) => hit(taskHash(s.task, "all"),
+      [s.title || s.author, s.text !== s.title && s.text].filter(Boolean).join(" · "), s.source));
     return hits.length ? hits.join("") : `<div class="empty">${esc(t("noResults"))}</div>`;
   }
   function searchPage() {

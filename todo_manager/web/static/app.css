@@ -233,7 +233,10 @@ button.prop:hover { box-shadow: inset 0 0 0 1px var(--border-strong); }
 .source { display: flex; gap: 10px; align-items: baseline; min-width: 0; }
 .source .tag { font-size: 12px; font-weight: 700; padding: 1px 8px; border-radius: 8px; background: var(--sunken); color: var(--ink2);
   flex: 0 0 auto; }
-.source .text { flex: 1 1 auto; min-width: 0; color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source .main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.source .text { color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source .said { white-space: pre-wrap; overflow-wrap: anywhere; }
+.source .said.clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; cursor: pointer; }
 .source .when { font-size: 12px; color: var(--muted); flex: 0 0 auto; }
 .notes { border-left: 3px solid var(--border-strong); padding: 2px 0 2px 12px; white-space: pre-wrap; color: var(--ink2); }
 .thread { display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--border); padding-top: 16px; }
