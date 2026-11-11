@@ -106,14 +106,23 @@ class ViewTests(WebCase):
     def test_a_source_shows_its_words_besides_its_conversation(self):
         from tests.helpers import slack
         self.add_items(slack("1.0", "D1", "Can you send me the slides by Friday?"),
-                       slack("2.0", "D1", "No rush"), source="slack")
+                       slack("2.0", "D1", "No rush", minutes=1), source="slack")
         tid = self.task()
         for ext in ("D1:1.0", "D1:2.0"):
             store.link_evidence(self.conn, "task", tid, self.item_id(ext), "origin")
         shown = views.task_detail(self.conn, self.cfg, tid)["sources"]
         self.assertEqual([s["text"] for s in shown], ["Can you send me the slides by Friday?", "No rush"])
+        self.assertEqual(shown[0]["who"], "U2")
         found = views.search(self.conn, self.cfg, "slides")["sources"]
         self.assertEqual(found[0]["text"], "Can you send me the slides by Friday?")
+
+    def test_a_sender_is_shown_by_name(self):
+        self.assertEqual(views._who("Alice Chen (U060H1NLZB2)"), "Alice Chen")
+        self.assertEqual(views._who('"Bob" <bob@x.example>'), "Bob")
+        self.assertEqual(views._who("<bob@x.example>"), "bob@x.example")
+        self.assertEqual(views._who("bob@x.example"), "bob@x.example")
+        self.assertEqual(views._who("octocat"), "octocat")
+        self.assertIsNone(views._who(None))
 
     def test_search_finds_tasks_projects_and_sources(self):
         pid = store.create_project(self.conn, "Speech separation paper", origin="intake")

@@ -85,6 +85,13 @@ def _words(conn: sqlite3.Connection, item: dict[str, Any]) -> str | None:
     return text[:WORDS_LIMIT] or None
 
 
+def _who(author: str | None) -> str | None:
+    """The sender's name: "Name <address>" (mail) and "Name (U123)" (Slack) without the address."""
+    text = (author or "").strip()
+    name = re.sub(r"\s*(<[^>]*>|\([A-Z][A-Z0-9]{2,}\))$", "", text).strip().strip('"')
+    return name or text.strip("<>") or None
+
+
 def _sources(conn: sqlite3.Connection, task_ids: list[str]) -> dict[str, str]:
     """The source of each task's first evidence (gmail, slack, github...)."""
     out: dict[str, str] = {}
@@ -290,7 +297,8 @@ def task_detail(conn: sqlite3.Connection, cfg: Config, task_id: str) -> dict[str
     notes = conn.execute("SELECT notes_text FROM notion_pages WHERE entity_type='task' AND entity_id=?",
                          (task_id,)).fetchone()
     evidence = [{"id": e["id"], "source": e["source"], "role": e["role"], "title": e["title"] or e["excerpt"],
-                 "text": _words(conn, e), "author": e["author"], "url": e["url"], "at": e["occurred_at"]}
+                 "text": _words(conn, e), "author": e["author"], "who": _who(e["author"]), "mine": bool(e["author_is_me"]),
+                 "url": e["url"], "at": e["occurred_at"]}
                 for e in store.evidence_for(conn, "task", task_id)]
     pending = conn.execute("SELECT COUNT(*) FROM feedback WHERE scope_type='task' AND scope_id=? AND status='pending'",
                            (task_id,)).fetchone()[0]
@@ -368,7 +376,7 @@ def search(conn: sqlite3.Connection, cfg: Config, query: str) -> dict[str, Any]:
     sql, params = where(["s.title", "s.excerpt", "s.author"])
     items, threads = [], set()
     for r in conn.execute(
-            f"SELECT s.id, s.source, s.title, s.excerpt, s.author, s.occurred_at, s.url, s.thread_key,"
+            f"SELECT s.id, s.source, s.title, s.excerpt, s.author, s.author_is_me, s.occurred_at, s.url, s.thread_key,"
             f" (SELECT e.entity_id FROM evidence_links e WHERE e.source_item_id=s.id AND e.entity_type='task' LIMIT 1)"
             f" AS task_id FROM source_items s WHERE {sql} ORDER BY s.occurred_at DESC LIMIT ?",
             (*params, SEARCH_LIMIT * 4)):
@@ -379,7 +387,8 @@ def search(conn: sqlite3.Connection, cfg: Config, query: str) -> dict[str, Any]:
         if r["thread_key"]:
             threads.add(r["thread_key"])
         items.append({"id": r["id"], "source": r["source"], "title": r["title"] or r["excerpt"], "author": r["author"],
-                      "text": r["excerpt"], "at": r["occurred_at"], "url": r["url"], "task": r["task_id"]})
+                      "text": r["excerpt"], "who": _who(r["author"]), "mine": bool(r["author_is_me"]),
+                      "at": r["occurred_at"], "url": r["url"], "task": r["task_id"]})
     return {"tasks": [card(conn, t, projects, sources, on) for t in tasks], "projects": found_projects,
             "sources": items}
 

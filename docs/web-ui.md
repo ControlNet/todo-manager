@@ -49,9 +49,9 @@ The page sets its cookie `Secure` when the tunnel says the request came over HTT
 - **Decide / Agent / Waiting / All**, and each project's tasks.
 - **Task**: fields, the current state as a banner (the agent's question, its latest delivery,
   who you are waiting on), *what changed* with its time for a week after it was written (as the
-  Notion view of recent changes; the note itself stays on the task), sources with what each
-  message says (three lines; click for the rest), your Notion page notes (read only), the
-  discussion and the change history.
+  Notion view of recent changes; the note itself stays on the task), sources with the sender and
+  what each message says (one line each; click a line cut short for the rest), your Notion page
+  notes (read only), the discussion and the change history.
 - **Delivery**: each version the agent delivered, its notes (Markdown) and its files (preview and
   download of the copies kept in the workspace).
 - **Projects** with their Notion icon (the page loads a built-in icon's image from
