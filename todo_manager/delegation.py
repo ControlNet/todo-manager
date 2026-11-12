@@ -63,7 +63,7 @@ WORKER_PROTOCOL = """\
 - Allowed actions: {allowed}. An external action not listed here (sending email, public comments, push, opening/merging PRs, closing issues, publishing, editing shared documents) needs the user's approval first: ask with kanban_block(kind="needs_input", reason="<exactly what you would do, in {language}>") and wait. An approval is a comment by `todo-manager` saying `APPROVED <action> for question #<n>` (your question) or `APPROVED <action> for delivery <id>` (a version you delivered); it allows that action once, as described, and any later change of the requirements voids it.
 - Need information or a decision from the user? kanban_block(kind="needs_input", reason="<one concrete question in {language}>"). Do not guess.
 - Finished? kanban_complete(summary="<2-3 sentences in {language}>", metadata={{"deliverable_markdown": "<the full deliverable in Markdown>", "external_actions_done": [...], "notes": "..."}}, artifacts=[<absolute paths of files to keep>]). Native review is an execution review stage, not user acceptance. For human input block with a concrete question. Either way the user sees it in Notion.
-- Write the summary and the deliverable for the user, who reads them in Notion, not as a technical report: plain {language}, the outcome first, then what the user needs to decide or do; commands, logs, file lists and other technical detail only where the user needs them, at the end. Follow the writing skills loaded for this card (such as ccf-humanization) for these texts.
+- Write the summary and the deliverable for the user, who reads them in Notion, not as a technical report: plain {language}, the outcome first, then what the user needs to decide or do; commands, logs, file lists and other technical detail only where the user needs them, at the end. Do not list what you did not do (mail not sent, documents not changed) or restate the task's status: `external_actions_done` records what you did.
 - The Notion task and its status are the user's: do not change them. Your delivery does not complete the task.
 - The task and this brief describe the state when the card was made. Before you write that something is still unsent, unapproved or needed, look for newer material (`todo-manager source search "<words>" [--mine]`); if there is none, say up to when your statement holds.
 - Comments by `todo-manager` are the user's supplements, answers, revision requests or approvals: follow them. A comment starting with {pause} means stop immediately and take no further action.
@@ -121,16 +121,28 @@ def for_task(conn: sqlite3.Connection, task_id: str, active_only: bool = False) 
 CARD_NOTES_CHARS = 6000
 
 
+def writing_step(skills: list[str] | None) -> str | None:
+    """The card's skills are loaded when its run starts; after a long run they are far behind the
+    texts the user reads, so the worker loads them again just before writing those."""
+    if not skills:
+        return None
+    names = ", ".join(f'skill_view(name="{name}")' for name in skills)
+    return (f"- Before kanban_complete or kanban_block, call {names}, even though the card preloaded it, "
+            "and revise the summary, the deliverable or the question by it before you send them.")
+
+
 def card_body(d: dict[str, Any], task: dict[str, Any], notion_url: str | None, extra: list[str],
-              notes: str | None = None) -> str:
-    """``notes``: the user's own notes on the Task page (context, as written when the card is made)."""
+              notes: str | None = None, skills: list[str] | None = None) -> str:
+    """``notes``: the user's own notes on the Task page (context, as written when the card is made);
+    ``skills``: the card's skills (``kanban.skills``), loaded again before the texts are written."""
     allowed = ", ".join(d["allowed_actions"]) or "read, analyze"
     parts = [
         f"todo-manager-delegation: {d['id']}",
         f"todo-manager-task: {task['id']}" + (f"  notion: {notion_url}" if notion_url else ""),
         f"requirement-version: {d['requirement_version']}",
         f"Full requirements: `todo-manager delegate show {d['id']}`. Full page notes: `todo-manager task show {task['id']}`.",
-        WORKER_PROTOCOL.format(allowed=allowed, pause=PAUSE_MARK, language=i18n.language_name()),
+        WORKER_PROTOCOL.format(allowed=allowed, pause=PAUSE_MARK, language=i18n.language_name())
+        + (writing_step(skills) + "\n" if skills else ""),
         "",
         f"## Goal\n{d['goal']}",
     ]
@@ -539,7 +551,7 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str 
             notes = conn.execute("SELECT notes_text FROM notion_pages WHERE entity_type='task' AND entity_id=?",
                                  (task["id"],)).fetchone()
             body = card_body(d, task, _notion_url(conn, task), [m["body"] for m in folded if m["kind"] == "supplement"],
-                             notes["notes_text"] if notes else None)
+                             notes["notes_text"] if notes else None, cfg.get("kanban.skills") or None)
             try:
                 card_id = kb.create(title=f"{d['title']} [{d['id']}]", body=body, idem_key=d["idem_key"],
                                     assignee=d.get("assignee"), tenant="todo-manager",

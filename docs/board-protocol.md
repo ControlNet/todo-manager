@@ -29,6 +29,8 @@ hermes config get kanban.auto_decompose          # read only; this integration d
 ```
 
 `kanban.assignee` (empty = board default) picks the Hermes profile that executes delegations.
+`kanban.skills` (e.g. `["ccf-humanization"]`) are preloaded on every card, and the card tells
+the worker to load them again just before it writes its summary, deliverable or question.
 The earlier local capacity (`kanban.max_running`) is gone; `health` notes it while config.toml
 still sets it.
 

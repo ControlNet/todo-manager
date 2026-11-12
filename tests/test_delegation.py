@@ -47,7 +47,16 @@ class DelegationTests(WorkspaceCase):
         card = next(iter(self.kb.cards.values()))
         self.assertEqual(card["skills"], ["ccf-humanization"])
         self.assertIn("not as a technical report", card["body"])
-        self.assertIn("ccf-humanization", card["body"])
+        self.assertIn("Do not list what you did not do", card["body"])
+        # Preloaded at the start of a long run, a skill is far behind when the texts are written.
+        self.assertIn("skill_view(name=\"ccf-humanization\")", card["body"])
+        self.assertIn("Before kanban_complete or kanban_block", card["body"])
+
+    def test_without_writing_skills_the_card_names_none(self):
+        self.delegate()
+        self.tick()
+        card = next(iter(self.kb.cards.values()))
+        self.assertNotIn("skill_view", card["body"])
 
     def test_lost_create_response_is_reconciled_not_duplicated(self):
         did = self.delegate()
