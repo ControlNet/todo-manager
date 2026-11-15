@@ -41,11 +41,13 @@ class DelegationTests(WorkspaceCase):
         self.assertEqual((task["status"], task["next_actor"]), ("todo", "agent"), "the status stays the user's")
 
     def test_the_card_asks_for_a_report_the_user_can_read_with_the_writing_skills(self):
-        self.cfg.data["kanban"]["skills"] = ["ccf-humanization"]
+        self.cfg.data["kanban"]["skills"] = ["arxiv"]
+        self.cfg.data["writing"]["skills"] = ["ccf-humanization"]
         self.delegate()
         self.tick()
         card = next(iter(self.kb.cards.values()))
-        self.assertEqual(card["skills"], ["ccf-humanization"])
+        self.assertEqual(card["skills"], ["arxiv", "ccf-humanization"])
+        self.assertNotIn("skill_view(name=\"arxiv\")", card["body"])
         self.assertIn("not as a technical report", card["body"])
         self.assertIn("Do not list what you did not do", card["body"])
         # Preloaded at the start of a long run, a skill is far behind when the texts are written.
@@ -53,6 +55,7 @@ class DelegationTests(WorkspaceCase):
         self.assertIn("Before kanban_complete or kanban_block", card["body"])
 
     def test_without_writing_skills_the_card_names_none(self):
+        self.cfg.data["kanban"]["skills"] = ["arxiv"]
         self.delegate()
         self.tick()
         card = next(iter(self.kb.cards.values()))

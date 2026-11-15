@@ -98,6 +98,11 @@ class LanguageSelectionTests(unittest.TestCase):
             cfg = config.load(self.tmp)
         head = "\n".join(context.header(cfg, "intake", "run_x"))
         self.assertIn("Write for the user in Simplified Chinese", head)
+        self.assertNotIn("skill_view", head)
+        cfg.data["writing"]["skills"] = ["ccf-humanization"]
+        for entry in ("intake", "feedback"):
+            head = "\n".join(context.header(cfg, entry, "run_x"))
+            self.assertIn('skill_view(name="ccf-humanization")', head)
         for name in ("skill/SKILL.md", "cron/intake.md", "cron/feedback.md"):
             self.assertIsNone(CJK.search(templates.asset(name)), name)
         protocol = delegation.WORKER_PROTOCOL.format(allowed="read", pause="X", language=i18n.language_name())

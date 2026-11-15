@@ -126,6 +126,11 @@ DEFAULTS: dict[str, Any] = {
         "notify_profile": "",
 
     },
+    "writing": {
+        # Skills an agent loads just before it writes what the user reads: task fields and comments
+        # (intake, feedback) and the summary or deliverable of agent work. Preloaded on every card.
+        "skills": [],
+    },
     "followup": {
         # A follow-up or passed-due check that changed no date moves the follow-up date to the next
         # look: as many days ahead as the task has been quiet (newest evidence, else creation),

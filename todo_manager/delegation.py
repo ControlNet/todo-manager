@@ -131,10 +131,15 @@ def writing_step(skills: list[str] | None) -> str | None:
             "and revise the summary, the deliverable or the question by it before you send them.")
 
 
+def card_skills(cfg: Config) -> list[str] | None:
+    """The worker's own skills and the writing skills, each once."""
+    return list(dict.fromkeys([*(cfg.get("kanban.skills") or []), *(cfg.get("writing.skills") or [])])) or None
+
+
 def card_body(d: dict[str, Any], task: dict[str, Any], notion_url: str | None, extra: list[str],
               notes: str | None = None, skills: list[str] | None = None) -> str:
     """``notes``: the user's own notes on the Task page (context, as written when the card is made);
-    ``skills``: the card's skills (``kanban.skills``), loaded again before the texts are written."""
+    ``skills``: the writing skills (``writing.skills``), loaded again before the texts are written."""
     allowed = ", ".join(d["allowed_actions"]) or "read, analyze"
     parts = [
         f"todo-manager-delegation: {d['id']}",
@@ -551,13 +556,13 @@ def submit_pending(conn: sqlite3.Connection, cfg: Config, kb: Kanban, only: str 
             notes = conn.execute("SELECT notes_text FROM notion_pages WHERE entity_type='task' AND entity_id=?",
                                  (task["id"],)).fetchone()
             body = card_body(d, task, _notion_url(conn, task), [m["body"] for m in folded if m["kind"] == "supplement"],
-                             notes["notes_text"] if notes else None, cfg.get("kanban.skills") or None)
+                             notes["notes_text"] if notes else None, cfg.get("writing.skills") or None)
             try:
                 card_id = kb.create(title=f"{d['title']} [{d['id']}]", body=body, idem_key=d["idem_key"],
                                     assignee=d.get("assignee"), tenant="todo-manager",
                                     workspace=cfg.get("kanban.workspace") or None,
                                     max_retries=card_retries(cfg, d), notify=route_for(conn, cfg, d),
-                                    skills=cfg.get("kanban.skills") or None,
+                                    skills=card_skills(cfg),
                                     start_after=d["start_after"] if later else None)
             except KanbanError as exc:
                 with tx(conn):

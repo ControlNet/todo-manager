@@ -269,6 +269,7 @@ Values are set with `todo-manager config set <key> <value>` (comments and other 
 | `feedback.max_context_chars` | 60000 | rendered context of one feedback run; the oldest items that fit are claimed, the rest waits; one item is always taken (clipped with a pointer) |
 | `slack.thread_watch_days` | 30 | threads with a reply this recent are watched for new replies |
 | `notion.body_reads_per_run` | 10 | page bodies read per feedback run after an edit by someone other than the bot |
+| `writing.skills` | `[]` | Hermes skills the agents load just before writing what you read (task fields, comments, agent work results), e.g. `ccf-humanization` |
 | `kanban.max_retries` | 1 | Hermes per-card failure breaker; cards allowed an external action always get 1 |
 | `hermes.model`, `hermes.provider`, `hermes.reasoning_effort` | unset (Hermes' defaults) | set on the cron jobs by `install`; a value you change in Hermes is kept |
 | `email.labels` | false | label mail linked to tasks in Gmail (see below) |

@@ -17,6 +17,8 @@ agent work and recent thread.
   STALE_RUN on an item: this run's claim on it expired and a later run took it over; stop working on it.
   `clarify` asks exactly one question in `--reply`; a reply is posted in the same Notion
   discussion. When a later answer settles a clarified managed-body edit, pass --settles with the original body-edit feedback ID; never release a newer revision.
+- Replies and the fields you write are text the user reads: in the user's language, short, and
+  about the matter rather than how you judged it; no IDs and no list of what you did not do.
 - A change the user asked for: `todo-manager task update <task> --feedback <feedback id> --run <run> --set ...`
   (recorded as the user's own edit).
 - The user says the task now waits for someone ("submitted, now waiting for their approval"):
