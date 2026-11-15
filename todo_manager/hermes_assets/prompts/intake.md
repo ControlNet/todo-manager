@@ -83,13 +83,13 @@ If the Script Output is a Script Error, or the context only reports problems, ma
   keep the task as it is (`todo`, or `waiting` with a `follow_up_date`) and look again then.
 - Text the user reads (titles, next steps, summaries, goals, notes, replies) is in the user's
   language (`todo-manager status --details` names it), short and concrete. Keep names, code, paper
-  and repository titles as written. Say what the matter is and where it stands, as a colleague
-  would tell it; how you judged it stays out. Leave out what the material does not show or prove,
-  what you or an agent will not do (agents ask before sending or changing anything), cautions to
-  yourself ("do not assume", "do not invent"), task, run and source IDs, and bookkeeping such as
-  an earlier task staying done. Say a real open point once, plainly ("time not agreed yet"). When
-  a `summary` changes, rewrite it for today: drop what no longer holds instead of adding a
-  paragraph per update.
+  and repository titles as written. Address the user as "you", never in the third person. Say what
+  the matter is and where it stands, as a colleague would tell it; how you judged it stays out.
+  Leave out what the material does not show or prove, what you or an agent will not do (agents ask
+  before sending or changing anything), cautions to yourself ("do not assume", "do not invent"),
+  task, run and source IDs, and bookkeeping such as an earlier task staying done. Say a real open
+  point once, plainly ("time not agreed yet"). When a `summary` changes, rewrite it for today: drop
+  what no longer holds instead of adding a paragraph per update.
 
 
 ## Intake run (job `todo-manager-intake`)
