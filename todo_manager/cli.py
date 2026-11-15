@@ -288,17 +288,17 @@ def cmd_config(args: argparse.Namespace) -> int:
         _print(cfg.data)
         return 0
     if args.action == "get":
-        value = cfg.get(args.key, KeyError)
+        value = cfg.get(args.setting, KeyError)
         if value is KeyError:
-            return _fail("UNKNOWN_KEY", f"{args.key} is not set; `todo-manager config show` lists the settings")
-        _print({args.key: value})
+            return _fail("UNKNOWN_KEY", f"{args.setting} is not set; `todo-manager config show` lists the settings")
+        _print({args.setting: value})
         return 0
     cfg, conn = _open(args)
     try:
-        value = _config_value(args.key, args.value)
+        value = _config_value(args.setting, args.value)
     except ops.OpError as exc:
         return _fail(exc.code, exc.details)
-    return _run(lambda: ops.config_set(conn, cfg, _ctx(conn, cfg, args), args.key, value))
+    return _run(lambda: ops.config_set(conn, cfg, _ctx(conn, cfg, args), args.setting, value))
 
 
 # --------------------------------------------------------------------------- tasks / projects
@@ -755,10 +755,11 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     x = cs.add_parser("get")
     x.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
-    x.add_argument("key")
+    x.add_argument("setting", metavar="key")
     x = cs.add_parser("set")
     x.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
-    x.add_argument("key", help="dotted key, e.g. slack.quiet_minutes")
+    # Not dest "key": that is --key, the command's identity (one setting would then change once).
+    x.add_argument("setting", metavar="key", help="dotted key, e.g. slack.quiet_minutes")
     x.add_argument("value", help="lists: comma separated or JSON")
     _add_ctx(x)
     s.set_defaults(fn=cmd_config)

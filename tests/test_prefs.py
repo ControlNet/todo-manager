@@ -206,6 +206,15 @@ class SettingAuthorityTests(WorkspaceCase):
         again = self.set("--request", "$evt-kb", "--said", "turn on agent work", key="kanban.enabled", value="true")
         self.assertTrue(json.loads(again[1])["duplicate"], "a retried request is applied once")
 
+    def test_a_setting_can_be_changed_again(self):
+        self.set("--human", value="60")
+        code, out = self.set("--human", value="90")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("duplicate", json.loads(out))
+        self.assertEqual(config.load(self.tmp).get("slack.quiet_minutes"), 90)
+        self.set("--request", "$evt-later", "--said", "Slack 安静两小时再分析", value="120")
+        self.assertEqual(config.load(self.tmp).get("slack.quiet_minutes"), 120)
+
 
 class PreferencesFileTests(WorkspaceCase):
     """``TODO_HOME/PREFERENCES.md``: the user's Todo conventions, edited directly (by the user or
