@@ -317,6 +317,16 @@ class RecheckTests(Base):
         self.check()
         self.assertEqual(self.fu(), self.day(28), "at most recheck_max_days")
 
+    def test_the_next_look_comes_no_later_than_the_day_after_the_deadline(self):
+        store.update_task(self.conn, self.task, {"due_date": self.day(2)}, actor="agent", origin="intake")
+        self.check()
+        self.assertEqual(self.fu(), self.day(3))
+        clock.advance(days=1)
+        store.update_task(self.conn, self.task, {"follow_up_date": self.day(0), "due_date": self.day(0)},
+                          actor="human", origin="cli")
+        self.check()
+        self.assertEqual(self.fu(), self.day(1), "a deadline today: looked at again tomorrow")
+
     def test_new_material_restarts_the_short_wait(self):
         store.update_task(self.conn, self.task, {"follow_up_date": self.day(20)}, actor="human", origin="cli")
         clock.advance(days=20)

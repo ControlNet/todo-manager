@@ -236,8 +236,9 @@ def next_look(conn: sqlite3.Connection, cfg: Config, task_id: str, *, actor: str
               cause: str | None) -> str | None:
     """The next follow-up date of an open task whose check was settled without a date ahead, or
     the passed date would never come due again: as many days ahead as the task has been quiet
-    (its newest evidence, else its creation), within ``followup.recheck_*``. A date the user set
-    is moved too: it has passed and was looked at. Returns the date set, if any."""
+    (its newest evidence, else its creation), within ``followup.recheck_*``, and no later than
+    the day after a deadline still ahead. A date the user set is moved too: it has passed and was
+    looked at. Returns the date set, if any."""
     task = store.get_task(conn, task_id)
     today = clock.local_date(cfg.tz)
     if (task is None or task["status"] in store.CLOSED_STATUSES
@@ -249,6 +250,9 @@ def next_look(conn: sqlite3.Connection, cfg: Config, task_id: str, *, actor: str
     quiet = (today - clock.local_date(cfg.tz, clock.parse(quiet_since))).days
     days = min(max(quiet, int(cfg.get("followup.recheck_min_days", 7))), int(cfg.get("followup.recheck_max_days", 28)))
     date = (today + timedelta(days=days)).isoformat()
+    deadline = (task.get("due_date") or "")[:10]
+    if deadline >= today.isoformat():
+        date = min(date, (datetime.fromisoformat(deadline) + timedelta(days=1)).date().isoformat())
     store.update_task(conn, task_id, {"follow_up_date": date}, actor=actor, origin=origin, cause_ref=cause,
                       based_on_version=task["version"], override_human=True)
     effects.task_push(conn, task_id)
