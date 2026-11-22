@@ -726,6 +726,7 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
     block_event = d["block_event_id"]
     pause_event = d["pause_event_id"]
     paused_block: bool | None = None   # whether the newest block seen now is our pause
+    worker_said = ""   # a failed worker's last output, which the later failure events drop
 
     def announce(dlv: str, text: str) -> None:
         if not quiet:
@@ -755,14 +756,18 @@ def _apply_snapshot(conn: sqlite3.Connection, cfg: Config, d: dict[str, Any], sn
                 stats["questions" if delivery_kind == "question" else "failures"] += 1
                 announce(dlv, i18n.t("dlg.question", title=d["title"], reason=reason) if delivery_kind == "question"
                          else i18n.t("dlg.failed", title=d["title"]))
+        elif kind == "worker_result" and payload.get("exit_code"):
+            worker_said = (payload.get("last_output") or "").strip()
         elif kind in RUN_ENDED_EVENTS:
             if kind == "gave_up":
                 # The failure breaker parked the card (blocked, untyped): the user decides retry/cancel.
                 paused_block = False
                 block_seq += 1
                 block_event = ev["id"]
-                block_reason = i18n.t("dlg.failure_reason",
-                                      reason=payload.get("error") or payload.get("reason") or kind)[:500]
+                reason = payload.get("error") or payload.get("reason") or kind
+                if worker_said and worker_said not in reason:
+                    reason = f"{worker_said} ({reason})"
+                block_reason = i18n.t("dlg.failure_reason", reason=reason)[:500]
                 dlv = _record_delivery(conn, d, kind="failure", summary=block_reason, body=block_reason,
                                        seq=block_seq, event_id=ev["id"], run_id=str(ev.get("run_id") or ""),
                                        after_cancel=quiet)

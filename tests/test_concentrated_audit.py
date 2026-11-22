@@ -53,6 +53,16 @@ class DelegationAudit(WorkspaceCase):
         dg.send_messages(self.conn, self.cfg, self.kb)
         self.assertEqual(self.kb.cards[self.root]['status'], 'ready')
 
+    def test_r02_failure_keeps_what_the_worker_said_last(self):
+        self.kb.cards[self.root]['max_retries'] = 1
+        self.kb.worker_start(self.root)
+        self.kb.worker_crash(self.root, last_output='Could not save this conversation')
+        self.sync()
+        failure = dg.deliveries(self.conn, self.did)[-1]
+        self.assertEqual(failure['kind'], 'failure')
+        self.assertIn('Could not save this conversation', failure['summary'])
+        self.assertIn('worker exited', failure['summary'])
+
     def test_r03_terminal_notification_registration_retries(self):
         self.cfg.data['kanban'].update(notify_platform='matrix', notify_chat_id='synthetic', notify_profile='default')
         self.conn.execute('UPDATE delegations SET notification_route=NULL WHERE id=?', (self.did,))

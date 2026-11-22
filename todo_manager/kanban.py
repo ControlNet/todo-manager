@@ -393,12 +393,15 @@ class FakeKanban:
         run.update(status="done", summary=summary, metadata=metadata or {})
         self._event(card_id, "completed", {"summary": summary}, run_id=run["id"])
 
-    def worker_crash(self, card_id: str) -> None:
+    def worker_crash(self, card_id: str, last_output: str | None = None) -> None:
         """The worker process died: the dispatcher returns the card to ready for a retry, unless
-        the failure breaker trips (per-card ``max_retries``, else Hermes' default of 2)."""
+        the failure breaker trips (per-card ``max_retries``, else Hermes' default of 2).
+        ``last_output``: what the worker printed before it exited (a ``worker_result`` event)."""
         card = self.cards[card_id]
         assert card["status"] == "running"
         run = self.runs[card_id][-1]
+        if last_output is not None:
+            self._event(card_id, "worker_result", {"exit_code": 1, "last_output": last_output}, run_id=run["id"])
         run.update(status="crashed")
         card["status"] = "ready"
         self._event(card_id, "crashed", {"error": "worker exited"}, run_id=run["id"])
