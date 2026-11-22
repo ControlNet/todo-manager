@@ -11,8 +11,8 @@ If the Script Output is a Script Error, or the context only reports problems, ma
   addressed to them. A mention, a copy, a mass mailing or another person's thread is not a
   responsibility by itself.
 - An invitation where no reply simply means no (surveys, rankings, consent to be contacted,
-  newsletters, marketing, webinars, mass calls) is not a task, even with a date in it: dismiss it
-  as `informational`.
+  newsletters, marketing, webinars, mass calls, a group social or event marked optional that the
+  user has not accepted) is not a task, even with a date in it: dismiss it as `informational`.
 - Automated account and security notices from any service (GitHub, Google, the university, ...):
   a new sign-in or device, password or MFA changes, login codes, a third-party app or OAuth access
   granted, keys or tokens added or expiring, storage or licence alerts. They are not tasks; the
