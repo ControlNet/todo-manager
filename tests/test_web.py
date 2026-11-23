@@ -3,7 +3,9 @@ its sign-in. Kanban is ``FakeKanban`` (a test double); no Notion is involved."""
 
 import http.client
 import json
+import re
 import sqlite3
+import struct
 
 from todo_manager import clock, db, delegation, feedback, store
 from todo_manager.db import loads
@@ -367,6 +369,17 @@ class ServerTests(WebCase):
         response, _ = self.request("GET", "/", headers=self.signed_in())
         self.assertIn("img-src 'self' data: https://www.notion.so/icons/;",
                       response.getheader("Content-Security-Policy"))
+
+    def test_the_png_icons_are_served_at_their_sizes(self):
+        manifest = json.loads(self.request("GET", "/manifest.webmanifest")[1])
+        _, page = self.request("GET", "/static/index.html")
+        linked = re.findall(r'href="(/static/icons/icon-(\d+)\.png)"', page.decode())
+        listed = [(i["src"], i["sizes"].split("x")[0]) for i in manifest["icons"] if i["type"] == "image/png"]
+        self.assertTrue(linked and listed)
+        for src, size in linked + listed:
+            response, data = self.request("GET", src)
+            self.assertEqual(response.getheader("Content-Type"), "image/png", src)
+            self.assertEqual(struct.unpack(">II", data[16:24]), (int(size), int(size)), src)
 
     def test_sign_in_sets_a_cookie_only_for_the_token(self):
         response, _ = self.request("GET", "/")
