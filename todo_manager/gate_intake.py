@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -232,6 +232,13 @@ def due_checks(conn: sqlite3.Connection, cfg: Config) -> list[tuple[str, str, st
     return list(due.values())
 
 
+def _quiet_since(conn: sqlite3.Connection, cfg: Config, task: dict[str, Any]) -> date:
+    """The day of the task's newest evidence, else of its creation."""
+    since = conn.execute(
+        "SELECT MAX(s.occurred_at) FROM evidence_links e JOIN source_items s ON s.id=e.source_item_id"
+        " WHERE e.entity_type='task' AND e.entity_id=?", (task["id"],)).fetchone()[0] or task["created_at"]
+    return clock.local_date(cfg.tz, clock.parse(since))
+
 def next_look(conn: sqlite3.Connection, cfg: Config, task_id: str, *, actor: str, origin: str,
               cause: str | None) -> str | None:
     """The next follow-up date of an open task whose check was settled without a date ahead, or
@@ -244,10 +251,7 @@ def next_look(conn: sqlite3.Connection, cfg: Config, task_id: str, *, actor: str
     if (task is None or task["status"] in store.CLOSED_STATUSES
             or (task.get("follow_up_date") or "")[:10] > today.isoformat()):
         return None
-    quiet_since = conn.execute(
-        "SELECT MAX(s.occurred_at) FROM evidence_links e JOIN source_items s ON s.id=e.source_item_id"
-        " WHERE e.entity_type='task' AND e.entity_id=?", (task_id,)).fetchone()[0] or task["created_at"]
-    quiet = (today - clock.local_date(cfg.tz, clock.parse(quiet_since))).days
+    quiet = (today - _quiet_since(conn, cfg, task)).days
     days = min(max(quiet, int(cfg.get("followup.recheck_min_days", 7))), int(cfg.get("followup.recheck_max_days", 28)))
     date = (today + timedelta(days=days)).isoformat()
     deadline = (task.get("due_date") or "")[:10]
@@ -271,6 +275,31 @@ def without_next_look(conn: sqlite3.Connection, cfg: Config) -> list[str]:
         "  OR (t.follow_up_date IS NULL AND t.due_date IS NOT NULL AND f.due=? || substr(t.due_date,1,10))))",
         (today, today, DUE_CHECK))]
 
+
+def without_look(conn: sqlite3.Connection, cfg: Config) -> list[str]:
+    """Open tasks with no date at all, neither due nor follow-up (one on the decision board, a
+    to-do without a deadline): nothing looks at them again unless new material comes. Not while
+    snoozed, nor when the user cleared the follow-up date."""
+    today = clock.local_date(cfg.tz).isoformat()
+    rows = conn.execute(
+        "SELECT id, field_meta FROM tasks WHERE status IN ('todo','in_progress','waiting','decision')"
+        " AND follow_up_date IS NULL AND due_date IS NULL"
+        " AND (snooze_until IS NULL OR substr(snooze_until,1,10) <= ?)", (today,)).fetchall()
+    return [r["id"] for r in rows if (loads(r["field_meta"], {}).get("follow_up_date") or {}).get("by") != "human"]
+
+
+def first_look(conn: sqlite3.Connection, cfg: Config, task_id: str, *, actor: str, origin: str,
+               cause: str | None) -> str:
+    """The follow-up date of a task of ``without_look``: ``followup.recheck_min_days`` after it went
+    quiet (its newest evidence, else its creation), today at the earliest. Returns the date."""
+    task = store.get_task(conn, task_id)
+    assert task is not None
+    days = int(cfg.get("followup.recheck_min_days", 7))
+    day = max(_quiet_since(conn, cfg, task) + timedelta(days=days), clock.local_date(cfg.tz)).isoformat()
+    store.update_task(conn, task_id, {"follow_up_date": day}, actor=actor, origin=origin, cause_ref=cause,
+                      based_on_version=task["version"])
+    effects.task_push(conn, task_id)
+    return day
 
 def due_followups(conn: sqlite3.Connection, cfg: Config) -> list[str]:
     """Tasks of ``due_checks``."""
@@ -323,6 +352,8 @@ def run_gate(conn: sqlite3.Connection, cfg: Config, conversation_adapters: list[
         with tx(conn):
             moved = {t: next_look(conn, cfg, t, actor="program", origin="gate", cause=run_id)
                      for t in without_next_look(conn, cfg)}
+            moved |= {t: first_look(conn, cfg, t, actor="program", origin="gate", cause=run_id)
+                      for t in without_look(conn, cfg)}
         if moved:
             summary["next_looks"] = moved
         checks = due_checks(conn, cfg)

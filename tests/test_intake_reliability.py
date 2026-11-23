@@ -224,6 +224,50 @@ class DuePassedTests(Base):
 
 
 
+
+class FirstLookTests(Base):
+    """A task with no date at all, neither due nor follow-up (one on the decision board, a to-do
+    without a deadline), was never looked at again unless new material came (2026-11-23: a request
+    the user had settled by mail stayed open). The gate gives it a first look, recheck_min_days
+    after its newest material or its creation, today at the earliest."""
+
+    def day(self, offset):
+        from datetime import timedelta
+        return (clock.local_date(self.cfg.tz) + timedelta(days=offset)).isoformat()
+
+    def fu(self, task):
+        return store.get_task(self.conn, task)["follow_up_date"]
+
+    def test_a_task_without_dates_is_looked_at_a_week_after_it_went_quiet(self):
+        task = store.create_task(self.conn, "将数据集迁到实验室网站", origin="intake", actor="agent", status="decision")
+        self.assertNotIn("followups_due", self.gate())
+        self.assertEqual(self.fu(task), self.day(7))
+        last = self.conn.execute("SELECT actor, origin FROM history WHERE entity_id=? ORDER BY version DESC LIMIT 1",
+                                 (task,)).fetchone()
+        self.assertEqual((last["actor"], last["origin"]), ("program", "gate"))
+        clock.advance(days=7)
+        self.assertIn("followups_due:1", self.gate())
+
+    def test_a_task_quiet_for_long_is_looked_at_now(self):
+        task = store.create_task(self.conn, "回复 Bob", origin="intake", actor="agent", status="todo")
+        clock.advance(days=12)
+        self.assertIn("followups_due:1", self.gate())
+        self.assertEqual(self.fu(task), self.day(0))
+
+    def test_dated_snoozed_closed_and_cleared_tasks_are_left_alone(self):
+        due = store.create_task(self.conn, "交报告", origin="intake", actor="agent", status="todo", due_date=self.day(3))
+        snoozed = store.create_task(self.conn, "以后再说", origin="intake", actor="agent", status="todo",
+                                    snooze_until=self.day(5))
+        done = store.create_task(self.conn, "已完成", origin="intake", actor="agent", status="done")
+        cleared = store.create_task(self.conn, "不用再看", origin="intake", actor="agent", status="todo",
+                                    follow_up_date=self.day(2))
+        store.update_task(self.conn, cleared, {"follow_up_date": None}, actor="human", origin="cli")
+        self.gate()
+        self.assertEqual([self.fu(t) for t in (due, snoozed, done, cleared)], [None] * 4)
+        clock.advance(days=5)
+        self.gate()
+        self.assertEqual(self.fu(snoozed), self.day(2), "once the snooze is over: a week after it went quiet")
+
 class ProjectGroupingTests(Base):
     def test_the_run_is_told_how_many_open_tasks_have_no_project(self):
         pid = store.create_project(self.conn, "Example Workshop 2026", origin="cli", actor="human")

@@ -101,6 +101,9 @@ A settled check that leaves the task open without a follow-up date ahead moves i
 `follow_up_date` to the next look: as many days ahead as the task has been quiet (its newest
 evidence, else its creation), between `followup.recheck_min_days` and `recheck_max_days`, and
 no later than the day after a due date still ahead.
+An open task with no date at all (neither due nor follow-up) gets a first `follow_up_date` from
+the gate: `recheck_min_days` after its newest evidence, else its creation, today at the
+earliest; not while snoozed, nor when you cleared that date yourself.
 Omit `--digest-reviewed` unless that run's digest was actually reviewed. Confirmation ownership
 and current follow-up dates are validated transactionally. Any invalid confirmation rolls back
 all settlement changes. Retrying the same set is idempotent; a different set after completion
