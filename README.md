@@ -21,7 +21,8 @@ self-hosted AI agent, and uses the AI model and agent board you already have the
 - **Closes tasks for you** when you reply to the email or your pull request is merged.
 
 Prefer a browser? The optional [Web UI](docs/web-ui.md) shows the same tasks on desktop, tablet
-and phone.
+and phone. Agents on other machines read and change them through its [API or as an MCP
+server](docs/api.md).
 
 ## Get started
 
@@ -88,7 +89,8 @@ To change a setting, ask Hermes, for example "read Slack only after an hour of s
 - [Operations guide](docs/operations.md): upgrade, backup, instant sync, Gmail labels,
   troubleshooting
 - [Notion pages and fields](docs/notion-schema.md) · [Command line](docs/cli.md) ·
-  [How it works](docs/architecture.md) · [Known limitations](docs/limitations.md)
+  [API for agents](docs/api.md) · [How it works](docs/architecture.md) ·
+  [Known limitations](docs/limitations.md)
 
 ## License
 
