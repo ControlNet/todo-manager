@@ -198,7 +198,12 @@ def context(conn: sqlite3.Connection, cfg: Config, *, run: str | None = None, fe
         return Ctx("request", request.strip(), actor="human", origin=fb["origin"], fb=fb, key=key)
     if write and not human:
         raise OpError("CONTEXT_REQUIRED", "use --run, --feedback, --request, or --human for a manual write")
-    return Ctx("cli", None, actor="human", origin="cli", key=key)
+    return manual(key=key)
+
+
+def manual(*, origin: str = "cli", key: str | None = None) -> Ctx:
+    """A write the user makes themselves: ``--human`` on the command line, or through the API."""
+    return Ctx("cli", None, actor="human", origin=origin, key=key)
 
 
 def run_stale(conn: sqlite3.Connection, cfg: Config | None, run_id: str) -> bool:
@@ -912,6 +917,21 @@ def _replied_delivery(fb: dict[str, Any] | None, delegation_id: str, kind: str, 
 
 
 MESSAGE_KINDS = ("supplement", "revision", "pause", "resume", "cancel", "accept")
+
+
+def delegate_task(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, task_id: str, *, brief: str,
+                  allowed: list[str], title: str | None = None, parallel: bool = False, submit: bool = True,
+                  start_after: str | None = None) -> dict[str, Any]:
+    """Agent work on a task, as asked from the command line or the API: the allowed actions are
+    named explicitly, the title is the task's unless given."""
+    task = store.get_task(conn, task_id)
+    if task is None:
+        raise OpError("NOT_FOUND", task_id)
+    allowed = [a.strip() for a in allowed or [] if a.strip()]
+    if not allowed:
+        raise OpError("INVALID", "--allow must explicitly name authorized actions")
+    return delegate_create(conn, cfg, ctx, task_id=task_id, title=title or task["title"], goal=brief,
+                           allowed=allowed, parallel=parallel, submit=submit, start_after=start_after)
 
 
 def delegate_message(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, delegation_id: str, *, kind: str,

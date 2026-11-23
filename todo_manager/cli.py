@@ -21,7 +21,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from . import clock, config, db, delegation, feedback, health, i18n, ops, prefs, project_summary, store
+from . import config, db, delegation, feedback, i18n, ops, project_summary, queries, store
 from .db import dumps, loads
 from .locks import LockBusy
 
@@ -443,66 +443,24 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    from . import batching, runs, hermes_install
     cfg, conn = _open(args)
-    report = health.report(conn, cfg)
-    installation = hermes_install.status(cfg)
-    paused_idle = {f'gate_idle:{entry}' for entry, spec in hermes_install.JOBS.items()
-                   if spec['name'] in installation['paused_jobs']}
-    problems = [text for key, text in health.problem_items(report, cfg) if key not in paused_idle]
-    counts = {r["status"]: r["n"] for r in conn.execute("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status")}
-    out = {
-        "tasks": counts,
-        "material": {"waiting": batching.backlog(conn),
-                     "deferred": conn.execute("SELECT COUNT(*) FROM batches WHERE state='mature' AND not_before > ?",
-                                              (clock.iso(),)).fetchone()[0]},
-        "feedback_pending": conn.execute("SELECT COUNT(*) FROM feedback WHERE status='pending'").fetchone()[0],
-        "delegation_config": {
-            "enabled": bool(cfg.get('kanban.enabled')),
-            "board": cfg.get('kanban.board'),
-            "assignee": cfg.get('kanban.assignee') or None,
-            "message": ('Agent delegation is enabled; see health problems for readiness.'
-                        if cfg.get('kanban.enabled') else
-                        'Agent delegation is disabled; source intake and Notion management remain available. '
-                        'Run todo-manager install to configure it.'),
-        },
-        "agent_work": {r["status"]: r["n"] for r in conn.execute(
-            "SELECT status, COUNT(*) AS n FROM delegations GROUP BY status")},
-        "last_runs": {entry: [{k: r[k] for k in ("id", "started_at", "status", "wake_reasons")}
-                              for r in runs.recent(conn, entry, 3)] for entry in ("intake", "feedback")},
-        "conventions": {"file": str(prefs.agents_path(cfg.home)),
-                        "preferences_file": str(prefs.preferences_path(cfg.home)),
-                        "problems": prefs.problems(cfg.home)},
-        "installation": installation,
-        "problems": list(dict.fromkeys(problems + installation['problems'])),
-    }
-    if args.details:
-        out['paths'] = {'home': str(cfg.home), 'database': str(cfg.db_path), 'language': cfg.language}
-        out['health'] = report
-        out['metrics'] = health.metrics(conn, args.days)
-        manifest = hermes_install.load_manifest(hermes_install.Paths.from_config(cfg))
-        out['usage'] = health.usage(cfg, [j['id'] for j in (manifest.get('jobs') or {}).values() if j.get('id')], args.days)
+    out = queries.status(conn, cfg, details=args.details, days=args.days)
     _admin_print(args, out)
     return 1 if out['problems'] else 0
 
 
 def cmd_source(args: argparse.Namespace) -> int:
     if args.action == "search":
-        from .sources.base import search_items
         cfg, conn = _open(args)
-        rows = search_items(conn, args.words, mine=args.mine, since=args.since, limit=args.limit)
-        _print({"items": [{**{k: v for k, v in r.items() if k != "text"}, "excerpt": " ".join(r["text"].split())[:300]}
-                          for r in rows], "content_role": "untrusted source material"})
+        _print(queries.source_search(conn, args.words, mine=args.mine, since=args.since, limit=args.limit))
         return 0
     if args.action != "show":
         return cmd_item(args)
-    from .sources.base import item_body
     cfg, conn = _open(args)
-    row = conn.execute("SELECT * FROM source_items WHERE id=?", (args.id,)).fetchone()
-    if row is None:
+    item = queries.source_show(conn, args.id)
+    if item is None:
         return _fail("NOT_FOUND", args.id)
-    _print({**dict(row), "body": item_body(conn, args.id) or row['excerpt'] or '',
-            "content_role": "untrusted source material"})
+    _print(item)
     return 0
 
 
@@ -533,40 +491,22 @@ def cmd_feedback(args: argparse.Namespace) -> int:
 def cmd_delegate(args: argparse.Namespace) -> int:
     cfg, conn = _open(args)
     if args.action == "list":
-        active = conn.execute(f"SELECT id FROM delegations WHERE status IN ({','.join(repr(s) for s in delegation.ACTIVE)})"
-                              " ORDER BY created_at").fetchall()
-        _print([delegation.get(conn, r["id"]) for r in active])
+        _print(queries.delegate_list(conn))
         return 0
     if args.action == "show":
-        d = delegation.get(conn, args.id)
+        d = queries.delegate_show(conn, args.id)
         if d is None:
             return _fail("NOT_FOUND", args.id)
-        d["messages"] = [{k: m[k] for k in ("id", "kind", "status", "created_at", "sent_at", "error", "body")}
-                         for m in conn.execute("SELECT * FROM delegation_messages WHERE delegation_id=?"
-                                               " ORDER BY created_at, rowid", (args.id,))]
-        d["children"] = [dict(r) for r in conn.execute(
-            "SELECT * FROM delegation_children WHERE delegation_id=? ORDER BY card_id", (args.id,))]
-        d["deliveries"] = delegation.deliveries(conn, args.id)
-        d["approvals"] = [dict(a) for a in conn.execute("SELECT * FROM approvals WHERE delegation_id=?"
-                                                         " ORDER BY granted_at", (args.id,))]
         _print(d)
         return 0
 
     def act() -> dict[str, Any]:
         ctx = _ctx(conn, cfg, args)
         if args.action == "create":
-            task = store.get_task(conn, args.task)
-            if task is None:
-                raise ops.OpError('NOT_FOUND', args.task)
-            if not (args.allow or '').strip():
-                raise ops.OpError('INVALID', '--allow must explicitly name authorized actions')
             brief = Path(args.brief_file).read_text(encoding='utf-8') if args.brief_file else args.brief
-            return ops.delegate_create(conn, cfg, ctx, task_id=args.task, title=args.title or task['title'], goal=brief,
-                                       context_text=None, constraints=None,
-                                       deliverable=None, done_criteria=None,
-                                       allowed=args.allow.split(",") if args.allow else None,
-                                       parallel=args.parallel, submit=not args.no_submit,
-                                       start_after=args.start_after)
+            return ops.delegate_task(conn, cfg, ctx, args.task, brief=brief, allowed=(args.allow or "").split(","),
+                                     title=args.title, parallel=args.parallel, submit=not args.no_submit,
+                                     start_after=args.start_after)
         if args.action == "message":
             return ops.delegate_message(conn, cfg, ctx, args.id, kind=args.kind, body=args.body,
                                         delivery=args.delivery)
