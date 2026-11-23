@@ -7,6 +7,10 @@ login form takes either once and sets a session cookie derived from both, so a n
 password signs every browser out. Writes (POST under ``/api/``) also need the ``X-TM-Request`` header, which a page
 of another site cannot send without the browser asking first.
 
+Agents (docs/api.md) send the web token as ``Authorization: Bearer``, on ``/api/*`` and on the MCP
+endpoint ``/mcp``; such a request carries no cookie, so its writes need no header. The routes and
+the MCP tools are the operations of ``api.OPERATIONS``.
+
 Every request opens its own database connection under the shared workspace lock (like a
 terminal command); the daemon's sync sees the writes as changes from another connection and
 pushes them to Notion, and wakes the feedback job for new feedback.
@@ -18,20 +22,19 @@ import hashlib
 import hmac
 import json
 import mimetypes
-import re
 import secrets
 import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from .. import db
 from ..config import Config
 from ..locks import LockBusy, file_lock, lock_path
 from ..webhook import _write_private
-from . import actions, views
+from . import api, mcp
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 mimetypes.add_type("text/javascript", ".js")
@@ -162,54 +165,25 @@ class WebServer:
         except RuntimeError as exc:   # absent workspace, schema waiting for install
             raise Reply(503, {"error": "STATE", "message": str(exc)}) from None
 
-    # ------------------------------------------------------------------ routes
-    def get(self, path: str, query: dict[str, list[str]]) -> Any:
-        cfg = self.cfg
-        parts = [unquote(p) for p in path.strip("/").split("/")][1:]   # after "api"
-        q = {k: v[-1] for k, v in query.items()}
-        match parts:
-            case ["me"]:
-                return self.read(lambda c: views.me(c, cfg))
-            case ["home"]:
-                return self.read(lambda c: views.home(c, cfg))
-            case ["stamp"]:
-                return self.read(lambda c: {"stamp": views.stamp(c)})
-            case ["tasks"]:
-                return self.read(lambda c: views.task_list(c, cfg, project=q.get("project") or None,
-                                                           closed=q.get("closed") == "1"))
-            case ["tasks", task_id]:
-                return self.found(self.read(lambda c: views.task_detail(c, cfg, task_id)))
-            case ["projects"]:
-                return self.read(lambda c: views.project_list(c, cfg))
-            case ["projects", project_id]:
-                return self.found(self.read(lambda c: views.project_detail(c, cfg, project_id)))
-            case ["search"]:
-                return self.read(lambda c: views.search(c, cfg, (q.get("q") or "")[:200]))
-            case ["deliveries", delivery_id]:
-                return self.found(self.read(lambda c: views.delivery(c, delivery_id)))
-            case ["deliveries", delivery_id, "files", index] if re.fullmatch(r"[0-9]{1,6}", index):
-                path_ = self.found(self.read(lambda c: views.delivery_file(c, cfg, delivery_id, int(index))))
-                raise Reply(200, path_)
-        raise Reply(404, {"error": "NOT_FOUND"})
+    # ------------------------------------------------------------------ operations
+    def run(self, op: api.Op, args: dict[str, Any]) -> Any:
+        """One operation on the database; a refusal becomes ``api.ApiFailure``."""
+        try:
+            return self.read(lambda c: op.run(c, self.cfg, args))
+        except Reply as r:
+            raise api.ApiFailure(r.status, r.body) from None
+        except Exception as exc:
+            refused = api.failure(exc)
+            if refused is None:
+                raise
+            raise refused from None
 
-    def post(self, path: str, body: dict[str, Any]) -> Any:
-        cfg = self.cfg
-        parts = [unquote(p) for p in path.strip("/").split("/")][1:]
-        match parts:
-            case ["tasks", task_id, "act"]:
-                params = body.get("params") if isinstance(body.get("params"), dict) else {}
-                return self.read(lambda c: actions.act(c, cfg, task_id, str(body.get("action") or ""), params,
-                                                       body.get("rid")))
-            case ["tasks", task_id, "comment"]:
-                return self.read(lambda c: actions.comment(c, cfg, task_id, body.get("text"), body.get("to"),
-                                                           body.get("rid")))
-        raise Reply(404, {"error": "NOT_FOUND"})
-
-    @staticmethod
-    def found(value: Any) -> Any:
-        if value is None:
+    def call(self, method: str, path: str, args: dict[str, Any]) -> Any:
+        found = api.route(method, path)
+        if found is None:
             raise Reply(404, {"error": "NOT_FOUND"})
-        return value
+        op, given = found
+        return self.run(op, {**args, **given})
 
     # ------------------------------------------------------------------ HTTP
     def _handler(self) -> type[BaseHTTPRequestHandler]:
@@ -223,6 +197,13 @@ class WebServer:
             def https(self) -> bool:
                 return (self.headers.get("X-Forwarded-Proto") == "https"
                         or '"https"' in (self.headers.get("Cf-Visitor") or ""))
+
+            def bearer(self) -> bool:
+                """An agent's request: the web token as ``Authorization: Bearer``."""
+                token = load_token(web.cfg.home)
+                scheme, _, given = (self.headers.get("Authorization") or "").partition(" ")
+                return (token is not None and scheme.lower() == "bearer"
+                        and hmac.compare_digest(given.strip().encode(), token.encode()))
 
             def signed_in(self) -> bool:
                 key = session_key(web.cfg.home)
@@ -289,8 +270,8 @@ class WebServer:
                     self.send(200, result)
                 except Reply as r:
                     self.send(r.status, r.body, r.headers)
-                except actions.ActionError as exc:
-                    self.send(exc.status, {"error": exc.code, "message": str(exc)})
+                except api.ApiFailure as f:
+                    self.send(f.status, f.body)
                 except sqlite3.Error as exc:
                     self.send(500, {"error": "STATE", "message": f"{type(exc).__name__}: {str(exc)[:200]}"})
                 except Exception as exc:  # noqa: BLE001 - answer instead of dropping the connection
@@ -305,10 +286,13 @@ class WebServer:
                     return self.static(path[1:])
                 if path == "/login":
                     return self.static("login.html")
+                if path == "/mcp":
+                    return self.send(405, None, {"Allow": "POST"})   # no server-sent stream
                 if path.startswith("/api/"):
-                    if not self.signed_in():
+                    if not (self.bearer() or self.signed_in()):
                         return self.send(401, {"error": "LOGIN"})
-                    return self.handle_call(lambda: web.get(path, parse_qs(url.query)))
+                    query = {k: v[-1] for k, v in parse_qs(url.query).items()}
+                    return self.handle_call(lambda: web.call("GET", path, query))
                 if not self.signed_in():
                     return self.send(303, None, {"Location": "/login"})
                 return self.static("index.html")   # the page routes the rest itself
@@ -321,22 +305,48 @@ class WebServer:
                     return self.login()
                 if path == "/logout":
                     return self.send(303, None, {"Location": "/login", "Set-Cookie": self.cookie("", 0)})
+                if path == "/mcp":
+                    return self.mcp()
+                self.write("POST", path)
+
+            def do_PATCH(self) -> None:  # noqa: N802
+                self.write("PATCH", urlsplit(self.path).path)
+
+            def write(self, method: str, path: str) -> None:
                 if not path.startswith("/api/"):
                     return self.send(404)
-                if not self.signed_in():
-                    return self.send(401, {"error": "LOGIN"})
-                if self.headers.get(WRITE_HEADER) != "1":
-                    return self.send(403, {"error": "FORBIDDEN", "message": f"writes need the {WRITE_HEADER} header"})
+                if not self.bearer():
+                    if not self.signed_in():
+                        return self.send(401, {"error": "LOGIN"})
+                    if self.headers.get(WRITE_HEADER) != "1":
+                        return self.send(403, {"error": "FORBIDDEN", "message": f"writes need the {WRITE_HEADER} header"})
+                return self.handle_call(lambda: web.call(method, path, self.json_body()))
 
-                def call() -> Any:
-                    try:
-                        data = json.loads(self.body() or b"{}")
-                    except ValueError:
-                        raise Reply(400, {"error": "INVALID", "message": "the body is not JSON"}) from None
-                    if not isinstance(data, dict):
-                        raise Reply(400, {"error": "INVALID", "message": "the body is not a JSON object"})
-                    return web.post(path, data)
-                return self.handle_call(call)
+            def json_body(self) -> dict[str, Any]:
+                try:
+                    data = json.loads(self.body() or b"{}")
+                except ValueError:
+                    raise Reply(400, {"error": "INVALID", "message": "the body is not JSON"}) from None
+                if not isinstance(data, dict):
+                    raise Reply(400, {"error": "INVALID", "message": "the body is not a JSON object"})
+                return data
+
+            def mcp(self) -> None:
+                if not self.bearer():
+                    return self.send(401, {"error": "LOGIN"}, {"WWW-Authenticate": "Bearer"})
+                try:
+                    message = json.loads(self.body() or b"null")
+                except (ValueError, Reply):
+                    return self.send(400, {"jsonrpc": "2.0", "id": None,
+                                           "error": {"code": -32700, "message": "the body is not JSON"}})
+                try:
+                    reply = mcp.handle(message, web.run)
+                except Exception as exc:  # noqa: BLE001 - answer the client instead of dropping it
+                    reply = {"jsonrpc": "2.0", "id": message.get("id") if isinstance(message, dict) else None,
+                             "error": {"code": -32603, "message": type(exc).__name__}}
+                if reply is None:
+                    return self.send(202)
+                self.send(200, reply)
 
             def cookie(self, value: str, max_age: int) -> str:
                 return (f"{COOKIE}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax"
