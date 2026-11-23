@@ -405,7 +405,7 @@ class WebServer:
                     return self.send(400, {"jsonrpc": "2.0", "id": None,
                                            "error": {"code": -32700, "message": "the body is not JSON"}})
                 try:
-                    reply = mcp.handle(message, web.run)
+                    reply = mcp.handle(message, web.run, self.base())
                 except Exception as exc:  # noqa: BLE001 - answer the client instead of dropping it
                     reply = {"jsonrpc": "2.0", "id": message.get("id") if isinstance(message, dict) else None,
                              "error": {"code": -32603, "message": type(exc).__name__}}

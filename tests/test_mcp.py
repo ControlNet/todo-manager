@@ -2,6 +2,7 @@
 the API's operations."""
 
 import json
+import urllib.request
 
 from todo_manager import store
 from tests.test_api import ApiCase
@@ -27,6 +28,12 @@ class McpTests(ApiCase):
         self.assertEqual(reply["result"]["protocolVersion"], "2025-03-26")
         self.assertIn("tools", reply["result"]["capabilities"])
         self.assertIn("own edits", reply["result"]["instructions"])
+        icons = reply["result"]["serverInfo"]["icons"]
+        base = f"http://127.0.0.1:{self.site.port}"
+        self.assertIn({"src": base + "/icon.svg", "mimeType": "image/svg+xml", "sizes": ["any"]}, icons)
+        for icon in icons:
+            with urllib.request.urlopen(icon["src"], timeout=10) as response:
+                self.assertEqual(response.headers["Content-Type"].split(";")[0], icon["mimeType"])
         self.assertEqual(self.rpc("notifications/initialized", rid=None)[0], 202)
         tools = {t["name"]: t for t in self.rpc("tools/list")[1]["result"]["tools"]}
         self.assertIn("create_task", tools)

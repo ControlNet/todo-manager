@@ -99,6 +99,7 @@ answers 200 with the refused fields under `rejected`.
 
 `POST /mcp` is an MCP server (Streamable HTTP, JSON responses) with the tools above, signed in
 with the same Bearer token or password, or with OAuth for clients that ask for it.
+It names itself *Todo Manager* with the Web UI's icon, for clients that show one.
 
 Claude Code:
 
