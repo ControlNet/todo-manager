@@ -387,11 +387,13 @@
     if (r.page === "search") return "search";
     return "";
   }
+  // The favicon's checkmark, in the page's accent colours.
+  const LOGO = `<svg viewBox="0 0 64 64" width="32" height="32" aria-hidden="true"><path d="M19 33l9 9 17-19" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   function sidebar(r) {
     const cur = currentNav(r);
     const projects = ((S.home && S.home.projects) || []).filter((p) => p.status === "active" || p.counts.open);
     return `<nav class="nav" aria-label="${esc(t("today"))}">
-      <div class="brand"><span class="logo">TM</span><span>Todo Manager</span></div>
+      <div class="brand"><span class="logo">${LOGO}</span><span>Todo Manager</span></div>
       <button class="nav-search" data-palette="1"><span>${esc(t("search"))}</span><kbd>${MAC ? "⌘K" : "Ctrl K"}</kbd></button>
       <div class="nav-group">${navItems().map((i) => `<button class="nav-item${cur === i.key ? " on" : ""}" data-go="${i.hash}">
         <span class="label">${esc(t(i.key))}</span><span class="count">${i.count === "" ? "" : esc(i.count)}</span></button>`).join("")}</div>
@@ -406,7 +408,7 @@
   }
   function rail(r) {
     const cur = currentNav(r);
-    return `<nav class="rail" aria-label="${esc(t("today"))}"><span class="logo">TM</span>
+    return `<nav class="rail" aria-label="${esc(t("today"))}"><span class="logo">${LOGO}</span>
       ${navItems().concat([{ key: "projects", hash: "#/projects" }]).map((i) => `<button class="rail-item${cur === i.key ? " on" : ""}" data-go="${i.hash}" aria-label="${esc(t(i.key))}">
         ${icon(i.key)}${esc(t(i.key))}${i.badge ? `<span class="badge">${i.badge}</span>` : ""}</button>`).join("")}
       <button class="rail-item" data-palette="1" aria-label="${esc(t("search"))}">${icon("search")}${esc(t("search"))}</button>
