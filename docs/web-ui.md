@@ -101,8 +101,9 @@ apply it twice.
 - Writes also need the `X-TM-Request: 1` header, which a page of another site cannot add without
   the browser asking first.
 - Agents sign in with the same token or password as `Authorization: Bearer` ([API for
-  agents](api.md)); such a request carries no cookie, so it needs no header. A new token or
-  password signs them out too.
+  agents](api.md)); such a request carries no cookie, so it needs no header. A client that only
+  speaks OAuth gets its own access token once you allow it on `/authorize`. A new token or
+  password signs them all out too.
 - The page loads nothing from other sites (Content-Security-Policy `default-src 'self'`). Text
   from mail, Slack or the agent is always escaped; delivered files are served as plain text or as
   downloads, never as pages, and only from the workspace's `deliveries/` folder.

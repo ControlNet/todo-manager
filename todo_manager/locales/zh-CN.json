@@ -282,5 +282,10 @@
   "project.none_mine": "暂无我要做的",
   "project.recent_joiner": "、",
   "project.recent_window": "{days} 天内：{what}",
-  "project.latest": " · 最新：{title}（{date}）"
+  "project.latest": " · 最新：{title}（{date}）",
+  "web.consent.ask": "允许 {name} 读取和修改你的 Todo Manager？",
+  "web.consent.password": "密码",
+  "web.consent.allow": "允许",
+  "web.consent.cancel": "取消",
+  "web.consent.failed": "密码不对"
 }

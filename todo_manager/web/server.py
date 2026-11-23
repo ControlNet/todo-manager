@@ -9,7 +9,9 @@ of another site cannot send without the browser asking first.
 
 Agents (docs/api.md) send the web token or the password as ``Authorization: Bearer``, on
 ``/api/*`` and on the MCP endpoint ``/mcp``; such a request carries no cookie, so its writes need
-no header. The routes and the MCP tools are the operations of ``api.OPERATIONS``.
+no header. The routes and the MCP tools are the operations of ``api.OPERATIONS``. A client that
+cannot send a header of its own signs in with OAuth instead (``oauth.py``), and its access token is
+taken the same way; the token and the password keep working beside it.
 
 Every request opens its own database connection under the shared workspace lock (like a
 terminal command); the daemon's sync sees the writes as changes from another connection and
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import html
 import json
 import mimetypes
 import secrets
@@ -28,13 +31,13 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
-from .. import db
+from .. import db, i18n
 from ..config import Config
 from ..locks import LockBusy, file_lock, lock_path
 from ..webhook import _write_private
-from . import api, mcp
+from . import api, mcp, oauth
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 mimetypes.add_type("text/javascript", ".js")
@@ -124,6 +127,32 @@ def session_value(token: str) -> str:
     return hmac.new(token.encode(), b"todo-manager web session", hashlib.sha256).hexdigest()
 
 
+LOGO = ('<svg viewBox="0 0 64 64" width="32" height="32" aria-hidden="true"><path d="M19 33l9 9 17-19" fill="none" '
+        'stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>')
+
+
+def consent_page(name: str, params: dict[str, str], *, ask_password: bool, failed: bool, language: str) -> bytes:
+    """The page on which the user allows an OAuth client (oauth.py), styled as the login page."""
+    words = {k: i18n.t(f"web.consent.{k}", language) for k in ("password", "allow", "cancel", "failed")}
+    hidden = "".join(f'<input type="hidden" name="{html.escape(k)}" value="{html.escape(v)}">'
+                     for k, v in params.items() if k not in ("password", "decision"))
+    field = (f'<label class="field"><span class="label">{words["password"]}</span>'
+             '<input name="password" type="password" autocomplete="current-password" required autofocus></label>'
+             if ask_password else "")
+    return (f'<!doctype html><html lang="{language}"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">'
+            '<title>Todo Manager</title><link rel="icon" href="/icon.svg" type="image/svg+xml">'
+            '<link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/login.css">'
+            '<script src="/static/theme.js"></script></head><body><main class="login">'
+            '<form method="post" action="/authorize" class="login-card">'
+            f'<div class="brand"><span class="logo">{LOGO}</span><span>Todo Manager</span></div>'
+            f'<p style="margin: 0">{html.escape(i18n.t("web.consent.ask", language, name=name))}</p>{hidden}{field}'
+            + (f'<p class="login-failed">{words["failed"]}</p>' if failed else "")
+            + f'<button class="btn primary" type="submit" name="decision" value="allow">{words["allow"]}</button>'
+            f'<button class="btn" type="submit" name="decision" value="deny" formnovalidate>{words["cancel"]}</button>'
+            '</form></main></body></html>').encode()
+
+
 class Reply(Exception):
     def __init__(self, status: int, body: Any = None, *, headers: dict[str, str] | None = None):
         super().__init__(status)
@@ -156,6 +185,11 @@ class WebServer:
             self.password_seen = seen
             return True
         return False
+
+    def grant_key(self) -> str | None:
+        """What OAuth grants are signed with: they end when the token or the password changes."""
+        session = session_key(self.cfg.home)
+        return None if session is None else f"{oauth.key(self.cfg.home)}\n{session}"
 
     def start(self) -> None:
         self.thread = threading.Thread(target=self.server.serve_forever, name="web", daemon=True)
@@ -222,7 +256,10 @@ class WebServer:
                 token = load_token(web.cfg.home)
                 if token is not None and hmac.compare_digest(given.encode(), token.encode()):
                     return True
-                return web.password_ok(given)
+                return oauth.access_ok(web.grant_key(), given) or web.password_ok(given)
+
+            def base(self) -> str:
+                return f"{'https' if self.https() else 'http'}://{self.headers.get('Host') or 'localhost'}"
 
             def signed_in(self) -> bool:
                 key = session_key(web.cfg.home)
@@ -307,6 +344,12 @@ class WebServer:
                     return self.static("login.html")
                 if path == "/mcp":
                     return self.send(405, None, {"Allow": "POST"})   # no server-sent stream
+                if path in ("/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"):
+                    return self.send(200, oauth.resource_metadata(self.base()))
+                if path in ("/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"):
+                    return self.send(200, oauth.server_metadata(self.base()))
+                if path == "/authorize":
+                    return self.authorize({k: v[-1] for k, v in parse_qs(url.query).items()})
                 if path.startswith("/api/"):
                     if not (self.bearer() or self.signed_in()):
                         return self.send(401, {"error": "LOGIN"})
@@ -326,6 +369,8 @@ class WebServer:
                     return self.send(303, None, {"Location": "/login", "Set-Cookie": self.cookie("", 0)})
                 if path == "/mcp":
                     return self.mcp()
+                if path in ("/register", "/token", "/authorize"):
+                    return self.oauth(path)
                 self.write("POST", path)
 
             def do_PATCH(self) -> None:  # noqa: N802
@@ -352,7 +397,8 @@ class WebServer:
 
             def mcp(self) -> None:
                 if not self.bearer():
-                    return self.send(401, {"error": "LOGIN"}, {"WWW-Authenticate": "Bearer"})
+                    where = f"{self.base()}/.well-known/oauth-protected-resource"
+                    return self.send(401, {"error": "LOGIN"}, {"WWW-Authenticate": f'Bearer resource_metadata="{where}"'})
                 try:
                     message = json.loads(self.body() or b"null")
                 except (ValueError, Reply):
@@ -366,6 +412,51 @@ class WebServer:
                 if reply is None:
                     return self.send(202)
                 self.send(200, reply)
+
+            def oauth(self, path: str) -> None:
+                try:
+                    raw = self.body()
+                except Reply as r:
+                    return self.send(r.status, r.body)
+                try:
+                    if path == "/register":
+                        try:
+                            data = json.loads(raw or b"{}")
+                        except ValueError:
+                            raise oauth.OAuthError("invalid_client_metadata", "the body is not JSON") from None
+                        return self.send(201, oauth.register(oauth.key(web.cfg.home), data))
+                    form = {k: v[-1] for k, v in parse_qs(raw.decode("utf-8", "replace")).items()}
+                    if path == "/token":
+                        return self.send(200, oauth.exchange(web.grant_key(), form))
+                    return self.authorize(form, posted=True)
+                except oauth.OAuthError as exc:
+                    self.send(exc.status, exc.body())
+
+            def authorize(self, params: dict[str, str], *, posted: bool = False) -> None:
+                """The consent page (GET), and the user's answer to it (POST)."""
+                try:
+                    found = oauth.check_request(oauth.key(web.cfg.home), params)
+                except oauth.OAuthError as exc:
+                    return self.send(400, exc.body())
+                language = "zh-CN" if (self.headers.get("Accept-Language") or "").lower().startswith("zh") else "en"
+                signed_in = self.signed_in()
+
+                def back(**answer: str) -> None:
+                    target = params["redirect_uri"]
+                    extra = {**answer, **({"state": params["state"]} if "state" in params else {})}
+                    self.send(302, None, {"Location": target + ("&" if "?" in target else "?") + urlencode(extra)})
+
+                if posted and params.get("decision") == "deny":
+                    return back(error="access_denied")
+                if posted and params.get("decision") == "allow":
+                    given = params.get("password", "").strip()
+                    token = load_token(web.cfg.home)
+                    by_token = token is not None and given and hmac.compare_digest(given.encode(), token.encode())
+                    grant_key = web.grant_key()
+                    if grant_key and (signed_in or by_token or check_password(web.cfg.home, given)):
+                        return back(code=oauth.issue_code(grant_key, params))
+                page = consent_page(found["name"], params, ask_password=not signed_in, failed=posted, language=language)
+                self.send(200, page, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"})
 
             def cookie(self, value: str, max_age: int) -> str:
                 return (f"{COOKIE}={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax"

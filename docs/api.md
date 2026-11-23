@@ -26,6 +26,10 @@ Authorization: Bearer <token or password>
 A request with this header needs nothing else (no cookie, no `X-TM-Request`). A password that
 matched is remembered until it changes, so only an agent's first call checks it the slow way.
 
+A client that cannot send a header of its own (ChatGPT's connectors, for one) signs in with OAuth
+instead, and its access token works as a third Bearer value beside the token and the password; see
+[MCP](#mcp).
+
 ## What a write is
 
 A write through the API is your own edit, as if you made it on the page or with `--human`: it
@@ -84,7 +88,7 @@ name them `due_date` and `follow_up_date`. The material, delegation and status r
 
 | Status | Body |
 |---|---|
-| 401 | `{"error": "LOGIN"}`: no token or password, or not the current one |
+| 401 | `{"error": "LOGIN"}`: no token, password or OAuth access token, or not a current one |
 | 400, 403, 404, 409 | `{"error": "<CODE>", "details": [...]}`, as the command line prints it (409: e.g. a request id reused for other words) |
 | 503 | `{"error": "BUSY"}`: the workspace is being installed or restored |
 
@@ -94,7 +98,7 @@ answers 200 with the refused fields under `rejected`.
 ## MCP
 
 `POST /mcp` is an MCP server (Streamable HTTP, JSON responses) with the tools above, signed in
-with the same Bearer token or password.
+with the same Bearer token or password, or with OAuth for clients that ask for it.
 
 Claude Code:
 
@@ -128,7 +132,18 @@ mcp_servers:
       Authorization: Bearer ${TODO_MANAGER_TOKEN}
 ```
 
-Clients that only sign in with OAuth (no header of their own) cannot connect yet.
+ChatGPT and other clients that only sign in with OAuth: give them `https://todo.example.com/mcp`
+and choose OAuth. The client registers itself, then opens a page of Todo Manager that asks you to
+allow it: enter your web password (or the token), or just press Allow when this browser is signed
+in to the Web UI. It then renews its access on its own.
+
+- Access tokens last an hour and refresh tokens 90 days.
+- A new web token or password signs every OAuth client out, as it does browsers and agents; the
+  client asks you to allow it again.
+- Nothing about the clients is stored: their registration and tokens are signed with
+  `state/oauth-key`. Deleting that file signs them out and makes them register again.
+- Discovery: `/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server`;
+  endpoints `/register`, `/authorize` and `/token` (authorization code with PKCE S256, refresh).
 
 ## Skills
 

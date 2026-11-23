@@ -282,5 +282,10 @@
   "project.none_mine": "Nothing for me",
   "project.recent_joiner": ", ",
   "project.recent_window": "Last {days} days: {what}",
-  "project.latest": " · latest: {title} ({date})"
+  "project.latest": " · latest: {title} ({date})",
+  "web.consent.ask": "Allow {name} to read and change your Todo Manager?",
+  "web.consent.password": "Password",
+  "web.consent.allow": "Allow",
+  "web.consent.cancel": "Cancel",
+  "web.consent.failed": "That password is not right"
 }
