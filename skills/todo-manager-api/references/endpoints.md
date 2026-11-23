@@ -1,8 +1,9 @@
 # Todo Manager API: every operation
 
 `tm` is the curl function from SKILL.md. `{id}` is a task (`tsk_...`), project (`prj_...`),
-delegation (`dlg_...`), delivery (`dlv_...`) or source item (`src_...`) id. The MCP tool of each
-operation has the name in its heading and takes the same fields as arguments.
+delegation (`dlg_...`), delivery (`dlv_...`) or source item (`src_...`) id. The heading names the MCP
+tool that does each operation, with the same fields as arguments: `show` reads any id, `search`
+also searches the material, `message_delegation` also answers and approves (`kind`).
 
 ## Reading
 
@@ -13,25 +14,25 @@ Tasks grouped by what each needs (`decide`, `mine`, `agent_wait`, `agent_run`, `
 Task cards: `id, title, kind, status, next_actor, project, next_step, waiting_on, due, follow_up,
 snooze_until, focus, ...`. Without `closed`, open tasks only.
 
-### show_task: `GET /api/tasks/{id}`
+### show: `GET /api/tasks/{id}`
 The card plus `summary, responsibility, done_criteria, due_basis, sources` (with their words),
 `thread` (comments, replies, deliveries), `agent_work, agent_question, notes, links, history`.
 
-### list_projects: `GET /api/projects` · show_project: `GET /api/projects/{id}`
+### overview: `GET /api/projects` · show: `GET /api/projects/{id}`
 
 ### search: `GET /api/search?q=words`
 `{tasks, projects, sources}` containing the words.
 
-### show_delivery: `GET /api/deliveries/{id}`
+### show: `GET /api/deliveries/{id}`
 A delivered version: its notes (`body`) and `version.files`; a file is
 `GET /api/deliveries/{id}/files/{n}`.
 
-### list_delegations: `GET /api/delegations` · show_delegation: `GET /api/delegations/{id}`
+### list_delegations: `GET /api/delegations` · show: `GET /api/delegations/{id}`
 
-### search_sources: `GET /api/sources?q=words&mine=true&since=2026-11-01&limit=20`
+### search: `GET /api/sources?q=words&mine=true&since=2026-11-01&limit=20`
 Stored mail, Slack and GitHub items with an excerpt each; `mine=true`: what the user wrote.
 
-### show_source: `GET /api/sources/{id}`
+### show: `GET /api/sources/{id}`
 One item with its full text (`body`).
 
 ### status: `GET /api/status?details=true`
@@ -110,12 +111,12 @@ a Notion comment.
 ```
 Kinds: `supplement, revision, pause, resume, cancel, accept`.
 
-### answer_delegation: `POST /api/delegations/{id}/answer`
+### message_delegation, `kind` answer: `POST /api/delegations/{id}/answer`
 ```json
 {"body": "Yes, send it to Alice only", "approve": ["send_email:to Alice only"]}
 ```
 
-### approve_delivery: `POST /api/delegations/{id}/approve`
+### message_delegation, `kind` approve: `POST /api/delegations/{id}/approve`
 ```json
 {"delivery": "dlv_xxx", "action": "send_email", "detail": "to Alice only"}
 ```

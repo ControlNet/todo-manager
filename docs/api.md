@@ -41,18 +41,20 @@ once. Without a key, every call applies.
 
 ## Operations
 
-Reads take URL parameters; writes take a JSON body. The MCP tool of each is named in the first
-column.
+Reads take URL parameters; writes take a JSON body. The first column names the MCP tool that does
+each: 15 tools, as some do several operations. `show` reads anything by its id (`tsk_`, `prj_`, `dlg_`,
+`dlv_`, `src_`), `search` also searches the material, and `message_delegation` also answers and
+approves (`kind`).
 
 | Tool | Method and path | What it does |
 |---|---|---|
 | `overview` | `GET /api/home` | Tasks grouped by what each needs, counts, projects |
 | `list_tasks` | `GET /api/tasks?project=&closed=` | Open tasks as cards (`closed=true`: also closed ones) |
-| `show_task` | `GET /api/tasks/{id}` | A task with its sources, conversation, agent work and history |
-| `list_projects` | `GET /api/projects` | Projects with open task counts |
-| `show_project` | `GET /api/projects/{id}` | A project and its tasks |
+| `show` | `GET /api/tasks/{id}` | A task with its sources, conversation, agent work and history |
+| `overview` | `GET /api/projects` | Projects with open task counts |
+| `show` | `GET /api/projects/{id}` | A project and its tasks |
 | `search` | `GET /api/search?q=` | Tasks, projects and material containing the words |
-| `show_delivery` | `GET /api/deliveries/{id}` | A version an agent delivered (files: `/api/deliveries/{id}/files/{n}`) |
+| `show` | `GET /api/deliveries/{id}` | A version an agent delivered (files: `/api/deliveries/{id}/files/{n}`) |
 | `act_on_task` | `POST /api/tasks/{id}/act` | A button of the page: `{"action": "done"}`, see below |
 | `comment_on_task` | `POST /api/tasks/{id}/comment` | `{"text": "...", "to": "hermes" \| "agent"}`, as a Notion comment |
 | `create_task` | `POST /api/tasks` | `{"title", "project", "set": {...}, "evidence": [...]}` |
@@ -61,13 +63,13 @@ column.
 | `update_project` | `PATCH /api/projects/{id}` | `{"set": {...}, "repos_add", "repos_remove"}` |
 | `record_feedback` | `POST /api/feedback` | `{"said": "...", "scope": "task:<id>"}`: for the next feedback run to interpret |
 | `list_delegations` | `GET /api/delegations` | Agent work in progress |
-| `show_delegation` | `GET /api/delegations/{id}` | Messages, sub-cards, deliveries, approvals |
+| `show` | `GET /api/delegations/{id}` | Messages, sub-cards, deliveries, approvals |
 | `create_delegation` | `POST /api/delegations` | `{"task", "brief", "allow": ["read", "analyze", "draft"]}` |
 | `message_delegation` | `POST /api/delegations/{id}/messages` | `{"kind": "supplement" \| "revision" \| "pause" \| "resume" \| "cancel" \| "accept", "body"}` |
-| `answer_delegation` | `POST /api/delegations/{id}/answer` | `{"body", "approve": ["send_email:to Alice only"], "question"}` |
-| `approve_delivery` | `POST /api/delegations/{id}/approve` | `{"delivery", "action", "detail"}` |
-| `search_sources` | `GET /api/sources?q=&mine=&since=&limit=` | Mail, Slack and GitHub material containing the words |
-| `show_source` | `GET /api/sources/{id}` | One item with its full text |
+| `message_delegation` | `POST /api/delegations/{id}/answer` | `{"body", "approve": ["send_email:to Alice only"], "question"}` |
+| `message_delegation` | `POST /api/delegations/{id}/approve` | `{"delivery", "action", "detail"}` |
+| `search` | `GET /api/sources?q=&mine=&since=&limit=` | Mail, Slack and GitHub material containing the words |
+| `show` | `GET /api/sources/{id}` | One item with its full text |
 | `status` | `GET /api/status?details=` | Counts, waiting material, agent work, last runs, problems |
 
 `act_on_task` actions: `done`, `todo` (mine), `cancel`, `reopen`, `agent` (hand to agent work),

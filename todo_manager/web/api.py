@@ -1,5 +1,5 @@
 """The API's operations: one table read by the HTTP routes (``/api/*``, docs/api.md) and by the
-MCP tools (``/mcp``). An operation only turns its arguments into a call of what already answers
+MCP tools (``/mcp``), where a few tools each stand for several operations (``MERGED``). An operation only turns its arguments into a call of what already answers
 it: the page's own ``views`` and ``actions``, or ``queries`` and ``ops`` as the command line
 calls them. A write that is not one of the page's buttons is the user's own edit (``origin`` api).
 """
@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import unquote
 
-from .. import delegation, ops, queries, store
+from .. import delegation, ids, ops, queries, store
 from ..config import Config
 from . import actions, views
 
@@ -106,15 +106,15 @@ OPERATIONS: list[Op] = [
        {"project": STRING, "closed": BOOLEAN}),
     Op("show_task", "GET", "/api/tasks/{id}",
        "One task: its fields, sources with their words, the conversation, agent work and history.",
-       lambda c, cfg, a: _found(views.task_detail(c, cfg, a["id"]), a["id"])),
+       lambda c, cfg, a: _found(views.task_detail(c, cfg, a["id"]), a["id"]), tool=False),
     Op("list_projects", "GET", "/api/projects", "Projects with their open task counts.",
-       lambda c, cfg, a: views.project_list(c, cfg)),
+       lambda c, cfg, a: views.project_list(c, cfg), tool=False),
     Op("show_project", "GET", "/api/projects/{id}", "One project and its tasks.",
-       lambda c, cfg, a: _found(views.project_detail(c, cfg, a["id"]), a["id"])),
+       lambda c, cfg, a: _found(views.project_detail(c, cfg, a["id"]), a["id"]), tool=False),
     Op("search", "GET", "/api/search", "Tasks, projects and source material containing the words.",
-       lambda c, cfg, a: views.search(c, cfg, str(a.get("q") or "")[:200]), {"q": STRING}, ("q",)),
+       lambda c, cfg, a: views.search(c, cfg, str(a.get("q") or "")[:200]), {"q": STRING}, ("q",), tool=False),
     Op("show_delivery", "GET", "/api/deliveries/{id}", "One version an agent delivered, with its notes and files.",
-       lambda c, cfg, a: _found(views.delivery(c, a["id"]), a["id"])),
+       lambda c, cfg, a: _found(views.delivery(c, a["id"]), a["id"]), tool=False),
     Op("delivery_file", "GET", "/api/deliveries/{id}/files/{index}", "A delivered file.", _delivery_file, tool=False),
     # ---------------------------------------------------------------- the page's writes
     Op("act_on_task", "POST", "/api/tasks/{id}/act",
@@ -171,7 +171,7 @@ OPERATIONS: list[Op] = [
        lambda c, cfg, a: queries.delegate_list(c)),
     Op("show_delegation", "GET", "/api/delegations/{id}",
        "One piece of agent work: messages, sub-cards, deliveries and approvals.",
-       lambda c, cfg, a: _found(queries.delegate_show(c, a["id"]), a["id"])),
+       lambda c, cfg, a: _found(queries.delegate_show(c, a["id"]), a["id"]), tool=False),
     Op("create_delegation", "POST", "/api/delegations",
        "Hand a task to an agent on the Hermes Kanban board. allow names what it may do (read, analyze, draft;"
        " an external action such as send_email only when the user asked for it).",
@@ -186,30 +186,73 @@ OPERATIONS: list[Op] = [
        lambda c, cfg, a: ops.delegate_message(c, cfg, _ctx(a), a["id"], kind=a.get("kind") or "",
                                               body=a.get("body"), delivery=a.get("delivery")),
        {"kind": {"type": "string", "enum": list(ops.MESSAGE_KINDS)}, "body": STRING, "delivery": STRING, "key": KEY},
-       ("kind",)),
+       ("kind",), tool=False),
     Op("answer_delegation", "POST", "/api/delegations/{id}/answer",
        "Answer the agent's open question; approve lists external actions (action[:detail]) the user allows.",
        lambda c, cfg, a: ops.delegate_answer(c, cfg, _ctx(a), a["id"], body=a.get("body") or "",
                                              approve=_list(a.get("approve")) or None, question=a.get("question")),
-       {"body": STRING, "approve": STRINGS, "question": STRING, "key": KEY}, ("body",)),
+       {"body": STRING, "approve": STRINGS, "question": STRING, "key": KEY}, ("body",), tool=False),
     Op("approve_delivery", "POST", "/api/delegations/{id}/approve",
        "Approve an external action for a delivered version.",
        lambda c, cfg, a: ops.delegate_approve(c, cfg, _ctx(a), a["id"], delivery=a.get("delivery") or "",
                                               action=a.get("action") or "", detail=a.get("detail")),
-       {"delivery": STRING, "action": STRING, "detail": STRING, "key": KEY}, ("delivery", "action")),
+       {"delivery": STRING, "action": STRING, "detail": STRING, "key": KEY}, ("delivery", "action"), tool=False),
     # ---------------------------------------------------------------- material and status
     Op("search_sources", "GET", "/api/sources",
        "Stored mail, Slack and GitHub material containing the words (mine=true: what the user wrote).",
        lambda c, cfg, a: queries.source_search(c, str(a.get("q") or ""), mine=_flag(a.get("mine")),
                                                since=a.get("since"), limit=int(a.get("limit") or 20)),
-       {"q": STRING, "mine": BOOLEAN, "since": STRING, "limit": INTEGER}, ("q",)),
+       {"q": STRING, "mine": BOOLEAN, "since": STRING, "limit": INTEGER}, ("q",), tool=False),
     Op("show_source", "GET", "/api/sources/{id}", "One item of source material with its full text.",
-       lambda c, cfg, a: _found(queries.source_show(c, a["id"]), a["id"])),
+       lambda c, cfg, a: _found(queries.source_show(c, a["id"]), a["id"]), tool=False),
     Op("status", "GET", "/api/status", "Task counts, waiting material, agent work, last runs and problems.",
        lambda c, cfg, a: queries.status(c, cfg, details=_flag(a.get("details")))),
 ]
 
-TOOLS = {op.name: op for op in OPERATIONS if op.tool}
+OPS = {op.name: op for op in OPERATIONS}
+SHOWN = {ids.PREFIXES["task"]: "show_task", ids.PREFIXES["project"]: "show_project",
+         ids.PREFIXES["delegation"]: "show_delegation", ids.PREFIXES["delivery"]: "show_delivery",
+         ids.PREFIXES["source"]: "show_source"}
+ANSWERS = {"answer": "answer_delegation", "approve": "approve_delivery"}
+
+
+def _show(c: sqlite3.Connection, cfg: Config, a: dict[str, Any]) -> Any:
+    name = SHOWN.get(str(a["id"]).partition("_")[0])
+    if name is None:
+        raise ops.OpError("NOT_FOUND", a["id"])
+    return OPS[name].run(c, cfg, a)
+
+
+def _search(c: sqlite3.Connection, cfg: Config, a: dict[str, Any]) -> Any:
+    found = OPS["search_sources"].run(c, cfg, a)
+    return {**OPS["search"].run(c, cfg, a), "sources": found["items"], "content_role": found["content_role"]}
+
+
+def _message(c: sqlite3.Connection, cfg: Config, a: dict[str, Any]) -> Any:
+    return OPS[ANSWERS.get(a.get("kind"), "message_delegation")].run(c, cfg, a)
+
+
+# A client chooses among fewer tools: some are several operations, told apart by the id or the kind.
+MERGED: list[Op] = [
+    Op("show", "", "",
+       "Read anything by its id: a task (tsk_) with its sources, conversation, agent work and history; a project"
+       " (prj_) and its tasks; agent work (dlg_) with messages, sub-cards, deliveries and approvals; a delivered"
+       " version (dlv_); source material (src_) with its full text.",
+       _show, {"id": STRING}, ("id",)),
+    Op("search", "", "",
+       "Tasks, projects and stored mail, Slack and GitHub material containing the words (mine=true: material the"
+       " user wrote; since: YYYY-MM-DD).",
+       _search, {"q": STRING, "mine": BOOLEAN, "since": STRING, "limit": INTEGER}, ("q",)),
+    Op("message_delegation", "", "",
+       "Tell agent work something: supplement, revision, pause, resume, cancel or accept (body, delivery); answer"
+       " its open question (body; approve lists external actions action[:detail] the user allows; question);"
+       " approve an external action for a delivered version (delivery, action, detail).",
+       _message, {"id": STRING, "kind": {"type": "string", "enum": [*ops.MESSAGE_KINDS, *ANSWERS]}, "body": STRING,
+                  "delivery": STRING, "approve": STRINGS, "question": STRING, "action": STRING, "detail": STRING,
+                  "key": KEY}, ("id", "kind")),
+]
+
+TOOLS = {op.name: op for op in [*MERGED, *OPERATIONS] if op.tool}
 
 
 def route(method: str, path: str) -> tuple[Op, dict[str, str]] | None:
