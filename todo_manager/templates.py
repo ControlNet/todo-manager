@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from importlib import resources
+from pathlib import Path
 
 # Commits whose template text is kept under hermes_assets/legacy/<dir>/<stem>.<commit>.md, newest first.
 EARLIER = {
@@ -12,9 +13,13 @@ EARLIER = {
     "workspace/AGENTS.md": ("a820251", "7718c03", "b99b192"),
 }
 WORKSPACE_AGENTS = {"en": "workspace/AGENTS.md", "zh-CN": "workspace/AGENTS.zh-CN.md"}
+# The skill sits with the repo's other skills, where `npx skills` finds it; the installer runs from this checkout.
+SKILL = Path(__file__).resolve().parents[1] / "skills" / "todo-manager" / "SKILL.md"
 
 
 def asset(name: str) -> str:
+    if name == "skill/SKILL.md":
+        return SKILL.read_text(encoding="utf-8")
     if name.startswith("cron/"):
         name = "prompts/" + name.split("/", 1)[1]
     return resources.files("todo_manager.hermes_assets").joinpath(name).read_text(encoding="utf-8")

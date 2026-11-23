@@ -10,7 +10,6 @@ import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from importlib import resources
 from pathlib import Path
 from typing import Any, Callable
 
@@ -40,10 +39,7 @@ def generated_mark(text: str, mark: str) -> bool:
     return mark in text or (mark == SCRIPT_MARK and legacy in text)
 
 
-def asset(name: str) -> str:
-    if name.startswith("cron/"):
-        name = "prompts/" + name.split("/", 1)[1]
-    return resources.files("todo_manager.hermes_assets").joinpath(name).read_text(encoding="utf-8")
+asset = templates.asset
 
 
 def _read(path: Path) -> str | None:

@@ -6,6 +6,7 @@ change to where it takes effect (conventions in AGENTS.md, collection settings t
 scanner check is in tests/integration/test_hermes_prompts.py."""
 
 import unittest
+from pathlib import Path
 
 from todo_manager import hermes_install
 
@@ -55,6 +56,16 @@ class ScheduledRunAuthorityTests(unittest.TestCase):
         for name in ("workspace/AGENTS.md", "workspace/AGENTS.zh-CN.md"):
             self.assertIn("PREFERENCES.md", flat(name))
 
+
+class SkillFolderTests(unittest.TestCase):
+    def test_both_skills_sit_in_skills_named_as_their_folder(self):
+        root = Path(__file__).resolve().parents[1] / "skills"
+        names = {}
+        for path in root.glob("*/SKILL.md"):
+            names[path.parent.name] = path.read_text(encoding="utf-8").split("---")[1].split("name:")[1].split()[0]
+        self.assertEqual(names, {"todo-manager": "todo-manager", "todo-manager-api": "todo-manager-api"})
+        self.assertEqual(hermes_install.asset("skill/SKILL.md"),
+                         (root / "todo-manager" / "SKILL.md").read_text(encoding="utf-8"), "the installer's skill")
 
 
 class LaterStartTests(unittest.TestCase):

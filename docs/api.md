@@ -132,8 +132,8 @@ Clients that only sign in with OAuth (no header of their own) cannot connect yet
 
 ## Skills
 
-Two skills teach an agent to use Todo Manager, in the [skills](https://github.com/vercel-labs/skills)
-format:
+Two skills in `skills/` teach an agent to use Todo Manager, in the
+[skills](https://github.com/vercel-labs/skills) format:
 
 - `todo-manager`: the command line, on the machine where Todo Manager runs (`todo-manager install`
   also installs it into Hermes).
