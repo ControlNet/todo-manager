@@ -11,19 +11,20 @@ buttons.
 
 ## Signing in
 
-Agents use the Web UI's sign-in token as a Bearer token:
+Agents sign in with what signs in to the Web UI, its token or your password, as a Bearer token:
 
 ```bash
-todo-manager web token          # print it
+todo-manager web token          # print the token
 todo-manager web token --new    # replace it: browsers and agents sign in again
+todo-manager web password       # set or change the password (also signs them out)
 ```
 
 ```
-Authorization: Bearer <token>
+Authorization: Bearer <token or password>
 ```
 
-A request with this header needs nothing else (no cookie, no `X-TM-Request`). The password, if you
-set one, is for the sign-in page only.
+A request with this header needs nothing else (no cookie, no `X-TM-Request`). A password that
+matched is remembered until it changes, so only an agent's first call checks it the slow way.
 
 ## What a write is
 
@@ -83,7 +84,7 @@ name them `due_date` and `follow_up_date`. The material, delegation and status r
 
 | Status | Body |
 |---|---|
-| 401 | `{"error": "LOGIN"}`: no token, or not the current one |
+| 401 | `{"error": "LOGIN"}`: no token or password, or not the current one |
 | 400, 403, 404, 409 | `{"error": "<CODE>", "details": [...]}`, as the command line prints it (409: e.g. a request id reused for other words) |
 | 503 | `{"error": "BUSY"}`: the workspace is being installed or restored |
 
@@ -93,7 +94,7 @@ answers 200 with the refused fields under `rejected`.
 ## MCP
 
 `POST /mcp` is an MCP server (Streamable HTTP, JSON responses) with the tools above, signed in
-with the same Bearer token.
+with the same Bearer token or password.
 
 Claude Code:
 

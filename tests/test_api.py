@@ -49,6 +49,17 @@ class AuthTests(ApiCase):
         server.new_token(self.cfg.home)   # a new token signs agents out as it signs browsers out
         self.assertEqual(self.call("GET", f"/api/tasks/{self.tid}")[0], 401)
 
+    def test_the_web_password_signs_an_agent_in_too(self):
+        server.set_password(self.cfg.home, "plum orchard 42")
+        self.assertEqual(self.call("GET", "/api/home", token="plum orchard 42")[0], 200)
+        self.assertEqual(self.call("GET", "/api/home", token="plum orchard 42")[0], 200)   # remembered
+        self.assertEqual(self.call("GET", "/api/home", token="plum orchard 41")[0], 401)
+        self.assertEqual(self.call("GET", "/api/home")[0], 200)   # the token still works
+        server.set_password(self.cfg.home, "new password 7")
+        self.assertEqual(self.call("GET", "/api/home", token="plum orchard 42")[0], 401)
+        server.clear_password(self.cfg.home)
+        self.assertEqual(self.call("GET", "/api/home", token="new password 7")[0], 401)
+
     def test_a_bearer_write_needs_no_page_header_but_a_cookie_write_still_does(self):
         status, _ = self.call("POST", f"/api/tasks/{self.tid}/act", {"action": "todo"})
         self.assertEqual(status, 200)

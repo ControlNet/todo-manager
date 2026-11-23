@@ -7,9 +7,9 @@ login form takes either once and sets a session cookie derived from both, so a n
 password signs every browser out. Writes (POST under ``/api/``) also need the ``X-TM-Request`` header, which a page
 of another site cannot send without the browser asking first.
 
-Agents (docs/api.md) send the web token as ``Authorization: Bearer``, on ``/api/*`` and on the MCP
-endpoint ``/mcp``; such a request carries no cookie, so its writes need no header. The routes and
-the MCP tools are the operations of ``api.OPERATIONS``.
+Agents (docs/api.md) send the web token or the password as ``Authorization: Bearer``, on
+``/api/*`` and on the MCP endpoint ``/mcp``; such a request carries no cookie, so its writes need
+no header. The routes and the MCP tools are the operations of ``api.OPERATIONS``.
 
 Every request opens its own database connection under the shared workspace lock (like a
 terminal command); the daemon's sync sees the writes as changes from another connection and
@@ -137,10 +137,25 @@ class WebServer:
                                            int(cfg.get("web.port", 8656) if port is None else port)), self._handler())
         self.server.daemon_threads = True
         self.thread: threading.Thread | None = None
+        self.password_seen: tuple[str, str] | None = None   # (stored hash, digest of a password that matched)
 
     @property
     def port(self) -> int:
         return self.server.server_address[1]
+
+    def password_ok(self, given: str) -> bool:
+        """The web password, sent by an agent on every call: one that matched is remembered (as a
+        digest, until the password changes) so that only its first call pays for scrypt."""
+        stored = load_password(self.cfg.home)
+        if stored is None:
+            return False
+        seen = (stored, hashlib.sha256(given.encode()).hexdigest())
+        if self.password_seen == seen:
+            return True
+        if check_password(self.cfg.home, given):
+            self.password_seen = seen
+            return True
+        return False
 
     def start(self) -> None:
         self.thread = threading.Thread(target=self.server.serve_forever, name="web", daemon=True)
@@ -199,11 +214,15 @@ class WebServer:
                         or '"https"' in (self.headers.get("Cf-Visitor") or ""))
 
             def bearer(self) -> bool:
-                """An agent's request: the web token as ``Authorization: Bearer``."""
-                token = load_token(web.cfg.home)
+                """An agent's request: the web token, or the password, as ``Authorization: Bearer``."""
                 scheme, _, given = (self.headers.get("Authorization") or "").partition(" ")
-                return (token is not None and scheme.lower() == "bearer"
-                        and hmac.compare_digest(given.strip().encode(), token.encode()))
+                given = given.strip()
+                if scheme.lower() != "bearer" or not given:
+                    return False
+                token = load_token(web.cfg.home)
+                if token is not None and hmac.compare_digest(given.encode(), token.encode()):
+                    return True
+                return web.password_ok(given)
 
             def signed_in(self) -> bool:
                 key = session_key(web.cfg.home)

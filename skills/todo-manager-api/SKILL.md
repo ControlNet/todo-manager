@@ -10,7 +10,8 @@ Todo Manager keeps the user's tasks (mirrored to Notion and its Web UI). This sk
 over HTTP with two environment variables:
 
 - `TODO_MANAGER_URL`: the Web UI's address, e.g. `https://todo.example.com`
-- `TODO_MANAGER_TOKEN`: its sign-in token (`todo-manager web token` on the machine running it)
+- `TODO_MANAGER_TOKEN`: what signs in to the Web UI: its token (`todo-manager web token` on the
+  machine running it) or the user's web password
 
 Never print, log or echo the token. If either variable is missing, ask the user to set it.
 
