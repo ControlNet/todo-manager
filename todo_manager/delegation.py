@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -691,6 +692,38 @@ def sync_cards(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, A
             child_links.sync(conn, cfg, kb, get(conn, d["id"]), quiet=quiet)
         except KanbanError as exc:
             _failed(stats, "errors", f"child sync failed: {exc}")
+    return stats
+
+
+def archive_settled(conn: sqlite3.Connection, cfg: Config, kb: Kanban) -> dict[str, Any]:
+    """Work that ended ``kanban.archive_after_days`` ago leaves the board with its sub-cards. Its
+    deliveries are already in the workspace and new work on the Task gets a new card, so the
+    delegation stays as it ended; the card sync no longer reads it."""
+    stats: dict[str, Any] = {"archived": 0, "errors": 0}
+    days = float(cfg.get("kanban.archive_after_days", 7))
+    if days <= 0:
+        return stats
+    cutoff = clock.iso(clock.now() - timedelta(days=days))
+    rows = conn.execute("SELECT id, card_id FROM delegations WHERE card_id IS NOT NULL AND status IN ('ended','cancelled')"
+                        " AND COALESCE(card_status, '') != 'archived' AND updated_at <= ?"
+                        " AND NOT COALESCE(" + unfinished_sql() + ", 0)"   # cancel_state is NULL when unset
+                        " AND NOT EXISTS (SELECT 1 FROM delegation_messages m WHERE m.delegation_id=delegations.id"
+                        " AND m.status IN ('pending','sending','waiting_capacity'))"
+                        " ORDER BY updated_at LIMIT 20", (cutoff,)).fetchall()   # one bridge call per card: the backlog over a few passes
+    for row in rows:
+        children = [r["card_id"] for r in conn.execute("SELECT card_id FROM delegation_children WHERE delegation_id=?"
+                                                       " AND status='done'", (row["id"],))]
+        try:
+            for card in [*children, row["card_id"]]:
+                kb.archive(card)
+        except KanbanError as exc:
+            _failed(stats, "errors", f"archive failed: {exc}")
+            continue
+        with tx(conn):
+            conn.execute("UPDATE delegation_children SET status='archived' WHERE delegation_id=? AND status='done'",
+                         (row["id"],))
+            _set(conn, row["id"], card_status="archived")
+        stats["archived"] += 1
     return stats
 
 

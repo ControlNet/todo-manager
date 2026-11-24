@@ -271,6 +271,7 @@ Values are set with `todo-manager config set <key> <value>` (comments and other 
 | `notion.body_reads_per_run` | 10 | page bodies read per feedback run after an edit by someone other than the bot |
 | `writing.skills` | `[]` | Hermes skills the agents load just before writing what you read (task fields, comments, agent work results), e.g. `ccf-humanization` |
 | `kanban.max_retries` | 1 | Hermes per-card failure breaker; cards allowed an external action always get 1 |
+| `kanban.archive_after_days` | 7 | cards of agent work that ended this many days ago are archived from the board; 0 = never |
 | `hermes.model`, `hermes.provider`, `hermes.reasoning_effort` | unset (Hermes' defaults) | set on the cron jobs by `install`; a value you change in Hermes is kept |
 | `email.labels` | false | label mail linked to tasks in Gmail (see below) |
 | `email.label_root` | `Todo` | top-level Gmail label they go under |

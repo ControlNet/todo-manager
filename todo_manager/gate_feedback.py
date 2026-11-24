@@ -127,8 +127,10 @@ def kanban_send_steps(step: Callable[[str, Step], Any], conn: sqlite3.Connection
 
 
 def kanban_read_steps(step: Callable[[str, Step], Any], conn: sqlite3.Connection, cfg: Config, kanban: Any) -> None:
-    """Board -> local: card events (questions, deliveries, failures) and the board's switches."""
+    """Board -> local: card events (questions, deliveries, failures) and the board's switches;
+    then cards of work that ended a while ago are archived."""
     step("kanban_cards", lambda: delegation.sync_cards(conn, cfg, kanban))
+    step("kanban_archive", lambda: delegation.archive_settled(conn, cfg, kanban))
     step("kanban_settings", lambda: delegation.observe_settings(conn, kanban))
 
 

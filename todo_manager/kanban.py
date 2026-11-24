@@ -469,6 +469,7 @@ class FakeKanban:
         return True
 
     def archive(self, card_id: str) -> bool:
+        self._maybe_fail("archive")
         card = self.cards[card_id]
         if card["status"] == "archived":
             return False

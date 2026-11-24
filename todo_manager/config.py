@@ -119,6 +119,7 @@ DEFAULTS: dict[str, Any] = {
         # could repeat an action whose outcome is unknown); 0 = Hermes' own default for the others.
         # Rate-limit requeues are not counted by Hermes. How many cards run at once is Hermes'.
         "max_retries": 1,
+        "archive_after_days": 7,  # cards of work that ended this long ago are archived; 0 = never
         "skills": [],  # Optional native worker skills, never the entire Todo skill by default
         "notify_platform": "",
         "notify_chat_id": "",

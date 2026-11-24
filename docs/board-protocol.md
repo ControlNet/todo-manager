@@ -54,6 +54,11 @@ Card status → delegation status: ready/todo/scheduled → `queued`; running �
 blocked/triage → `blocked` (or `paused` when we paused it); review → `review`; done → `ended`;
 archived → `cancelled`.
 
+Ended or cancelled work leaves the board `kanban.archive_after_days` (7) days later: its card and
+finished sub-cards are archived once nothing is still running under it and no message is on its
+way. The delegation keeps its state and its deliveries stay in the workspace; new work on the
+Task gets a new card.
+
 The Task's status is yours: card events never change it. The delegation's own state is the
 Task's "Agent work" column (queued, running, needs my answer, to review, delivered, paused,
 problem). One default links them: delegating makes the agent the Task's next actor; while the
