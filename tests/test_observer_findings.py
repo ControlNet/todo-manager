@@ -133,3 +133,57 @@ class DeliveredStageTests(WorkspaceCase):
     def test_the_prompt_keeps_a_delivered_stage(self):
         text = " ".join(hermes_install.asset("prompts/intake.md").split())
         self.assertIn("A message from before a delivery does not set the task back", text)
+
+
+class FeedbackWorkIsDelegatedTests(WorkspaceCase):
+    """Asked for a Gmail draft in a comment, the feedback run wrote it with its own tools: the task
+    kept "draft the reply" as its next step and showed no delivery."""
+
+    def test_work_the_user_asks_for_goes_to_a_delegation(self):
+        text = " ".join(hermes_install.asset("cron/feedback.md").split())
+        self.assertIn("Work the user asks for in feedback is agent work", text)
+        self.assertIn("never do it in this run with your own tools", text)
+
+
+class TaskLinkTests(WorkspaceCase):
+    """Two follow-ups linked from the original task linked back to the original in the Web UI."""
+
+    def test_a_link_points_at_the_other_task_from_either_end(self):
+        from todo_manager.web import views
+        first = store.create_task(self.conn, "Rehearsal", actor="human", origin="cli")
+        later = store.create_task(self.conn, "Second rehearsal", actor="human", origin="cli")
+        store.link_tasks(self.conn, later, first, "follow_up_of")
+        self.assertEqual([(l["task"], l["title"]) for l in views.task_detail(self.conn, self.cfg, first)["links"]],
+                         [(later, "Second rehearsal")])
+        self.assertEqual([l["task"] for l in views.task_detail(self.conn, self.cfg, later)["links"]], [first])
+
+
+class ProjectDecisionOutcomeTests(WorkspaceCase):
+    """A run's goal change to a project was refused as the user's own value; its decision still said
+    applied."""
+
+    def run_ctx(self):
+        self.add_items(mail("m1", "t1", "The paper deadline moved"))
+        clock.advance(minutes=61)
+        out, _ = gate_intake.run_gate(self.conn, self.cfg, [], [])
+        return run_ctx(self.conn, self.cfg, run_id_of(out))
+
+    def outcome(self, pid):
+        return self.conn.execute("SELECT outcome, detail FROM decisions WHERE op='update_project' AND target_id=?"
+                                 " ORDER BY rowid DESC", (pid,)).fetchone()
+
+    def test_a_refused_change_is_recorded_as_rejected_or_partial(self):
+        pid = store.create_project(self.conn, "Paper", origin="intake", actor="agent")
+        store.update_project(self.conn, pid, {"goal": "Submit in May"}, actor="human", origin="cli")
+        ctx = self.run_ctx()
+        version = store.get_project(self.conn, pid)["version"]
+        result = ops.project_update(self.conn, self.cfg, ctx, pid, changes={"goal": "Submit in June"},
+                                    based_on=version)
+        self.assertEqual(result["applied"], [])
+        outcome, detail = self.outcome(pid)
+        self.assertEqual(outcome, "rejected")
+        self.assertIn("goal", detail)
+        result = ops.project_update(self.conn, self.cfg, ctx, pid, changes={"goal": "Submit in June",
+                                                                           "status": "paused"}, based_on=version)
+        self.assertEqual(result["applied"], ["status"])
+        self.assertEqual(self.outcome(pid)[0], "partial")

@@ -22,6 +22,10 @@ agent work and recent thread.
   no list of what you did not do.
 - A change the user asked for: `todo-manager task update <task> --feedback <feedback id> --run <run> --set ...`
   (recorded as the user's own edit).
+- Work the user asks for in feedback is agent work, however small (a draft, a reply, a summary,
+  a document): create the delegation (below), so its result comes back to the task as a delivery.
+  This run changes Todo Manager only; never do it in this run with your own tools, and never reply
+  that it is done.
 - The user says the task now waits for someone ("submitted, now waiting for their approval"):
   status `waiting`, `waiting_on` and a `follow_up_date`: the date the user named, else a
   reasonable day to look again, with `due_basis` saying it is a suggested check, not a deadline.

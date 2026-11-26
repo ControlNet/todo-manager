@@ -562,6 +562,9 @@ def project_update(conn: sqlite3.Connection, cfg: Config, ctx: Ctx, project_id: 
                                           repos_add=repos_add or [], repos_remove=repos_remove or [])
         except store.StoreError as exc:
             raise OpError("INVALID", str(exc)) from None
+        if result.rejected:
+            conn.execute("UPDATE decisions SET outcome=?, detail=? WHERE id=?",
+                         ("partial" if result.applied else "rejected", dumps(result.rejected), did))
         handled = _link(conn, ctx, "project", project_id, evidence, did)
         effects.project_push(conn, project_id)
         return {"project": project_id, "applied": sorted(result.applied), "rejected": result.rejected,

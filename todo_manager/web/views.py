@@ -312,9 +312,9 @@ def task_detail(conn: sqlite3.Connection, cfg: Config, task_id: str) -> dict[str
             "pending_feedback": pending,
             "notes": notes["notes_text"] if notes else None,
             "notion_url": delegation._notion_url(conn, task),
-            "links": [{"task": l["other_task_id"], "kind": l["kind"],
-                       "title": (store.get_task(conn, l["other_task_id"]) or {}).get("title")}
-                      for l in store.task_links(conn, task_id)],
+            "links": [{"task": other, "kind": l["kind"], "title": (store.get_task(conn, other) or {}).get("title")}
+                      for l in store.task_links(conn, task_id)   # either end may be this task
+                      for other in [l["task_id"] if l["other_task_id"] == task_id else l["other_task_id"]]],
             "history": store.history(conn, "task", task_id)[-HISTORY_LIMIT:]}
 
 
