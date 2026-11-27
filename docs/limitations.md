@@ -160,6 +160,10 @@ Concrete, current limitations of this version. See [acceptance.md](acceptance.md
   merge, close (with its reason) or reopen is news for the task. A merge or close wakes the model
   at the next gate, without the quiet window or the hourly GitHub wake, so the task usually closes
   within about 20 minutes of the merge. A PR or issue named only as `#N` is not watched.
+  Your own comments come with no notification either: when a watched matter changed since the last
+  read, its new comments, reviews and inline comments are read too (two or three more requests),
+  so your reply to a review round reaches its task without waiting for the reviewer's next one.
+  Such a comment, like any other, waits for the quiet window and the hourly GitHub wake.
   GitHub notification emails read through Gmail do not say who opened the PR, so such an email
   still reaches the model (which can ignore it as `automated_notice`).
 - An event the user takes part in (meeting, review, seminar, workshop) is closed at the first intake

@@ -528,7 +528,18 @@ class GitHubWatchSource:
     ``watch_minutes`` each watched matter outside tracked repos (those read their events) costs one
     GET; a change of state (merged, closed with its reason, reopened), or a closed state when the
     matter is first watched, is an ``if_open_task`` event. Its id carries the state and its time,
-    so the same change is stored once even when another task watches the matter later."""
+    so the same change is stored once even when another task watches the matter later.
+
+    The user's own comments, replies to a review round included, likewise come with no
+    notification, so they used to arrive only with the next round. When a matter's ``updated_at``
+    moved since the last watch, its comments, reviews and inline comments since then are read as a
+    notification of a known matter reads them; a later notification repeating them is dropped
+    when stored (same id and version)."""
+
+    # The known-matter reading of the notification source, with the same item ids.
+    _context = GitHubNotificationSource._context
+    _pull_review_items = GitHubNotificationSource._pull_review_items
+    _is_bot = GitHubNotificationSource._is_bot
 
     name = "github"
     scope = "watched"
@@ -548,8 +559,11 @@ class GitHubWatchSource:
         return last is None or clock.now() - last >= timedelta(minutes=self.watch_minutes)
 
     def fetch(self, cursor: str | None, last_success_at: str | None = None) -> FetchResult:
-        previous = (json.loads(cursor) if cursor and cursor.startswith("{") else {}).get("states") or {}
+        started = clock.now()
+        last = json.loads(cursor) if cursor and cursor.startswith("{") else {}
+        previous, seen_before = last.get("states") or {}, last.get("seen") or {}
         states: dict[str, str] = {}
+        seen: dict[str, dict[str, Any]] = {}
         items: list[Item] = []
         for key in self.matters():
             m = re.fullmatch(r"github:([^/\s]+/[^#\s]+)#(\d+)", key)
@@ -562,6 +576,8 @@ class GitHubWatchSource:
                 if "HTTP 404" in str(exc) or "HTTP 410" in str(exc):   # deleted or no longer accessible
                     if key in previous:
                         states[key] = previous[key]
+                    if key in seen_before:
+                        seen[key] = seen_before[key]
                     continue
                 raise
             if not isinstance(thread, dict):
@@ -570,10 +586,22 @@ class GitHubWatchSource:
             merged_at = (pr or {}).get("merged_at")
             state = "merged" if merged_at else thread.get("state") or "?"
             states[key] = state
+            entry = seen_before.get(key)
+            updated = thread.get("updated_at") or ""
+            seen[key] = {"u": updated, "at": clock.iso(started), "b": _digest(thread.get("body"))}
+            if entry and updated != entry.get("u") and not _needs_context(entry, started):
+                is_pr = pr is not None
+                title = f"{'PullRequest' if is_pr else 'Issue'} {repo}#{number}: {thread.get('title')}"
+                url = thread.get("html_url") or f"https://github.com/{repo}/{'pull' if is_pr else 'issues'}/{number}"
+                meta = {"number": number, "state": state, "opener": (thread.get("user") or {}).get("login") or "?",
+                        "watched": True}
+                items.extend(self._context(repo, number, key, thread, "", title, url, meta, entry,
+                                           updated or clock.iso(started), started))
             if state == previous.get(key) or (key not in previous and state == "open"):
                 continue
             items.append(self._item(repo, number, key, thread, state, pr is not None, merged_at))
-        return FetchResult(scope=self.scope, items=items, cursor=json.dumps({"states": states}, sort_keys=True),
+        return FetchResult(scope=self.scope, items=items,
+                           cursor=json.dumps({"states": states, "seen": seen}, sort_keys=True),
                            meta={"watched": len(states), "poll_interval_minutes": self.watch_minutes})
 
     def _item(self, repo: str, number: int, key: str, thread: dict[str, Any], state: str, is_pr: bool,

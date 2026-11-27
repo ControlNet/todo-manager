@@ -115,6 +115,44 @@ class WatchSourceTests(WorkspaceCase):
         self.fetch()
         self.assertEqual(json.loads(self.cursor)["states"], {})
 
+    def test_the_users_own_reply_comes_without_a_notification(self):
+        """The user's answer to a review round came only with the reviewer's next round."""
+        self.api.issue(9, title="Runtime client", body="b", user="me-gh", created=ago(days=1), pr=True)
+        self.api.comment(9, 1, "rev", "Round 1: please split the tests", ago(hours=2))
+        self.fetch()
+        clock.advance(minutes=15)
+        self.api.comment(9, 2, "me-gh", "Round 1 fixed in abc123", ago(minutes=3))
+        [reply] = self.fetch().items
+        self.assertEqual((reply.kind, reply.route, reply.thread_key, reply.author_is_me, reply.external_id),
+                         ("comment", "batch", KEY, True, "comment:2"))
+        self.assertTrue(reply.title.startswith(f"PullRequest {REPO}#9"))
+        clock.advance(minutes=15)
+        self.assertEqual(self.fetch().items, [], "a reply is read once")
+
+    def test_reviews_and_inline_comments_since_the_last_watch(self):
+        self.api.issue(9, title="Runtime client", body="b", user="me-gh", created=ago(days=1), pr=True)
+        self.fetch()
+        clock.advance(minutes=15)
+        self.api.review(9, 5, "rev", "CHANGES_REQUESTED", "Round 2", ago(minutes=4))
+        self.api.review_comment(9, 6, "rev", "src/a.cs", "Build warning here", ago(minutes=4))
+        found = {(i.kind, i.external_id) for i in self.fetch().items}
+        self.assertEqual(found, {("review", "review:5"), ("comment", "review_comment:6")})
+
+    def test_an_unchanged_matter_costs_one_read(self):
+        self.api.issue(9, title="Runtime client", body="b", user="me-gh", created=ago(days=1), pr=True)
+        self.api.comment(9, 1, "rev", "Round 1", ago(hours=2))
+        self.fetch()
+        self.api.calls.clear()
+        clock.advance(minutes=15)
+        self.assertEqual(self.fetch().items, [])
+        self.assertEqual(self.api.calls, [f"repos/{REPO}/issues/9"])
+
+    def test_a_cursor_from_before_reads_no_comments_on_its_first_pass(self):
+        self.api.issue(9, title="Runtime client", body="b", user="me-gh", created=ago(days=1), pr=True)
+        self.api.comment(9, 1, "me-gh", "An older reply", ago(minutes=3))
+        self.cursor = json.dumps({"states": {KEY: "open"}})
+        self.assertEqual(self.fetch().items, [])
+
     def test_read_every_watch_interval(self):
         source = GitHubWatchSource(self.api, set(), ["me-gh"], [], matters=lambda: [], watch_minutes=15)
         self.assertTrue(source.due(None))
