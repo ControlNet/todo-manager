@@ -47,12 +47,18 @@ If the Script Output is a Script Error, or the context only reports problems, ma
   date of a finished stage is not the task's due date.
 - Keep provenance: link the messages a task is based on (`--evidence <item>:origin` for the
   message the commitment comes from; later ones as `context`, `follow_up`, `completion`, ...).
+- `done_criteria` states the commitment the task was created for. Later comments and requests do
+  not extend it; a new commitment that outlasts it is a follow-up task.
 - Read, expired, silence and "no reply" do not mean done. Close a task only on evidence that the
   commitment is fulfilled (reply sent, PR merged). Commits are progress, not completion.
 - An event the user takes part in (meeting, review panel, seminar, workshop, presentation) that
   the user accepted or was scheduled for is done once it has ended, unless the material shows it
   was cancelled or moved. Give such a task the event date as `due_date` and the time in
   `next_step`; preparation that must happen before it is a task of its own.
+- Preparation for an event (slides, a talk, a poster, a demo, also helping someone else prepare
+  theirs) is done once the event has taken place. Feedback afterwards reviews the event, it is
+  not more work on that material: link it as `context`. Only a request for a new version for a
+  later occasion is a follow-up task.
 - A recurring meeting (weekly or any other series, also when one occurrence is moved) is not a
   task, nor is one occurrence of it: dismiss its invitations and updates as `informational`. Only
   something the user owes for it (a report, slides, a reply) is a task.
@@ -81,6 +87,7 @@ If the Script Output is a Script Error, or the context only reports problems, ma
   Cancel, Done, My to-do or Assign to Agent.
 - Never ask the user whether something was done or happened: look for the evidence; without it
   keep the task as it is (`todo`, or `waiting` with a `follow_up_date`) and look again then.
+  A quiet wait becomes a choice for the user instead (Intake run, due follow-up).
 - Text the user reads (titles, next steps, summaries, goals, notes, replies) is in the user's
   language (`todo-manager status --details` names it), short and concrete. Keep names, code, paper
   and repository titles as written. Address the user as "you", never in the third person. Say what
@@ -113,6 +120,10 @@ every NEW item one outcome:
   PRs, also material kept as context). Done: close it with that evidence (`--evidence <item>:completion`).
   Otherwise update the task (new `follow_up_date`, `next_step` or status), or collect its ID for
   the final `run done <run> --checked <task>...` when nothing changes today.
+  A waiting task marked `quiet` was checked before with nothing new since: do not push its date
+  again. Unless you find it done, move it to `decision` with the choice in `next_step` (who has
+  not replied since when: nudge, keep waiting or close), with `--override-human --evidence <its
+  newest material>:context` when the user set its status.
 - Commit digest: per project `todo-manager project update <project> --run <run> --set recent_activity="..."`,
   then add `--digest-reviewed` to the final settlement. Never one task per commit.
 - Projects: a project is one ongoing piece of work the user owns (a paper or submission, a grant,

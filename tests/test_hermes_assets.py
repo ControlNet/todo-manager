@@ -111,6 +111,15 @@ class OptionalInvitationTests(unittest.TestCase):
         self.assertIn("A recurring meeting", text)
         self.assertIn("nor is one occurrence of it", text)
 
+    def test_preparing_for_an_event_ends_with_it(self):
+        # Feedback after a talk turned the slides task into more revision work (2026-11-28).
+        text = flat("cron/intake.md")
+        self.assertIn("Preparation for an event", text)
+        self.assertIn("Feedback afterwards reviews the event", text)
+
+    def test_done_criteria_do_not_grow_with_each_comment(self):
+        self.assertIn("Later comments and requests do not extend it", flat("cron/intake.md"))
+
     def test_automated_account_and_security_notices_are_not_tasks(self):
         text = flat("cron/intake.md")
         self.assertIn("new sign-in or device", text)

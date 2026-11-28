@@ -4,9 +4,9 @@ commands are issued by the test."""
 
 import threading
 
-from todo_manager import clock, db, gate_intake, health, ops, store
+from todo_manager import clock, db, gate_intake, health, hermes_install, ops, store
 from todo_manager.sources.base import Item
-from tests.flow import run_ctx, run_id_of, wake_of
+from tests.flow import intake_context, run_ctx, run_id_of, wake_of
 from tests.helpers import WorkspaceCase, mail
 from tests.test_intake import FakeSource
 
@@ -163,6 +163,52 @@ class FollowupTests(Base):
                           actor="human", origin="notion")
         clock.advance(days=1)
         self.assertIn("followups_due:1", self.gate())
+
+
+class QuietWaitTests(Base):
+    """A waiting task checked once with nothing new since is not pushed back silently a second
+    time: its next check says so, and the run puts the question to the user (a slides task stayed
+    waiting for weeks after the talk it was for, 2026-11-28)."""
+
+    def setUp(self):
+        super().setUp()
+        self.task = store.create_task(self.conn, "等 Bob 回复合同", origin="cli", actor="human", status="waiting",
+                                      waiting_on="Bob", follow_up_date=clock.local_date(self.cfg.tz).isoformat())
+
+    def check_once_and_wait(self):
+        run_id = run_id_of(self.gate())
+        ops.followup_checked(self.conn, self.cfg, self.ctx(run_id), self.task, "还在等 Bob")
+        ops.run_done(self.conn, self.cfg, run_id)
+        clock.advance(days=8)
+
+    def next_check(self):
+        out = self.gate()
+        self.assertIn("followups_due:1", out)
+        return intake_context(self.conn, self.cfg, run_id_of(out))
+
+    def test_the_second_check_with_nothing_new_is_marked_quiet(self):
+        self.check_once_and_wait()
+        self.assertIn("quiet: checked " + clock.local_date(self.cfg.tz, clock.parse(
+            self.conn.execute("SELECT updated_at FROM followup_checks").fetchone()[0])).isoformat(), self.next_check())
+
+    def test_new_material_since_the_check_is_not_quiet(self):
+        self.check_once_and_wait()
+        self.add_items(mail("q1", "t-bob", "Bob: 下周给你"))
+        store.link_evidence(self.conn, "task", self.task, self.item_id("q1"), "follow_up")
+        self.assertNotIn("quiet:", self.next_check())
+
+    def test_the_users_edit_since_the_check_is_not_quiet(self):
+        self.check_once_and_wait()
+        store.update_task(self.conn, self.task, {"waiting_on": "Bob 和法务"}, actor="human", origin="web")
+        self.assertNotIn("quiet:", self.next_check())
+
+    def test_the_first_check_is_not_quiet(self):
+        self.assertNotIn("quiet:", intake_context(self.conn, self.cfg, run_id_of(self.gate())))
+
+    def test_the_prompt_turns_a_quiet_wait_into_a_question(self):
+        prompt = " ".join(hermes_install.asset("cron/intake.md").split())
+        self.assertIn("marked `quiet`", prompt)
+        self.assertIn("move it to `decision`", prompt)
 
 
 class DuePassedTests(Base):

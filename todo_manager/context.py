@@ -244,6 +244,27 @@ def _latest_deliveries(conn: sqlite3.Connection, task: dict[str, Any]) -> list[s
     return out
 
 
+def _quiet(conn: sqlite3.Connection, cfg: Config, task: dict[str, Any]) -> str:
+    """For a waiting task already checked once with no new material and no edit by the user
+    since: when that check was and its newest material, for the evidence of the question."""
+    if task["status"] != "waiting":
+        return ""
+    checked = conn.execute("SELECT MAX(updated_at) FROM followup_checks WHERE task_id=? AND state='done'",
+                           (task["id"],)).fetchone()[0]
+    if not checked or conn.execute(
+            "SELECT 1 FROM evidence_links WHERE entity_type='task' AND entity_id=? AND created_at>?"
+            " UNION ALL SELECT 1 FROM history WHERE entity_type='task' AND entity_id=? AND actor='human' AND at>?",
+            (task["id"], checked, task["id"], checked)).fetchone():
+        return ""
+    newest = conn.execute(
+        "SELECT s.id, s.occurred_at FROM evidence_links e JOIN source_items s ON s.id=e.source_item_id"
+        " WHERE e.entity_type='task' AND e.entity_id=? ORDER BY s.occurred_at DESC LIMIT 1", (task["id"],)).fetchone()
+    day = clock.local_date(cfg.tz, clock.parse(checked)).isoformat()
+    material = (f"; newest material {newest['id']} of {clock.local_date(cfg.tz, clock.parse(newest['occurred_at']))}"
+                if newest else "")
+    return f" | quiet: checked {day}, nothing new since{material}"
+
+
 def intake(conn: sqlite3.Connection, cfg: Config, run_id: str, *, followups: list[str],
            digest: dict[str, Any] | None, problems: list[dict[str, Any]], reasons: list[str],
            due_passed: list[str] | None = None) -> str:
@@ -287,14 +308,16 @@ def intake(conn: sqlite3.Connection, cfg: Config, run_id: str, *, followups: lis
         for tid in followups:
             task = store.get_task(conn, tid)
             if task:
-                out.append("- " + ("(due date passed) " if tid in passed else "") + task_line(task, titles))
+                out.append("- " + ("(due date passed) " if tid in passed else "") + task_line(task, titles)
+                           + _quiet(conn, cfg, task))
         if any((store.get_task(conn, tid) or {}).get("status") == "decision" for tid in followups):
             out.append("A task in `decision` waits for the user's choice: never ask whether it was done and do not"
                        " choose for the user; look for new material on it and update its question or next step,"
                        " else report it `--checked`.")
         if passed:
             out.append("An event the user takes part in (meeting, review panel, seminar, workshop, presentation)"
-                       " is done once it has ended: close it with its invitation or acceptance as evidence,"
+                       " is done once it has ended, and so is the preparation for it (slides, a talk):"
+                       " close it with its invitation or acceptance as evidence,"
                        " unless the material shows it was cancelled or moved (then set the new date).")
 
     batches = run_batches(conn, run_id)
