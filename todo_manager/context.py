@@ -244,9 +244,13 @@ def _latest_deliveries(conn: sqlite3.Connection, task: dict[str, Any]) -> list[s
     return out
 
 
+QUIET_DAYS = 14   # a wait shorter than this is still young, however often it was checked
+
+
 def _quiet(conn: sqlite3.Connection, cfg: Config, task: dict[str, Any]) -> str:
     """For a waiting task already checked once with no new material and no edit by the user
-    since: when that check was and its newest material, for the evidence of the question."""
+    since, its newest material (else its creation) at least ``QUIET_DAYS`` old: when that check
+    was and its newest material, for the evidence of the question."""
     if task["status"] != "waiting":
         return ""
     checked = conn.execute("SELECT MAX(updated_at) FROM followup_checks WHERE task_id=? AND state='done'",
@@ -259,6 +263,8 @@ def _quiet(conn: sqlite3.Connection, cfg: Config, task: dict[str, Any]) -> str:
     newest = conn.execute(
         "SELECT s.id, s.occurred_at FROM evidence_links e JOIN source_items s ON s.id=e.source_item_id"
         " WHERE e.entity_type='task' AND e.entity_id=? ORDER BY s.occurred_at DESC LIMIT 1", (task["id"],)).fetchone()
+    if clock.parse(newest["occurred_at"] if newest else task["created_at"]) > clock.now() - timedelta(days=QUIET_DAYS):
+        return ""
     day = clock.local_date(cfg.tz, clock.parse(checked)).isoformat()
     material = (f"; newest material {newest['id']} of {clock.local_date(cfg.tz, clock.parse(newest['occurred_at']))}"
                 if newest else "")

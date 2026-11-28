@@ -3,6 +3,7 @@ concurrently) and R06 (a follow-up is handled only when the run records it). The
 commands are issued by the test."""
 
 import threading
+from datetime import date
 
 from todo_manager import clock, db, gate_intake, health, hermes_install, ops, store
 from todo_manager.sources.base import Item
@@ -179,25 +180,33 @@ class QuietWaitTests(Base):
         run_id = run_id_of(self.gate())
         ops.followup_checked(self.conn, self.cfg, self.ctx(run_id), self.task, "还在等 Bob")
         ops.run_done(self.conn, self.cfg, run_id)
-        clock.advance(days=8)
+        follow = date.fromisoformat(store.get_task(self.conn, self.task)["follow_up_date"][:10])
+        clock.advance(days=(follow - clock.local_date(self.cfg.tz)).days + 1)
 
     def next_check(self):
         out = self.gate()
         self.assertIn("followups_due:1", out)
         return intake_context(self.conn, self.cfg, run_id_of(out))
 
+    def test_a_young_wait_is_not_quiet(self):
+        self.check_once_and_wait()       # checked, and only eight days old
+        self.assertNotIn("quiet:", self.next_check())
+
     def test_the_second_check_with_nothing_new_is_marked_quiet(self):
         self.check_once_and_wait()
+        self.check_once_and_wait()
         self.assertIn("quiet: checked " + clock.local_date(self.cfg.tz, clock.parse(
-            self.conn.execute("SELECT updated_at FROM followup_checks").fetchone()[0])).isoformat(), self.next_check())
+            self.conn.execute("SELECT MAX(updated_at) FROM followup_checks").fetchone()[0])).isoformat(), self.next_check())
 
     def test_new_material_since_the_check_is_not_quiet(self):
+        self.check_once_and_wait()
         self.check_once_and_wait()
         self.add_items(mail("q1", "t-bob", "Bob: 下周给你"))
         store.link_evidence(self.conn, "task", self.task, self.item_id("q1"), "follow_up")
         self.assertNotIn("quiet:", self.next_check())
 
     def test_the_users_edit_since_the_check_is_not_quiet(self):
+        self.check_once_and_wait()
         self.check_once_and_wait()
         store.update_task(self.conn, self.task, {"waiting_on": "Bob 和法务"}, actor="human", origin="web")
         self.assertNotIn("quiet:", self.next_check())
